@@ -1,0 +1,27 @@
+*.sh text eol=lf
+tui/** text eol=lf
+test/** text eol=lf
+.github/** text eol=lf
+
+# Runnable example configs a reader may copy straight onto a Linux host: keep
+# them LF so a CRLF checkout on a Windows clone cannot ship broken snapshots.
+docs/examples/*.conf text eol=lf
+
+# The two GENERATED protocol views. reviewctl.sh writes LF and --verify compares
+# byte for byte, so a checkout that rewrites them to CRLF makes the ledger look
+# hand-edited on every Windows clone -- a false alarm about the one file whose
+# whole purpose is to be trustworthy.
+docs/internal/reviews/REVIEW_LEDGER.md text eol=lf
+docs/project/OPEN-THREADS.md text eol=lf
+
+# Everything reviewctl PARSES, not just the two views it writes.
+#
+# The views were pinned when a CRLF checkout made --verify's byte comparison
+# fail. The inputs were not, and that is worse than a failing comparison: a
+# machine header is matched by a pattern anchored to `-->` at end of line, so on
+# a CRLF clone the line ends `-->\r`, the header is silently INVISIBLE, and the
+# Windows implementer derives a different review state than CI does -- quietly,
+# with no error. Measured 2026-08-14: a delivery recorded in DELIVERIES.md was
+# open on Linux and absent locally, and only the PR check disagreed.
+docs/internal/reviews/**/*.md text eol=lf
+docs/project/DELIVERIES.md text eol=lf

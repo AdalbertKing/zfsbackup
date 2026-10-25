@@ -1,0 +1,547 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""grid.py -- TABELA SZCZEBLI w curses: szczebel x liczba x kratka.
+
+Wyjatek od zasady "formularze w whiptail" (wlasciciel, 2026-10-09): whiptail nie ma
+wiersza z polem liczby i dwiema kratkami, a takie okno -- jak w menedzerach migawek
+QNAP/Synology -- jest "duzo bardziej intuicyjne". Wolane z kreatorow whiptail
+(tui/template.sh: szablon na F5; tui/new-relation.sh: retencja u zrodla) w jednym
+miejscu; reszta kreatorow zostaje w whiptail.
+
+    grid.py --spec SPEC.json --out OUT.json [--keys k1,k2,... [--width W --height H]]
+
+SPEC: {"title", "hint", "note": [linie], "head": [3 naglowki kolumn],
+       "fields": [{"key","label","value","edit":bool}],   -- nad tabela (nazwa)
+       "after":  [{"key","label","value","edit":bool}],   -- pod tabela (opis)
+       "rows": [{"key","label","glabel","on":bool,"can_off":bool,"value":"24",
+                 "unit":"godz.","ref":"24 godz."|null,"q":bool|null,"family":"..."}],
+       "taken": [nazwy zajete], "name_key": "name", "auto_desc": "desc"|null,
+       "choice": {"key","label","value","options":[{"key","label","help":[linie]}],
+                  "locked": "dlaczego nie da sie zmienic"|null}}   -- (*) wybor nad tabela
+      wiersz moze miec "units": {opcja: jednostka} -- jednostka liczby zalezy od wyboru.
+OUT:  {"action":"next"|"back", "fields":{key: value}, "rows":[{"key","on","value","q"}]}
+      (wybor jest w "fields" pod swoim kluczem)
+
+--keys: bez terminala -- nazwy klawiszy (up, down, left, right, tab, btab, space,
+enter, esc, bs, del, home, end, albo jeden znak), potem wydruk ekranu; tak to
+sprawdzaja testy. W polu tekstowym (nazwa, opis) strzalki, Home i End chodza po
+tekscie, Backspace i Del kasuja przy kursorze (wlasciciel 2026-10-09, uwaga 2).
+Okno samo nie zapisuje niczego poza OUT -- zapis robi czasownik w kreatorze.
+"""
+import argparse
+import json
+import os
+import re
+import sys
+
+
+def _load_cat():
+    """Katalog jezyka okna: ZFS_TUI_LANG dziedziczony z GUI (wt-lib.sh go eksportuje); pl = pusty."""
+    lang = os.environ.get("ZFS_TUI_LANG") or "en"
+    if lang == "pl":
+        return {}
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "lang", lang + ".json"),
+                  encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+LANG_CAT = _load_cat()
+
+
+def _(s):
+    """Tekst okna w biezacym jezyku; bez wpisu w katalogu -- polski (teksty ze SPEC tez tu przechodza)."""
+    return LANG_CAT.get(s, s)
+
+NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+class Grid(object):
+    def __init__(self, spec):
+        self.spec = spec
+        self.fields = [dict(f) for f in spec.get("fields", [])]
+        self.after = [dict(f) for f in spec.get("after", [])]
+        self.rows = [dict(r) for r in spec.get("rows", [])]
+        for r in self.rows:
+            r["value"] = str(r.get("value") or "")
+            # X1 (wlasciciel 2026-10-12): szczebel wylaczony ma "koherentne" ODZNACZONE.
+            # Wartosc z szablonu czeka w _q i wraca, gdy szczebel zostanie wlaczony.
+            if r.get("q") is not None and not r.get("on"):
+                r["_q"] = bool(r.get("base_q", r["q"]))
+                r["q"] = False
+        self.choice = dict(spec["choice"]) if spec.get("choice") else None
+        self._units()
+        self.desc_key = spec.get("auto_desc")
+        self.desc_touched = False
+        self.msg = ""
+        self.shown = []      # --keys: kazdy komunikat pokazany w trakcie (test go widzi)
+        self.done = None
+        self.items = self._items()
+        self.cur = 0
+        # kursor startuje na pierwszej rzeczy do zmiany w tabeli (albo na nazwie)
+        for i, it in enumerate(self.items):
+            if it[0] in ("field", "opt") or it[0] in ("val", "on", "q"):
+                self.cur = i
+                break
+        self._auto_desc()
+
+    # jednostka liczby wynika z wyboru (np. WIEK: "dni", GFS/PŁASKI: bez jednostki)
+    def _units(self):
+        if not self.choice:
+            return
+        for r in self.rows:
+            if "units" in r:
+                r["unit"] = r["units"].get(self.choice["value"], "")
+
+    # -- elementy, po ktorych chodzi kursor: (rodzaj, indeks, linia)
+    def _items(self):
+        out = []
+        for i, f in enumerate(self.fields):
+            if f.get("edit", True):
+                out.append(("field", i, "f%d" % i))
+        if self.choice:
+            for j, _o in enumerate(self.choice["options"]):
+                out.append(("opt", j, "c"))
+        for i, r in enumerate(self.rows):
+            if r.get("can_off", True):
+                out.append(("on", i, "r%d" % i))
+            if r.get("editable", True) and r.get("value") != "-":
+                out.append(("val", i, "r%d" % i))
+            if r.get("q") is not None:
+                out.append(("q", i, "r%d" % i))
+        for i, f in enumerate(self.after):
+            if f.get("edit", True):
+                out.append(("after", i, "a%d" % i))
+        out.append(("btn", "next", "b"))
+        out.append(("btn", "back", "b"))
+        return out
+
+    def _field(self, kind, i):
+        return self.fields[i] if kind == "field" else self.after[i]
+
+    def _auto_desc(self):
+        if not self.desc_key or self.desc_touched:
+            return
+        parts, qs = [], []
+        for r in self.rows:
+            if r.get("on") and r.get("value") not in ("", "-", None) and r.get("glabel"):
+                parts.append(u"%s %s" % (r["value"], r["glabel"]))
+            if r.get("on") and r.get("q"):
+                qs.append(r.get("glabel") or r.get("label"))
+        txt = u"%s; %s" % (u" + ".join(parts) or _(u"bez szczebli"),
+                           (_(u"zamraża: %s") % u", ".join(qs)) if qs else _(u"bez zamrażania"))
+        for f in self.after + self.fields:
+            if f.get("key") == self.desc_key:
+                f["value"] = txt
+
+    # -- klawisze
+    def key(self, k):
+        if self.msg:
+            self.shown.append(self.msg)
+        self.msg = ""
+        kind, idx, line = self.items[self.cur]
+        if kind in ("field", "after") and k in ("left", "right", "home", "end", "del", "bs"):
+            self._edit(kind, idx, k)
+            return
+        if k in ("tab", "right") and not (k == "right" and kind in ("field", "after")):
+            if k == "tab" or self._same_line(self.cur + 1, line):
+                self.cur = min(self.cur + 1, len(self.items) - 1)
+            return
+        if k in ("btab", "left") and not (k == "left" and kind in ("field", "after")):
+            if k == "btab" or self._same_line(self.cur - 1, line):
+                self.cur = max(self.cur - 1, 0)
+            return
+        if k == "down":
+            self._move_line(+1)
+            return
+        if k == "up":
+            self._move_line(-1)
+            return
+        if k == "esc":
+            self.done = "back"
+            return
+        if k == "enter":
+            if kind == "btn" and idx == "back":
+                self.done = "back"
+            elif self.validate():
+                self.done = "next"
+            return
+        if k == "space" and kind == "opt":
+            if self.choice.get("locked"):
+                self.msg = self.choice["locked"]
+            else:
+                self.choice["value"] = self.choice["options"][idx]["key"]
+                self._units()
+                self._auto_desc()
+            return
+        if k == "space":
+            if kind == "on":
+                self.toggle_on(idx)
+            elif kind == "q":
+                r = self.rows[idx]
+                if r.get("on"):
+                    r["q"] = not r["q"]
+                    self._auto_desc()
+            elif kind in ("field", "after"):
+                self._type(kind, idx, " ")
+            return
+        if k == "bs":
+            if kind == "val":
+                self.rows[idx]["value"] = self.rows[idx]["value"][:-1]
+                self._auto_desc()
+            return
+        if len(k) == 1 and k.isprintable():
+            if kind == "val":
+                if k.isdigit() and len(self.rows[idx]["value"]) < 5 and self.rows[idx].get("on"):
+                    self.rows[idx]["value"] += k
+                    self._auto_desc()
+            elif kind in ("field", "after"):
+                self._type(kind, idx, k)
+
+    def _pos(self, f):
+        p = f.get("pos")
+        if p is None or p > len(f["value"]):
+            p = len(f["value"])
+        return max(0, p)
+
+    def _type(self, kind, idx, ch):
+        f = self._field(kind, idx)
+        p = self._pos(f)
+        if len(f["value"]) < 60:
+            f["value"] = f["value"][:p] + ch + f["value"][p:]
+            f["pos"] = p + 1
+        if f.get("key") == self.desc_key:
+            self.desc_touched = True
+
+    def _edit(self, kind, idx, k):
+        """Kursor w polu tekstowym: chodzi po tekscie, kasuje przy sobie."""
+        f = self._field(kind, idx)
+        v, p = f["value"], self._pos(f)
+        if k == "left":
+            p = max(0, p - 1)
+        elif k == "right":
+            p = min(len(v), p + 1)
+        elif k == "home":
+            p = 0
+        elif k == "end":
+            p = len(v)
+        elif k == "bs" and p > 0:
+            v, p = v[:p - 1] + v[p:], p - 1
+        elif k == "del" and p < len(v):
+            v = v[:p] + v[p + 1:]
+        if v != f["value"] and f.get("key") == self.desc_key:
+            self.desc_touched = True
+        f["value"], f["pos"] = v, p
+
+    def _same_line(self, j, line):
+        return 0 <= j < len(self.items) and self.items[j][2] == line
+
+    def _move_line(self, d):
+        line = self.items[self.cur][2]
+        col = [it for it in self.items if it[2] == line].index(self.items[self.cur])
+        j = self.cur
+        while 0 <= j + d < len(self.items):
+            j += d
+            if self.items[j][2] != line:
+                nl = self.items[j][2]
+                same = [k for k, it in enumerate(self.items) if it[2] == nl]
+                self.cur = same[min(col, len(same) - 1)]
+                return
+
+    def toggle_on(self, i):
+        r = self.rows[i]
+        if r.get("on"):
+            fam = r.get("family")
+            others = [x for j, x in enumerate(self.rows) if j != i and x.get("on") and fam and x.get("family") == fam]
+            if fam and not others:
+                self.msg = _(u"Nie można wyłączyć: tylko ten szczebel usuwa stare migawki %s -- bez niego rosłyby bez końca.") % fam
+                return
+            r["on"] = False
+            if r.get("q") is not None:
+                r["_q"] = bool(r["q"])
+                r["q"] = False
+        else:
+            r["on"] = True
+            if r.get("q") is not None:
+                r["q"] = bool(r.get("_q", r.get("base_q", False)))
+        self._auto_desc()
+
+    def validate(self):
+        nk = self.spec.get("name_key")
+        for f in self.fields + self.after:
+            if f.get("key") == nk:
+                v = f["value"].strip()
+                if not v or not NAME_RE.match(v):
+                    self.msg = _(u"Zła nazwa: tylko litery, cyfry, kropka, myślnik, podkreślenie.")
+                    return False
+                if v in (self.spec.get("taken") or []):
+                    self.msg = _(u"Szablon '%s' już jest -- podaj inną nazwę.") % v
+                    return False
+                f["value"] = v
+        countable = [r for r in self.rows if r.get("can_off", True)]
+        if countable and not any(r.get("on") for r in countable):
+            self.msg = _(u"Zostaw włączony choć jeden szczebel.")
+            return False
+        for r in self.rows:
+            if r.get("on") and r.get("value") not in ("-",) and r.get("editable", True):
+                v = r["value"]
+                if not v.isdigit() or int(v) < 1:
+                    self.msg = _(u"%s: podaj liczbę większą od zera (albo wyłącz szczebel).") % r["label"]
+                    return False
+        return True
+
+    def result(self):
+        fields = {}
+        for f in self.fields + self.after:
+            fields[f["key"]] = f["value"]
+        if self.choice:
+            fields[self.choice["key"]] = self.choice["value"]
+        return {"action": self.done or "back", "fields": fields,
+                "rows": [{"key": r["key"], "on": bool(r.get("on")), "value": r.get("value"),
+                          "q": r.get("q")} for r in self.rows]}
+
+    # -- obraz: lista linii + (linia, kolumna od, kolumna do) kursora
+    def render(self, width):
+        w = max(56, min(width - 4, 78))
+        inner = w - 4
+        lines, spans = [], {}
+        hint = _(self.spec.get("hint") or u"↑↓ wiersz ←→ pole spacja kratka cyfry liczba Enter dalej  Esc wraca")
+
+        def add(text, key=None, segs=None):
+            lines.append(text)
+            if segs:
+                for kk, a, b in segs:
+                    spans[kk] = (len(lines) - 1, a, b)
+
+        add(u"")
+        for i, f in enumerate(self.fields):
+            lab = u" %-7s " % (_(f["label"]) + ":")
+            val = f["value"]
+            add(lab + (val + u"_" * max(0, 30 - len(val))) if f.get("edit", True) else lab + val,
+                segs=[(("field", i), len(lab), len(lab) + max(30, len(val)))] if f.get("edit", True) else None)
+        if self.fields:
+            add(u"")
+        if self.choice:
+            ch = self.choice
+            lab = u" %-7s " % (_(ch["label"]) + ":")
+            text, segs = lab, []
+            for j, o in enumerate(ch["options"]):
+                mark = u"(*)" if o["key"] == ch["value"] else u"( )"
+                segs.append((("opt", j), len(text), len(text) + 3))
+                text += u"%s %s   " % (mark, _(o["label"]))
+            add(text.rstrip(), segs=segs)
+            sel = [o for o in ch["options"] if o["key"] == ch["value"]]
+            for hl in (sel[0].get("help") or []) if sel else []:
+                add(u"   " + _(hl))
+            if ch.get("locked"):
+                add(u"   " + _(ch["locked"]))
+            add(u"")
+        head = [_(x) for x in (self.spec.get("head") or [u"SZCZEBEL", u"TRZYMA", u""])]
+        add(u"      %-16s %-14s %s" % tuple((head + [u"", u"", u""])[:3]))
+        for i, r in enumerate(self.rows):
+            on = u"[X]" if r.get("on") else u"[ ]"
+            if not r.get("can_off", True):
+                on = u"   "
+            val = r.get("value")
+            if r.get("ref") is not None:
+                mid = u"%-14s" % r["ref"]
+                vtxt = (u"%s %s" % (val, r.get("unit") or "")).strip() if r.get("on") else u"—"
+                text = u"  %s %-16s %s %s" % (on, _(r["label"]), mid, vtxt)
+                vpos = 2 + 3 + 1 + 16 + 1 + 14 + 1
+                qtxt = None
+            else:
+                vtxt = (u"%s %s" % (val, r.get("unit") or "")).strip() if (val not in ("", "-") and r.get("on")) else u"—"
+                text = u"  %s %-16s %-13s" % (on, _(r["label"]), vtxt)
+                vpos = 2 + 3 + 1 + 16 + 1
+                qtxt = (u"[X]" if r.get("q") else u"[ ]") if r.get("q") is not None else (u" — " if r.get("ref") is None else None)
+                if qtxt is not None:
+                    text += u" " + qtxt
+            qpos = vpos + 14
+            segs = [(("on", i), 2, 5), (("val", i), vpos, vpos + max(len(vtxt), 3)), (("q", i), qpos, qpos + 3)]
+            add(text, segs=segs)
+        add(u"")
+        for i, f in enumerate(self.after):
+            lab = u" %-7s " % (_(f["label"]) + ":")
+            val = f["value"]
+            add(lab + val + (u"_" if f.get("edit", True) else u""),
+                segs=[(("after", i), len(lab), len(lab) + max(1, len(val)))])
+        for n in self.spec.get("note") or []:
+            add(u" " + _(n))
+        add(u"")
+        bl = u" " * max(1, (inner - 26) // 2)
+        nxt, back = u"< %s >" % _(u"Dalej"), u"< %s >" % _(u"Wstecz")
+        add(bl + nxt + u"      " + back,
+            segs=[(("btn", "next"), len(bl), len(bl) + len(nxt)),
+                  (("btn", "back"), len(bl) + len(nxt) + 6, len(bl) + len(nxt) + 6 + len(back))])
+        msg_rows = []
+        if self.msg:
+            words, cur_l = self.msg.split(u" "), u""
+            for wd_ in words:
+                if cur_l and len(cur_l) + 1 + len(wd_) > inner - 1:
+                    add(u" " + cur_l); msg_rows.append(len(lines) - 1); cur_l = wd_
+                else:
+                    cur_l = (cur_l + u" " + wd_) if cur_l else wd_
+            add(u" " + cur_l); msg_rows.append(len(lines) - 1)
+        else:
+            add(u"")
+        title = u" %s " % _(self.spec.get("title") or u"Szczeble")
+        if len(title) > w - 4:      # W6: dlugi tytul wychodzil poza ramke -- ucinamy z '…'
+            title = title[:max(1, w - 6)] + u"… "
+        top = u"┌─" + title + u"─" * max(0, w - 3 - len(title)) + u"┐"
+        bot = u"└─ " + hint[:w - 6] + u" " + u"─" * max(0, w - 5 - len(hint[:w - 6])) + u"┘"
+        out = [top] + [u"│" + (l[:w - 2]).ljust(w - 2) + u"│" for l in lines] + [bot]
+        kind, idx, _seg = self.items[self.cur]
+        sp = spans.get((kind, idx))
+        focus = (sp[0] + 1, sp[1] + 1, sp[2] + 1) if sp else None
+        self.caret = None
+        if sp and kind in ("field", "after"):
+            self.caret = (sp[0] + 1, sp[1] + 1 + self._pos(self._field(kind, idx)))
+        self.msg_rows = [r + 1 for r in msg_rows]
+        return out, focus
+
+
+KEYNAMES = {"\t": "tab", " ": "space", "\n": "enter", "\r": "enter", "\x1b": "esc", "\x7f": "bs", "\x08": "bs"}
+
+# Home/End z PuTTY (i tmuxa) przy TERM=xterm: terminal wysyła ESC [ 1 ~ / ESC [ 4 ~, a opis
+# terminala xterm zna tylko ESC O H / ESC O F -- curses oddaje wtedy GOŁY Esc i resztę jako
+# znaki, więc Home/End działały jak Wstecz (kampania 2026-10-22, drzewo w kreatorze). Po gołym
+# Esc dobieramy resztę ciągu sami, jak zfs-tui.py.
+ESCSEQ = {"[A": "up", "[B": "down", "[C": "right", "[D": "left", "OA": "up", "OB": "down", "OC": "right", "OD": "left",
+          "[H": "home", "OH": "home", "[1~": "home", "[7~": "home", "[F": "end", "OF": "end", "[4~": "end", "[8~": "end",
+          "[5~": "pgup", "[6~": "pgdn", "[3~": "del"}
+
+
+def esc_tail(scr):
+    """Po gołym Esc: '' = prawdziwy Esc, nazwa klawisza, albo None (nieznany ciąg -- pomiń)."""
+    import curses
+    import time
+    seq = ""
+    scr.nodelay(True)
+    try:
+        t0 = time.time()
+        while time.time() - t0 < 0.05 and len(seq) < 6:
+            try:
+                c = scr.get_wch()
+            except curses.error:
+                time.sleep(0.005)
+                continue
+            if not isinstance(c, str):
+                break
+            seq += c
+            if seq in ESCSEQ or seq[0] not in "[O" or seq.endswith("~") or (len(seq) == 2 and seq[1].isalpha()):
+                break
+    finally:
+        scr.nodelay(False)
+    if not seq:
+        return ""
+    if seq[0] not in "[O":          # Esc, a zaraz po nim zwykły znak: oddaj znak, zgłoś Esc
+        for ch in reversed(seq):
+            try:
+                curses.ungetch(ord(ch))
+            except (curses.error, OverflowError):
+                pass
+        return ""
+    return ESCSEQ.get(seq)
+
+
+def run_curses(g):
+    import curses
+    import locale
+    locale.setlocale(locale.LC_ALL, "")
+
+    def main(scr):
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        curses.set_escdelay(25) if hasattr(curses, "set_escdelay") else None
+        if curses.has_colors():
+            curses.start_color()
+            curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)
+            curses.init_pair(2, curses.COLOR_BLACK, curses.COLOR_CYAN)
+            curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLUE)
+        scr.keypad(True)
+        km = {curses.KEY_UP: "up", curses.KEY_DOWN: "down", curses.KEY_LEFT: "left", curses.KEY_RIGHT: "right",
+              curses.KEY_BTAB: "btab", curses.KEY_BACKSPACE: "bs", curses.KEY_ENTER: "enter", 10: "enter", 13: "enter",
+              curses.KEY_HOME: "home", curses.KEY_END: "end", curses.KEY_DC: "del",
+              9: "tab", 27: "esc", 127: "bs", 8: "bs", 32: "space"}
+        while g.done is None:
+            h, wd = scr.getmaxyx()
+            lines, focus = g.render(wd)
+            scr.erase()
+            base = curses.color_pair(1) if curses.has_colors() else curses.A_NORMAL
+            y0 = max(0, (h - len(lines)) // 2)
+            x0 = max(0, (wd - len(lines[0])) // 2)
+            for y, l in enumerate(lines):
+                if y0 + y >= h - 1:
+                    break
+                try:
+                    scr.addstr(y0 + y, x0, l[:wd - x0 - 1], base)
+                except curses.error:
+                    pass
+            if focus:
+                fy, a, b = focus
+                if y0 + fy < h - 1:
+                    try:
+                        scr.addstr(y0 + fy, x0 + a, lines[fy][a:b], (curses.color_pair(2) if curses.has_colors() else curses.A_REVERSE) | curses.A_BOLD)
+                    except curses.error:
+                        pass
+            for my in getattr(g, "msg_rows", []):
+                if y0 + my < h - 1:
+                    try:
+                        scr.addstr(y0 + my, x0 + 1, lines[my][1:-1][:wd - x0 - 2], (curses.color_pair(3) if curses.has_colors() else curses.A_BOLD))
+                    except curses.error:
+                        pass
+            caret = getattr(g, "caret", None)
+            try:
+                if caret and y0 + caret[0] < h - 1:
+                    curses.curs_set(1)
+                    scr.move(y0 + caret[0], x0 + caret[1])
+                else:
+                    curses.curs_set(0)
+            except curses.error:
+                pass
+            scr.refresh()
+            ch = scr.get_wch()
+            if isinstance(ch, str):
+                k = KEYNAMES.get(ch, ch)
+                if k == "esc":
+                    k = esc_tail(scr)
+                    k = "esc" if k == "" else (k or "")
+            else:
+                k = km.get(ch, "")
+            if k:
+                g.key(k)
+    curses.wrapper(main)
+
+
+def main(argv):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--spec", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--keys", default=None, help="bez terminala: klawisze po przecinku, potem wydruk ekranu")
+    ap.add_argument("--width", type=int, default=80)
+    a = ap.parse_args(argv)
+    with open(a.spec, encoding="utf-8") as f:
+        g = Grid(json.load(f))
+    if a.keys is not None:
+        for k in [x for x in a.keys.split(",") if x != ""]:
+            if g.done:
+                break
+            g.key({"comma": ","}.get(k, k))
+        lines, focus = g.render(a.width)
+        msgs = g.shown + ([g.msg] if g.msg else [])
+        txt = "\n".join(lines) + "\n" + "".join("MSG: %s\n" % m for m in msgs)
+        sys.stdout.buffer.write(txt.encode("utf-8"))
+        sys.stdout.flush()
+    else:
+        run_curses(g)
+    with open(a.out, "w", encoding="utf-8") as f:
+        json.dump(g.result(), f, ensure_ascii=False)
+    return 0 if g.done == "next" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
