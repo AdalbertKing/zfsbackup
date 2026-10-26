@@ -9530,7 +9530,24 @@ Taking over older jobs (a v4 config written by hand): remove their sections firs
         # snapshot and transfers nothing. Passing an empty second argument
         # happened to work, but it made the seed and the job it is seeding
         # differ in the one place they must not.
-        if [ "$no_copy" -eq 1 ]; then
+        if [ "$no_copy" -eq 1 ] && [ "${#seed_x[@]}" -gt 0 ] && [ "$lb_recursion" = flat ]; then
+            # EXCLUSIONS, NOTHING COPIED (lab campaign 2026-10-26, pve10): -X shapes a
+            # transfer, it does not keep snapsend -R from snapshotting -- the unticked
+            # child got the seed snapshot, and no prune line ever takes it away. So each
+            # dataset under the root that no exclusion matches is seeded on its own.
+            local _sd _sok=1
+            while IFS= read -r _sd; do
+                [ -n "$_sd" ] || continue
+                printf '%s\n' "$_sd" | grep -qE -- "$(IFS='|'; printf '%s' "${lb_excl[*]}")" && continue
+                bash "$SNAPSEND" -m "$seed_prefix" -v 3 "$_sd" || _sok=0
+            done < <(zfs list -H -o name -r -- "$sr" 2>/dev/null)
+            if [ "$_sok" -eq 1 ]; then
+                log "  OK: $sr (snapshot only, the excluded datasets left out)"
+            else
+                warn "  FAILED: $sr (snapshot only)"
+                seed_failed=$((seed_failed + 1))
+            fi
+        elif [ "$no_copy" -eq 1 ]; then
             if bash "$SNAPSEND" -m "$seed_prefix" -v 3 ${seed_rec[@]+"${seed_rec[@]}"} "$sr"; then
                 log "  OK: $sr (snapshot only -- nothing is copied)"
             else
@@ -14407,6 +14424,15 @@ cmd_monitor() {
     # check runs in the background (at most 8 at once) into its own file; the report is
     # printed afterwards in the cron order, with the same fields as before.
     local mtmp; mtmp=$(mktemp -d) || die "mktemp failed"
+    # ONE SSH CONNECTION PER HOST (owner 2026-10-26: return to the GUI took 16 s on pve9). The
+    # frozen check-snap-age opens a new ssh for every dataset of a line -- five remote datasets
+    # took 11 s. The reader hands it a shared master (ssh ControlMaster, through the -O options
+    # the engine already passes to ssh) in a private 0700 directory; the master lingers 60 s,
+    # so the next GUI refresh reuses it. The cron lines are untouched.
+    local mux=""
+    if [ -n "${HOME:-}" ] && mkdir -p -m 0700 "$HOME/.ssh/zb-mux" 2>/dev/null        && [ -O "$HOME/.ssh/zb-mux" ] && chmod 0700 "$HOME/.ssh/zb-mux" 2>/dev/null; then
+        mux="$HOME/.ssh/zb-mux"
+    fi
     local mi=0
     local -a M_ACCT=() M_SCHED=() M_LABEL=() M_DS=() M_PAT=() M_WARN=() M_CRIT=() M_REC=() \
         M_EXCL=() M_ENGN=() M_ENGR=() M_PARSED=() M_GATE=()
@@ -14500,6 +14526,7 @@ cmd_monitor() {
                 local _x
                 for _x in ${excl//,/ }; do [ -n "$_x" ] && runargs+=(-x "$_x"); done
                 runargs+=(${sshargs[@]+"${sshargs[@]}"})
+                [ -n "$mux" ] && [ "${#sshargs[@]}" -gt 0 ]                     && runargs+=(-O ControlMaster=auto -O "ControlPath=$mux/%C" -O ControlPersist=60)
                 runargs+=("$ds" "$pat" "$warn" "$crit")
                 { bash "$CHECKSNAPAGE" "${runargs[@]}" >"$mtmp/$mi.out" 2>&1
                   echo $? >"$mtmp/$mi.rc"; } </dev/null &
@@ -15167,6 +15194,11 @@ cmd_delete_relation() {
     if [ "$destroy" -eq 1 ]; then
         local d
         for d in $copies; do
+            # A copy under another copy of the list went with its parent's -r: gone is done,
+            # not a leftover (lab 2026-10-26: [-] parent + [x] children, false "LEFTOVERS").
+            if ! zfs list -H -o name -- "$d" >/dev/null 2>&1; then
+                log "delete-relation: 4/4 $d -- already gone (destroyed with its parent)"; continue
+            fi
             log "delete-relation: 4/4 zfs destroy -r $d"
             zfs destroy -r "$d" || { rc=1; log "!!! delete-relation: could not destroy $d"; continue; }
             # The empty shells above it (<target>/<peer>/<pool>...) were created for this
@@ -15336,6 +15368,19 @@ local_source_change() {   # <add|remove> <name> <dataset> <yes 0|1>
     record_replace_fields "$cpath" REQUESTED_DATASETS "$now" MANAGED_DATASETS "$out" \
         || warn "$how-source: the config is installed, but the record $cpath could not be updated -- its source list is stale (the config decides)"
     return 0
+}
+
+# The paths of one relation's marked sections of one kind, space-separated (the record's
+# list form): [dataset:X] / [prune:X] whose body carries the marker. A remote prune scope
+# (account@host:ds) is not a local path and is left out.
+relation_marked_headers() {   # <config> <marker line> <dataset|prune>
+    awk -v mk="$2" -v kind="$3" '
+        function out() { if (hit && p != "" && p !~ /@/) print p }
+        /^\[/ { out(); p = ""; hit = 0
+                 if (index($0, "[" kind ":") == 1) { p = $0; sub(/^\[[a-z]+:/, "", p); sub(/\]$/, "", p) }
+                 next }
+        { t = $0; sub(/^[ \t]+/, "", t); if (t == mk) hit = 1 }
+        END { out() }' "$1" | paste -sd' ' -
 }
 
 record_replace_fields() {   # <record> <FIELD> <value> [<FIELD> <value>]... -- one atomic rewrite
@@ -15736,9 +15781,15 @@ cmd_set_datasets() {
     echo "  the relationship's sections are rewritten from it; gen-cron validates; the cron is installed"
     if [ "$yes" -ne 1 ]; then echo "plan only. Re-run with --yes to do it. Nothing was changed."; return 0; fi
 
+    # Added = not covered before: neither listed nor under a [x] (flat) entry. A child that a
+    # recursive parent already snapshotted/copied needs no first run of its own (2026-10-26:
+    # the wizard's [-] after create ran every child's first snapshots a second time).
     local -a added=()
+    local _cov
     for ds in "${want[@]}"; do
-        printf '%s\n' "$cur" | cut -f1 | sed 's/^[^:]*://' | grep -qxF -- "$ds" || added+=("$ds")
+        _cov=$(printf '%s\n' "$cur" | awk -F'\t' -v d="$ds" '{ s = $1; sub(/^[^:]*:/, "", s)
+                   if (s == d || ($2 == "flat" && index(d, s "/") == 1)) { print 1; exit } }')
+        [ -n "$_cov" ] || added+=("$ds")
     done
 
     if [ "$remote" -eq 1 ]; then
@@ -15776,14 +15827,24 @@ cmd_set_datasets() {
 
     log "set-datasets: 3/3 the request follows the config"
     local joined; joined=$(IFS=,; printf '%s' "${want[*]}")
-    {
-        cat "$cpath"
-        write_client_field REQUESTED_DATASETS "$joined"
-        if [ -n "${RUX_SOURCE:-}" ]; then write_client_field RUX_SOURCE "${RUX_SOURCE%%:*}:$joined"; fi
-        if [ "${RUX_MODE:-}" = snaponly ]; then
-            write_client_field MANAGED_SOURCES "$(relation_sources "$name" | cut -f1 | sed "s/^[^@]*@//" | paste -sd' ' -)"
-        fi
-    } > "${cpath}.new" && mv -f "${cpath}.new" "$cpath" || die "set-datasets: could not update the record of '$name' ($cpath); the config is already installed"
+    # Fields are REPLACED, not appended (lab campaign 2026-10-26: a record carried ten
+    # REQUESTED_DATASETS lines), and the relationship's COPIES follow the config too:
+    # MANAGED_DATASETS is what remove-client strips and --destroy-copies destroys -- a copy
+    # added here was left out, and delete-relation then refused ("relation = 'pve9', but
+    # there is no [relation:pve9] block"). The copies are this relation's marked [dataset:]
+    # sections; a relation that copies nothing (local snapshots) keeps it empty -- there the
+    # sections are the originals.
+    local -a recf=(REQUESTED_DATASETS "$joined")
+    [ -n "${RUX_SOURCE:-}" ] && recf+=(RUX_SOURCE "${RUX_SOURCE%%:*}:$joined")
+    if [ "${RUX_MODE:-}" = snaponly ]; then
+        recf+=(MANAGED_SOURCES "$(relation_sources "$name" | cut -f1 | sed "s/^[^@]*@//" | paste -sd' ' -)")
+    elif [ "${RUX_MODE:-}" != local ] || [ -n "${CLIENT_TARGET:-}" ]; then
+        local _mk="# managed-by: zfs-backup.sh client=$name"
+        recf+=(MANAGED_DATASETS "$(relation_marked_headers "$CRON_CONFIG" "$_mk" dataset)")
+        [ "${RUX_MODE:-}" = local ] && recf+=(MANAGED_PRUNE_SCOPE "$(relation_marked_headers "$CRON_CONFIG" "$_mk" prune)")
+    fi
+    record_replace_fields "$cpath" "${recf[@]}" \
+        || die "set-datasets: could not update the record of '$name' ($cpath); the config is already installed"
     chmod 0600 "$cpath" 2>/dev/null || :
 
     # The first run of a dataset that was not covered: every installed snapshot / copy line of
@@ -16655,12 +16716,13 @@ cmd_new_relation() {
 # Where the mail has nothing (no -v 3, no runs in the window) this has nothing
 # -- and says so with an empty list, never a zero dressed as a measurement.
 cmd_job_stats() {
-    local as_json=0 days="${ZFS_DIGEST_DAYS:-7}" a
+    local as_json=0 days="${ZFS_DIGEST_DAYS:-7}" a vol_cache=0
     for a in "$@"; do
         case "$a" in
             --json)   as_json=1 ;;
             --days=*) days="${a#*=}" ;;
-            -*)       die "job-stats: unknown option '$a' (only --json and --days=N)" ;;
+            --vol-cache=*) vol_cache="${a#*=}" ;;
+            -*)       die "job-stats: unknown option '$a' (only --json, --days=N and --vol-cache=SECONDS)" ;;
             *)        die "job-stats: takes no positional arguments" ;;
         esac
     done
@@ -16784,8 +16846,21 @@ cmd_job_stats() {
     # Volume, the digest's way: `written` of every snapshot created since the
     # window start, summed per dataset and per family (the snapshot name up to
     # its timestamp), so a caller can pick the family its job stamps.
-    local vol_rows
-    vol_rows=$(zfs list -H -p -t snapshot -o name,written,creation 2>/dev/null | awk -F'\t' -v since="$since_ep" '
+    # --vol-cache=SECONDS (the GUI, after every window -- lab campaign 2026-10-26): `written`
+    # of every snapshot on the host is the slow part (4 s of system time on pve10), and a
+    # few minutes old is exact enough for a 7-day sum. The cache is per user, 0600 under
+    # /run, keyed by the window; anyone else (cron, digest) computes it fresh as before.
+    local vol_rows="" vol_cf=""
+    case "$vol_cache" in ''|*[!0-9]*) vol_cache=0 ;; esac
+    if [ "$vol_cache" -gt 0 ]; then
+        vol_cf="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+        [ -d "$vol_cf" ] && [ -w "$vol_cf" ] || vol_cf="/tmp"
+        vol_cf="$vol_cf/zfs-snapshot-all-jobstats-vol.$(id -u).$since_ep"
+        if [ -f "$vol_cf" ] && [ -O "$vol_cf" ] && [ $(( $(date +%s) - $(stat -c %Y "$vol_cf" 2>/dev/null || echo 0) )) -lt "$vol_cache" ]; then
+            vol_rows=$(cat "$vol_cf")
+        fi
+    fi
+    [ -n "$vol_rows" ] || vol_rows=$(zfs list -H -p -t snapshot -o name,written,creation 2>/dev/null | awk -F'\t' -v since="$since_ep" '
         { p = index($1, "@"); if (p == 0) next; ds = substr($1, 1, p - 1); sn = substr($1, p + 1) }
         $3 + 0 < since + 0 { next }
         {
@@ -16795,6 +16870,9 @@ cmd_job_stats() {
         END {
             for (k in b) { split(k, a, "\t"); printf "%s\t%s\t%.0f\n", a[1], a[2], b[k] }
         }' | sort)
+    if [ -n "$vol_cf" ] && [ -n "$vol_rows" ]; then
+        ( umask 077; printf '%s\n' "$vol_rows" > "$vol_cf.$$" && mv -f "$vol_cf.$$" "$vol_cf" ) 2>/dev/null || rm -f "$vol_cf.$$"
+    fi
     printf '{"window_days":%s' "$days"
     jsonw_field since "$dstart"
     printf ',"logs":['
@@ -17248,39 +17326,61 @@ jobs_block_worklines() {   # <account> -> how many ENGINE lines the installed bl
 # 2026-09-09: the window showed prune and monitor for lab-ct201 and not the
 # snapget line that does the work. gen-cron stamps every engine line with
 # `-L <label>`; that is the same key the monitor reader uses, not a new one.
-jobs_block_lines_for() {   # <account> <scope> [label] -> matching engine lines, one per line
-    local acct="$1" scope="$2" label="${3:-}" blk
+#
+# SPEED (owner 2026-10-26, pve2: return to the GUI looked like a hang): the account's engine
+# lines are read ONCE (jobs_block_engine_lines), and each row's matching lines come out of one
+# awk already JSON-escaped (the json_escape rule: \ and ") and comma-joined (jobs_lines_json)
+# -- before, every row read the crontab again through sed, grep and awk and escaped each line
+# in a subshell: list-jobs --json 12.4 s -> 1.2 s on pve2, output byte-identical.
+jobs_block_engine_lines() {   # <account> <outfile> -> 0 (empty file when unreadable)
+    local blk
+    : > "$2"
     blk=$(mktemp) || die "mktemp failed"
-    if ! cron_read "$acct" "$blk" 2>/dev/null; then rm -f "$blk"; return 0; fi
-    sed -n '/^# BEGIN zfs-backup-managed/,/^# END zfs-backup-managed/p' "$blk"         | grep -E 'snapsend\.sh|snapget\.sh|delsnaps\.sh|check-snap-age\.sh'         | awk -v s="$scope" -v l="$label" '
-            {
-                line = $0
-                # delimiters around a dataset in a rendered line: quote, comma,
-                # space, colon (a remote host prefix) or end of line
-                if (line ~ ("(^|[\"[:space:],:])" s "([\"[:space:],]|$)")) { print line; next }
-                if (l != "" && line ~ ("[[:space:]]-L[[:space:]]+\"?" l "\"?([[:space:]]|$)")) print line
-            }'
+    if cron_read "$1" "$blk" 2>/dev/null; then
+        sed -n '/^# BEGIN zfs-backup-managed/,/^# END zfs-backup-managed/p' "$blk" \
+            | grep -E 'snapsend\.sh|snapget\.sh|delsnaps\.sh|check-snap-age\.sh' > "$2"
+    fi
     rm -f "$blk"
+    return 0
+}
+jobs_lines_json() {   # <engine-lines file> <scope> [label] -> "l1","l2",...
+    awk -v s="$2" -v l="${3:-}" '
+        {
+            line = $0
+            if (line ~ ("(^|[\"[:space:],:])" s "([\"[:space:],]|$)")) hit = 1
+            else if (l != "" && line ~ ("[[:space:]]-L[[:space:]]+\"?" l "\"?([[:space:]]|$)")) hit = 1
+            else hit = 0
+            if (!hit || line == "") next
+            out = ""
+            for (i = 1; i <= length(line); i++) {
+                c = substr(line, i, 1)
+                if (c == "\\" || c == "\"") out = out "\\" c; else out = out c
+            }
+            printf "%s\"%s\"", (n++ ? "," : ""), out
+        }' "$1"
 }
 
 # The one-level lookup, in gen-cron's documented order: the section's own
 # tier-specific field, the section's plain field, the tier template, [defaults].
-jobs_field() {   # <kind> <section> <tier> <field> -> value or empty
+# Into a variable (printf -v), no subshell: list-jobs asks ~15 fields per tier,
+# and a $(...) per field cost 14 s on pve2 (364 tiers, measured 2026-10-26).
+jobs_field_v() {   # <var> <kind> <section> <tier> <field>
+    local _jv_var="$1"; shift
     local k="$1" s="$2" t="$3" f="$4"
-    local v="${JOB_F["$k:$s|${f}_$t"]:-}"; [ -n "$v" ] && { printf '%s' "$v"; return 0; }
+    local v="${JOB_F["$k:$s|${f}_$t"]:-}"; [ -n "$v" ] && { printf -v "$_jv_var" '%s' "$v"; return 0; }
     # A relation block's tier is `profile__<rel>__<tier>`; its dataset section staggers
     # the schedule under the short name (`send_schedule_hourly`), and that is what cron runs.
-    case "$t" in *__*) v="${JOB_F["$k:$s|${f}_${t##*__}"]:-}"; [ -n "$v" ] && { printf '%s' "$v"; return 0; } ;; esac
-    v="${JOB_F["$k:$s|$f"]:-}";          [ -n "$v" ] && { printf '%s' "$v"; return 0; }
-    v="${JOB_F["template:$t|$f"]:-}";      [ -n "$v" ] && { printf '%s' "$v"; return 0; }
-    printf '%s' "${JOB_F["defaults:|$f"]:-}"
+    case "$t" in *__*) v="${JOB_F["$k:$s|${f}_${t##*__}"]:-}"; [ -n "$v" ] && { printf -v "$_jv_var" '%s' "$v"; return 0; } ;; esac
+    v="${JOB_F["$k:$s|$f"]:-}";          [ -n "$v" ] && { printf -v "$_jv_var" '%s' "$v"; return 0; }
+    v="${JOB_F["template:$t|$f"]:-}";      [ -n "$v" ] && { printf -v "$_jv_var" '%s' "$v"; return 0; }
+    printf -v "$_jv_var" '%s' "${JOB_F["defaults:|$f"]:-}"
 }
 
 # push / pull / local / snapshot, plus the peer when there is one. `dst` and
 # `src` are mutually exclusive by the generator's own refusal, so this reports
 # what it finds and never has to break a tie.
-jobs_direction() {   # <dst> <src> -> "<direction>\001<peer>\001<other end>"
-    local dst="$1" src="$2" dir peer="" other=""
+jobs_direction_v() {   # <var> <dst> <src> -> "<direction><peer><other end>" in var
+    local _jd_var="$1" dst="$2" src="$3" dir peer="" other=""
     if [ -n "$src" ]; then
         dir=pull; other="$src"
         case "$src" in *:*) peer="${src%%:*}"; peer="${peer##*@}" ;; esac
@@ -17293,7 +17393,7 @@ jobs_direction() {   # <dst> <src> -> "<direction>\001<peer>\001<other end>"
     else
         dir=snapshot
     fi
-    printf '%s\001%s\001%s' "$dir" "$peer" "$other"
+    printf -v "$_jd_var" '%s\001%s\001%s' "$dir" "$peer" "$other"
 }
 
 
@@ -17405,6 +17505,12 @@ cmd_list_jobs() {
         done < "$dump"
         rm -f "$dump"
 
+        local acct_json="${acct//\\/\\\\}"; acct_json="${acct_json//\"/\\\"}"
+        local eng_lines=""
+        if [ "$as_json" -eq 1 ]; then
+            eng_lines=$(mktemp) || die "list-jobs: mktemp failed"
+            jobs_block_engine_lines "$acct" "$eng_lines"
+        fi
         local i=0 nsec=${#secs[@]}
         while [ "$i" -lt "$nsec" ]; do
             local sec="${secs[$i]}" sk="${kinds[$i]}"
@@ -17418,9 +17524,9 @@ cmd_list_jobs() {
                 [ -n "$tier" ] || continue
                 seen=$((seen + 1))
                 local dst src dirinfo dir peer other
-                dst=$(jobs_field "$sk" "$sec" "$tier" dst)
-                src=$(jobs_field "$sk" "$sec" "$tier" src)
-                dirinfo=$(jobs_direction "$dst" "$src")
+                jobs_field_v dst "$sk" "$sec" "$tier" dst
+                jobs_field_v src "$sk" "$sec" "$tier" src
+                jobs_direction_v dirinfo "$dst" "$src"
                 dir="${dirinfo%%$'\001'*}"
                 # A [prune:] section is HOUSEKEEPING, not a transfer: it carries
                 # neither dst nor src by construction, and reporting that as
@@ -17437,26 +17543,26 @@ cmd_list_jobs() {
                 [ "$sk" = snaponly ] && dir=snaponly
                 local sched
                 if [ "$sk" = prune ]; then
-                    sched=$(jobs_field "$sk" "$sec" "$tier" prune_schedule)
+                    jobs_field_v sched "$sk" "$sec" "$tier" prune_schedule
                 else
-                    sched=$(jobs_field "$sk" "$sec" "$tier" send_schedule)
+                    jobs_field_v sched "$sk" "$sec" "$tier" send_schedule
                 fi
                 local pattern prefix label rec qui gfs warn crit keep retain
-                pattern=$(jobs_field "$sk" "$sec" "$tier" pattern)
-                prefix=$(jobs_field  "$sk" "$sec" "$tier" prefix)
-                label=$(jobs_field   "$sk" "$sec" "$tier" pair_label)
-                rec=$(jobs_field     "$sk" "$sec" "$tier" recursive)
-                qui=$(jobs_field     "$sk" "$sec" "$tier" quiesce)
-                gfs=$(jobs_field     "$sk" "$sec" "$tier" gfs)
-                warn=$(jobs_field    "$sk" "$sec" "$tier" monitor_warn)
-                crit=$(jobs_field    "$sk" "$sec" "$tier" monitor_crit)
-                keep=$(jobs_field    "$sk" "$sec" "$tier" keep)
-                retain=$(jobs_field  "$sk" "$sec" "$tier" retain)
+                jobs_field_v pattern "$sk" "$sec" "$tier" pattern
+                jobs_field_v prefix "$sk" "$sec" "$tier" prefix
+                jobs_field_v label "$sk" "$sec" "$tier" pair_label
+                jobs_field_v rec "$sk" "$sec" "$tier" recursive
+                jobs_field_v qui "$sk" "$sec" "$tier" quiesce
+                jobs_field_v gfs "$sk" "$sec" "$tier" gfs
+                jobs_field_v warn "$sk" "$sec" "$tier" monitor_warn
+                jobs_field_v crit "$sk" "$sec" "$tier" monitor_crit
+                jobs_field_v keep "$sk" "$sec" "$tier" keep
+                jobs_field_v retain "$sk" "$sec" "$tier" retain
 
                 if [ "$as_json" -eq 1 ]; then
                     [ "$first" -eq 1 ] || printf ','
                     first=0
-                    printf '{"account":"%s"' "$(json_escape "$acct")"
+                    printf '{"account":"%s"' "$acct_json"
                     jsonw_field config       "$cfg"
                     jsonw_field section_kind "$sk"
                     jsonw_field scope        "$sec"
@@ -17476,16 +17582,10 @@ cmd_list_jobs() {
                     jsonw_field monitor_crit "$crit"
                     printf ',"recursive":%s' "$([ "$rec" = yes ] && echo true || echo false)"
                     printf ',"readable":true,"lines_in_block":%s' "$nlines"
-                    # WHAT WILL ACTUALLY RUN, verbatim. See jobs_block_lines_for:
+                    # WHAT WILL ACTUALLY RUN, verbatim. See jobs_lines_json:
                     # matched by scope, never attributed to this row alone.
                     printf ',"cron_lines":['
-                    local _cl _cfirst=1
-                    while IFS= read -r _cl; do
-                        [ -n "$_cl" ] || continue
-                        [ "$_cfirst" -eq 1 ] || printf ','
-                        _cfirst=0
-                        printf '"%s"' "$(json_escape "$_cl")"
-                    done < <(jobs_block_lines_for "$acct" "$sec" "$label")
+                    jobs_lines_json "$eng_lines" "$sec" "$label"
                     printf ']'
                     printf '}'
                 else
@@ -17509,6 +17609,7 @@ cmd_list_jobs() {
                 fi
             done
         done
+        [ -n "$eng_lines" ] && rm -f "$eng_lines"
     done < <(cron_known_accounts)
 
     if [ "$as_json" -eq 1 ]; then
@@ -19852,8 +19953,11 @@ jsonw_array() {   # <space-separated list> -> ["a","b"]
       printf ']' )
 }
 
-jsonw_field() {   # <json name> <value> -> ,"name":"value"
-    printf ',"%s":"%s"' "$1" "$(json_escape "$2")"
+jsonw_field() {   # <json name> <value> -> ,"name":"value"  (json_escape inline: no subshell)
+    local s="$2"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf ',"%s":"%s"' "$1" "$s"
 }
 
 # THE ENGINE'S OUTPUT IS NOT A PATH. json_escape covers the two characters a
@@ -21796,10 +21900,19 @@ include_children = yes
         want="$RUX_EXACT_SCOPE"
         want_headers=$(printf '%s\n' "$want" | awk '/^\[dataset:/{print}')
     else
-        while IFS= read -r _rq; do
-            want+=$(printf '[dataset:%s]\ninclude_parent = yes\ninclude_children = yes\n' "$_rq")
+        # A listed dataset with another listed dataset under it is [-] (the tree rule,
+        # 2026-10-26): itself and the listed children, not its other or future ones.
+        # Before, it was granted with its children and the first snapshots at
+        # creation went -R over it -- a child left out of the list got them too
+        # (lab pve9 -> pve11: vm-102 unticked, two snapshots on it).
+        local -a _rqs=(); local _o _ch
+        while IFS= read -r _rq; do [ -n "$_rq" ] && _rqs+=("$_rq"); done < <(dataset_list_split "$requested")
+        for _rq in ${_rqs[@]+"${_rqs[@]}"}; do
+            _ch=yes
+            for _o in "${_rqs[@]}"; do case "$_o" in "$_rq"/*) _ch=no; break ;; esac; done
+            want+=$(printf '[dataset:%s]\ninclude_parent = yes\ninclude_children = %s\n' "$_rq" "$_ch")
             want+=$'\n'
-        done < <(dataset_list_split "$requested")
+        done
         want="${want%$'\n'}"
         # --exclude-child is a regex over dataset NAMES; the scope grammar takes
         # exact paths. Resolve one against the other on the source, so the grant

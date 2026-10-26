@@ -910,7 +910,7 @@ def collect(repo, files, only=None):
     files["_data"] = data
     plan = [("status", ["status", "--json"]), ("jobs", ["list-jobs", "--json"]),
             ("monitors", ["monitor", "--json"]), ("progress", ["progress", "--json"]),
-            ("replicas", ["list-replicas", "--json"]), ("stats", ["job-stats", "--json"])]
+            ("replicas", ["list-replicas", "--json"]), ("stats", ["job-stats", "--json", "--vol-cache=300"])]
     # RÓWNOLEGLE (P2, właściciel 2026-10-15: powrót z okna do GUI > 5 s). Pełne odświeżenie
     # zostaje (decyzja 2026-10-09: powrót zawsze odświeża), ale sześć czasowników tylko do
     # odczytu szło PO KOLEI -- zmierzone na pve10: list-jobs 6,0 s + monitor 5,6 s +
@@ -5264,6 +5264,7 @@ class UI(object):
                 if obj.get("proc") is not None and obj["proc"].poll() is None:
                     self.message = _(u"proces biegnie dalej (pid %d); wyjście: %s") % (obj["proc"].pid, obj["path"])
                 self.refresh_bg()
+                self.wait_fresh = True
             elif k in ("down", "j"):
                 self.scroll += 1
             elif k in ("up", "k"):
@@ -5869,6 +5870,33 @@ def curses_loop(ui):
                 return ord(k), True
             return k, False
 
+        # POWRÓT BEZ STAREGO EKRANU (właściciel 2026-10-26, pve2: po oknie GUI stało ze starymi
+        # danymi i napisem "odświeżam w tle" -- "user może odnieść wrażenie, że hang"). Po oknie
+        # główny ekran rysuje się dopiero ze świeżymi danymi; do tego czasu widać, że trwa
+        # wczytywanie (sekundy) i komunikat okna. Bezpiecznik: po BG_KEY_WAIT * 2 s rysuje stary.
+        def wait_fresh(scr):
+            ui.wait_fresh = False
+            bg = getattr(ui, "_bg", None)
+            t0 = time.time()
+            while bg is not None and bg[0].is_alive() and time.time() - t0 < ui.BG_KEY_WAIT * 2:
+                h, w = scr.getmaxyx()
+                msg = ui.message or u""
+                if msg.endswith(_(ui.BG_NOTE)):
+                    msg = msg[:-len(_(ui.BG_NOTE))]
+                lines = [_(u"Wczytuję aktualne dane hosta… %d s") % int(time.time() - t0)]
+                if msg.strip():
+                    lines += [u"", msg.strip()]
+                scr.erase()
+                for i, l in enumerate(lines):
+                    l = l[:max(1, w - 2)]
+                    try:
+                        scr.addstr(max(0, h // 2 - 1) + i, max(0, (w - len(l)) // 2), l)
+                    except curses.error:
+                        pass
+                scr.refresh()
+                bg[0].join(0.3)
+            ui.poll_bg()
+
         def read_key():
             k, is_char = wch()
             if k != 27:
@@ -5903,6 +5931,8 @@ def curses_loop(ui):
                     pass
             return 27, None, False
         while True:
+            if getattr(ui, "wait_fresh", False):
+                wait_fresh(stdscr)
             h, w = stdscr.getmaxyx()
             if h < 10 or w < 40:
                 stdscr.erase()
@@ -6006,6 +6036,7 @@ def curses_loop(ui):
                 ui.rel_names_before_bg = getattr(ui, "rel_names_before", None)
                 ui.rel_names_before = None
                 ui.refresh_bg()
+                ui.wait_fresh = True
     curses.wrapper(main)
 
 
@@ -6057,6 +6088,11 @@ def main(argv):
              "datasets_local": a.datasets_local, "datasets_remote": a.datasets_remote, "check_source": a.check_source,
              "host_ip": a.host_ip}
     ch = Chars(want_ascii(a))
+    # START BEZ PUSTEGO EKRANU (kampania 2026-10-26, pve9: ~20 s czarnego terminala): pierwszy
+    # odczyt danych biegnie przed curses -- terminal mówi, co się dzieje.
+    if not a.render_once and sys.stdout.isatty():
+        sys.stdout.write(_(u"zfs-snapshot-all: wczytuję dane hosta (status, zadania, monitory)…") + "\n")
+        sys.stdout.flush()
     ui = UI(repo, files, ch, a.now, a.exec_log)
     if a.render_once:
         ui.screen = a.screen
