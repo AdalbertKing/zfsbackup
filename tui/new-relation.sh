@@ -992,7 +992,16 @@ summary_text() {
     else
         echo "$(Tv 'BACKUP: $(hostname) będzie POBIERAĆ z $HOST' '$(hostname)' "$(hostname)" '$HOST' "$HOST")${HOSTNAME_R:+ ($HOSTNAME_R)}$(Tv ' do $TARGET/$HOST/...' '$TARGET' "$TARGET" '$HOST' "$HOST")"
     fi
-    for i in "${!B_ROOT[@]}"; do echo "    ${B_ROOT[$i]}  -- $(describe "$i")"; done
+    # Z wyjątkami relacja to lista [x]/[-] (set-datasets po założeniu), jak w planie okna zmiany.
+    if any_excl && [ -s "${BASKET_DS_JSON:-}" ]; then
+        echo "$(T '   Relacja obejmie:')"
+        basket_entries "$BASKET_DS_JSON" | while IFS=$'\t' read -r n r; do
+            [ -n "$n" ] || continue
+            if [ "$r" = flat ]; then echo "     [x] $n  $(T '(z dziećmi, także przyszłymi)')"; else echo "     [-] $n  $(T '(sam dataset; dzieci tylko wymienione)')"; fi
+        done
+    else
+        for i in "${!B_ROOT[@]}"; do echo "    ${B_ROOT[$i]}  -- $(describe "$i")"; done
+    fi
     echo "$(Tv 'Sposób:  $(mode_words).   Nazwa: $RNAME.   Konto: ${a:-root}.' '$(mode_words)' "$(mode_words)" '$RNAME' "$RNAME" '${a:-root}' "${a:-root}")"
     echo "$(T 'Szablon:') $( [ -n "$MANUAL_P" ] && [ "$PROFILE" = "$MANUAL_P" ] && echo "$(Tv 'Ręcznie -- $PROFILE' '$PROFILE' "$PROFILE")" || echo "$PROFILE")$( [ -s "$TMPD/prof.tsv" ] && awk -F'\t' -v n="$PROFILE" '$1==n{print "  (" $3 "; " $2 "; " $4 ")"}' "$TMPD/prof.tsv")$( [ -n "$SRCPROF" ] && echo "$(Tv '; u źródła: $SRCPROF' '$SRCPROF' "$SRCPROF")")"
     if [ -n "$EXFAM" ]; then echo "$(T 'Pomijane migawki z prefiksami:') ${EXFAM//,/, }."
@@ -1087,10 +1096,8 @@ step_summary() {    # 0 = wykonano (RC_RUN), 1 = wstecz, 2 = do datasetów, 3 = 
     local rc
     while :; do
         geom
-        if [ "$MODE" = snaponly ] && any_excl; then
-            wt --title "$(T 'Wyjątki w drzewie')" --msgbox "$(T 'Migawki zdalne nie obsługują wyjątków w drzewie (odznaczonych dzieci).\nWybierz całe gałęzie albo pojedyncze datasety bez wyjątków.')" 9 "$W"
-            return 2
-        fi
+        # (2026-10-26) Wyjątki działają w każdym rodzaju relacji: migawki zdalne dostają listę
+        # (basket_expand), a po założeniu zakres zapisuje set-datasets -- dawna blokada odpadła.
         build_argv install
         summary_text >"$TMPD/summary.txt"
         yesno_text "$TMPD/summary.txt" "$(title 10 "$(T 'Podsumowanie')")" "$(T 'Pokaż plan')" "$(T Wstecz)" || return 1
@@ -1126,6 +1133,15 @@ step_summary() {    # 0 = wykonano (RC_RUN), 1 = wstecz, 2 = do datasetów, 3 = 
         # U66 część 2: okno postępu zamiast czarnego ekranu (wtl run_progress), potem okno wyniku.
         : >"$TMPD/run.log"
         RC_RUN=0; run_progress "$(Tv 'Nowa relacja '\''$RNAME'\'': zakładam' '$RNAME' "$RNAME")" "$TMPD/run.log" "${ARGV[@]}" || RC_RUN=$?
+        # JEDNA REGUŁA DRZEWA TAKŻE PRZY TWORZENIU (relacja = config, 2026-10-26): przy jakimkolwiek
+        # [-] zakres zapisany od razu jako pozycje relacji -- to samo set-datasets co w oknie zmiany,
+        # w każdym rodzaju relacji. Seed powyżej szanował wyjątki, więc nic zbędnego nie przyszło.
+        if [ "$RC_RUN" -eq 0 ] && [ -n "$(printf '%s' "${B_EXCL[*]:-}" | tr -d ' \n')" ]; then
+            _da=(); mapfile -t _da < <(basket_entries "$BASKET_DS_JSON" | awk -F'\t' 'NF { printf "--dataset=%s:%s\n", $1, $2 }')
+            : >"$TMPD/run2.log"
+            run_progress "$(Tv 'Nowa relacja '\''$RNAME'\'': zakres wg drzewa' '$RNAME' "$RNAME")" "$TMPD/run2.log" "$ZB" set-datasets "$RNAME" "${_da[@]}" --yes || RC_RUN=$?
+            cat "$TMPD/run2.log" >>"$TMPD/run.log"
+        fi
         # DZIENNIK DLA F3 Ins (owner note 5): TUI ustawia ZFS_TUI_LOG na
         # sciezke ~/.zfs-tui/new-relation-<stamp>.log; dopisujemy do niego, zeby wynik biegu
         # nie zniknal w $TMPD.
