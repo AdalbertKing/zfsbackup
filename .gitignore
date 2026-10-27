@@ -5,7 +5,16 @@
 !README.md
 !RELEASE-OF
 !/.gitattributes
+!/.github/FUNDING.yml
+!/.github/ISSUE_TEMPLATE/bug_report.md
+!/.github/ISSUE_TEMPLATE/config.yml
+!/.github/ISSUE_TEMPLATE/feature_request.md
+!/.github/pull_request_template.md
+!/CHANGELOG.md
+!/CONTRIBUTING.md
 !/LICENSE
+!/README.pl.md
+!/SECURITY.md
 !/check-snap-age.sh
 !/clean-relationships.sh
 !/delsnaps.sh
@@ -28,6 +37,7 @@
 !/docs/pl/REFERENCJA.md
 !/docs/pl/WDROZENIE-KOLEKTOR-DWA-ZRODLA-REPLIKA.md
 !/docs/pl/WDROZENIE-PROXMOX.md
+!/docs/tutorial/index.html
 !/gen-cron.sh
 !/hostscripts/alert-digest.sh
 !/hostscripts/alert-env.sh

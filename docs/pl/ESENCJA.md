@@ -21,7 +21,7 @@ Wszystko w bashu, zadania chodzą z crona, a do codziennej pracy jest tekstowe G
 1. Na kolektorze, jako root: pobierz pakiet i przygotuj host.
 
    ```bash
-   git clone https://github.com/AdalbertKing/zfs-snapshot-all.git /root/scripts/zfs-snapshot-all
+   git clone https://github.com/AdalbertKing/zfsbackup.git /root/scripts/zfs-snapshot-all
    cd /root/scripts/zfs-snapshot-all
    ./deploy.sh --backup-user=zfsbackup
    ```
@@ -35,7 +35,7 @@ Wszystko w bashu, zadania chodzą z crona, a do codziennej pracy jest tekstowe G
 
    Do hosta źródłowego kolektor potrzebuje wstępu SSH jako root; pakiet na źródle kreator zainstaluje sam.
 
-3. Sprawdź po godzinie: **F2 Zadania** (co i kiedy biegnie), **F4 Historia** (przebiegi, błędy).
+3. Sprawdź po godzinie: **F2 Przebiegi** (co biegło i co pobiegnie, z błędami).
 
 ## Na co dzień
 
@@ -44,7 +44,8 @@ Wszystko w bashu, zadania chodzą z crona, a do codziennej pracy jest tekstowe G
 | zobaczyć, czy kopie są aktualne | F3 Relacje — kolumna „Kopie” |
 | zmienić datasety, harmonogram, retencję | F3, Enter na relacji, `e` |
 | wstrzymać relację (np. przegląd serwera) | F3, Enter, F8 Pauza |
-| odzyskać dane | F11 Odzysk |
+| odzyskać dane | F4 Kopie, F9 Przywróć |
+| przejrzeć pliki z migawki | F4 Kopie, Enter (albo F4 z biegu na F2) |
 | dodać replikę na dysk | F6 Replika, Ins |
 | zrobić to samo z linii poleceń | [KOMENDY.md](KOMENDY.md) |
 

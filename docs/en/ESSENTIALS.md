@@ -22,7 +22,7 @@ server console.
 1. On the collector, as root: fetch the package and prepare the host.
 
    ```bash
-   git clone https://github.com/AdalbertKing/zfs-snapshot-all.git /root/scripts/zfs-snapshot-all
+   git clone https://github.com/AdalbertKing/zfsbackup.git /root/scripts/zfs-snapshot-all
    cd /root/scripts/zfs-snapshot-all
    ./deploy.sh --backup-user=zfsbackup
    ```
@@ -37,7 +37,7 @@ server console.
 
    The collector needs SSH access to the source host as root; the wizard installs the package on the source by itself.
 
-3. Check after an hour: **F2 Zadania (jobs)** (what runs and when), **F4 Historia (history)** (runs, errors).
+3. Check after an hour: **F2 Przebiegi (runs)** (what ran and what runs next, with errors).
 
 ## Day to day
 
@@ -46,7 +46,8 @@ server console.
 | see whether the copies are up to date | F3 Relacje (relations) — the "Kopie" (copies) column |
 | change datasets, schedule, retention | F3, Enter on the relation, `e` |
 | pause a relation (e.g. server maintenance) | F3, Enter, F8 Pauza (pause) |
-| restore data | F11 Odzysk (restore) |
+| restore data | F4 Kopie (copies), F9 Przywróć (restore) |
+| browse files in a snapshot | F4 Kopie, Enter (or F4 on a run in F2) |
 | add a replica on a disk | F6 Replika (replica), Ins |
 | do the same from the command line | [COMMANDS.md](COMMANDS.md) |
 

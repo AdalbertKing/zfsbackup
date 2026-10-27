@@ -16737,18 +16737,20 @@ cmd_new_relation() {
 # Where the mail has nothing (no -v 3, no runs in the window) this has nothing
 # -- and says so with an empty list, never a zero dressed as a measurement.
 cmd_job_stats() {
-    local as_json=0 days="${ZFS_DIGEST_DAYS:-7}" a vol_cache=0
+    local as_json=0 days="${ZFS_DIGEST_DAYS:-7}" a vol_cache=0 runs_h=0
     for a in "$@"; do
         case "$a" in
             --json)   as_json=1 ;;
             --days=*) days="${a#*=}" ;;
             --vol-cache=*) vol_cache="${a#*=}" ;;
-            -*)       die "job-stats: unknown option '$a' (only --json, --days=N and --vol-cache=SECONDS)" ;;
+            --runs=*) runs_h="${a#*=}" ;;
+            -*)       die "job-stats: unknown option '$a' (only --json, --days=N, --vol-cache=SECONDS and --runs=HOURS)" ;;
             *)        die "job-stats: takes no positional arguments" ;;
         esac
     done
     [ "$as_json" -eq 1 ] || die "job-stats: this reader speaks JSON only -- pass --json (the mail is alert-digest.sh's job)"
     case "$days" in ''|*[!0-9]*|0) die "job-stats: --days takes a positive count" ;; esac
+    case "$runs_h" in ''|*[!0-9]*) die "job-stats: --runs takes a count of hours" ;; esac
     local dstart since_ep
     dstart=$(date -d "-$((days - 1)) days" '+%Y-%m-%d' 2>/dev/null) || dstart=$(date '+%Y-%m-%d')
     [ -n "$dstart" ] || dstart=$(date '+%Y-%m-%d')
@@ -16760,7 +16762,7 @@ cmd_job_stats() {
             logs="$logs $_cl"
         done
     fi
-    local run_rows="" ds_rows="" ev_rows=""
+    local run_rows="" ds_rows="" ev_rows="" rl_rows="" rs_snaps=""
     if [ -n "$logs" ]; then
         # --- twin: run-rows (the SAME text lives in hostscripts/alert-digest.sh; a test pins equality) ---
         run_rows=$(zcat -f $logs 2>/dev/null | awk -v dstart="$dstart" '
@@ -16863,6 +16865,44 @@ cmd_job_stats() {
                 (ler[k] != "") ? lw[k] : "-", (ler[k] != "") ? ler[k] : "-"
         }
     }' | sort)
+        # RUNS, one by one (--runs=HOURS; the GUI's "Przebiegi", owner 2026-10-27:
+        # past and coming runs on one time line). Every END of the last HOURS, with
+        # its BEGIN, rc and -- for a failure -- the first error line the engine
+        # wrote before it (the events rule above). A BEGIN with no END yet is a run
+        # in progress. The timestamps stay ISO (date -Is): mawk has no mktime, and
+        # the reader parses them. Not a twin of the digest.
+        if [ "$runs_h" -gt 0 ]; then
+            local rsince
+            rsince=$(date -Is -d "-$runs_h hours" 2>/dev/null) || rsince=""
+            # U96 (owner 2026-10-27: "ważne, ile bieg wziął danych"): the log does not say how
+            # much a run moved, ZFS does -- `written` of every snapshot created since a day
+            # before the window (a run brings the snapshots that appeared since the previous
+            # run of its line; the reader matches them by dataset, family and creation time).
+            rs_snaps=$(zfs list -H -p -t snapshot -o name,creation,written 2>/dev/null | tr -d '\r' \
+                | awk -F'\t' -v since="$(( $(date +%s) - runs_h * 3600 - 86400 ))" '$2 + 0 >= since + 0 { print }')
+            rl_rows=$(zcat -f $logs 2>/dev/null | awk -v since="$rsince" '
+    function label(   i, l) { l = ""; for (i = 5; i <= NF; i++) { if ($i ~ /^rc=/) break; l = l (l == "" ? "" : " ") $i } return l }
+    /ZFS-JOB BEGIN/ { l = label(); if (l != "") bt[l] = $1; next }
+    /ZFS-JOB END/ {
+        l = label(); rc = ($NF ~ /^rc=/) ? substr($NF,4) + 0 : 0
+        if (l != "" && $1 >= since) {
+            etxt = ""; tail = ""
+            if (rc != 0 && rc != 75) {
+                for (k = 1; k <= nb; k++) {
+                    ln = buf[k]
+                    if (etxt == "" && ln ~ /Refusing|ERROR|FATAL|[Ee]rror:|cannot /) etxt = ln
+                    if (ln ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9:]+ - /) tail = ln
+                }
+                if (etxt == "") etxt = tail
+                sub(/^[0-9-]+ [0-9:]+ - /, "", etxt); gsub(/\t/, " ", etxt)
+            }
+            printf "%s\t%s\t%s\t%d\t%s\n", l, (l in bt) ? bt[l] : "-", $1, rc, (etxt == "") ? "-" : substr(etxt, 1, 300)
+        }
+        delete bt[l]; nb = 0; next
+    }
+    { if (nb < 400) buf[++nb] = $0 }
+    END { for (l in bt) if (bt[l] >= since) printf "%s\t%s\t-\t-1\t-\n", l, bt[l] }')
+        fi
     fi
     # Volume, the digest's way: `written` of every snapshot created since the
     # window start, summed per dataset and per family (the snapshot name up to
@@ -16953,7 +16993,35 @@ DSR
     done <<VOL
 $vol_rows
 VOL
-    printf ']}\n'
+    printf ']'
+    if [ "$runs_h" -gt 0 ]; then
+        printf ',"runs_hours":%s,"runs":[' "$runs_h"
+        first=1
+        local _rl _rb _re _rrc _rer
+        while IFS=$'\t' read -r _rl _rb _re _rrc _rer; do
+            [ -n "$_rl" ] || continue
+            [ "$_rb" = - ] && _rb=""; [ "$_re" = - ] && _re=""; [ "$_rer" = - ] && _rer=""
+            [ "$first" -eq 1 ] || printf ','
+            first=0
+            printf '{"label":"%s","start":"%s","end":"%s","rc":%s,"error":"%s"}' \
+                "$(json_escape "$_rl")" "$(json_escape "$_rb")" "$(json_escape "$_re")" "${_rrc:--1}" "$(json_escape "$_rer")"
+        done <<RLS
+$rl_rows
+RLS
+        printf '],"snaps":['
+        first=1
+        local _sn _sc _sw
+        while IFS=$'\t' read -r _sn _sc _sw; do
+            [ -n "$_sn" ] || continue
+            [ "$first" -eq 1 ] || printf ','
+            first=0
+            printf '{"name":"%s","creation":%s,"written":%s}' "$(json_escape "$_sn")" "${_sc:-0}" "${_sw:-0}"
+        done <<RSN
+$rs_snaps
+RSN
+        printf ']'
+    fi
+    printf '}\n'
 }
 
 # ------------------------------------------------------------------------------
@@ -22342,11 +22410,20 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
         browse)
             # "Przegladaj kopie" (owner 2026-10-18): windows only, like restore --ask --
             # nothing here but the hand-off; the mount/mc/umount lives in tui/browse.sh.
-            [ "${3:-}" = "--ask" ] && [ -n "${2:-}" ] || die "usage: zfs-backup.sh browse NAME --ask | browse --any --ask"
+            [ "${3:-}" = "--ask" ] && [ -n "${2:-}" ] || die "usage: zfs-backup.sh browse NAME --ask [--dataset=DS] [--at=EPOCH] | browse --any --ask"
             [ "${2#-}" = "$2" ] && snaponly_refuse restore "$2"
             _bw="$SCRIPT_DIR/tui/browse.sh"
             [ -f "$_bw" ] || die "browse: $_bw is missing -- incomplete checkout"
-            ZFS_BACKUP="${ZFS_BACKUP:-$SCRIPT_DIR/zfs-backup.sh}" bash "$_bw" "$2"
+            # --dataset= / --at= (GUI F4 Kopie from a run or a dataset, 2026-10-27): start on
+            # that copy and that moment; the windows still let the operator choose otherwise.
+            _bwa=()
+            for _x in "${@:4}"; do
+                case "$_x" in
+                    --dataset=*|--at=*) _bwa+=("$_x") ;;
+                    *) die "browse: unknown option '$_x' (only --dataset=DS and --at=EPOCH)" ;;
+                esac
+            done
+            ZFS_BACKUP="${ZFS_BACKUP:-$SCRIPT_DIR/zfs-backup.sh}" bash "$_bw" "$2" "${_bwa[@]}"
             exit $? ;;
         restore)
             [ -n "${2:-}" ] && [ "${2#-}" = "$2" ] && snaponly_refuse restore "$2"
