@@ -7454,7 +7454,7 @@ tiers_apply_ops() {   # <config working copy> <name> <ops...> -> TIERS_CHANGES; 
                 [ -n "$key" ] || fail "'$op' names no tier -- put --tier=T (or --src-tier=T) before it"
                 case "$op" in
                     --keep=*)
-                        # 0 AT THE SOURCE (owner 2026-10-26, A-TASSA: a 60 GB conversion day filled a
+                        # 0 AT THE SOURCE (owner 2026-10-26, a customer host: a 60 GB conversion day filled a
                         # small source while its snapshots were long copied): keep none of this tier
                         # there after the copy. The incremental base is the newest COMMON snapshot of
                         # ANY family (snapget find_common_snapshot), so the other tiers carry it. On
@@ -9918,7 +9918,7 @@ cmd_add_client() {
             # THE PORT IS PART OF THE ENDPOINT, and it cannot be read off
             # ACTIVE_ENDPOINT: activate --host= rewrites that to the production
             # endpoint, so on a relationship already switched to a VPN it says
-            # 10.99.0.2:22 while the LAN request said 192.0.2.8:2222.
+            # 203.0.113.2:22 while the LAN request said 192.0.2.8:2222.
             # CREATED_ENDPOINT records the original --host verbatim; older
             # records fall back to the pairing manifest's PEER_SAVED_PORT,
             # which --join wrote and nothing later rewrites. If neither is
@@ -13330,8 +13330,8 @@ cmd_activate() {
     # (owner 2026-10-17, measured on pve10 the same day). verify-endpoint falls
     # back to a previously known address when the current one does not answer --
     # right for its own job (pick whichever address works), wrong here: the run
-    # asked for 10.99.0.10, got 192.0.2.98 back and reported success, and the
-    # GUI would have said "works over 10.99.0.10". Stop before installing: the
+    # asked for 203.0.113.10, got 192.0.2.98 back and reported success, and the
+    # GUI would have said "works over 203.0.113.10". Stop before installing: the
     # address asked for did not answer.
     if [ -n "$requested_host" ]; then
         read -r current_host current_port <<< "$(active_endpoint_host_port)"

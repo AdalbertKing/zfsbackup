@@ -158,7 +158,7 @@ PYEOF
     [ "$C_SSH" -eq 1 ] || [ -n "$C_ERR" ] || C_ERR="$(tail -1 "$TMPD/check.err" 2>/dev/null)"
 }
 # U56 (kampania 2026-10-21): "pve9" rozwiązało się na pve10 przez publiczny DNS
-# (search site-a.net) na obce adresy w internecie, ssh czekało 10 s i padło bez słowa
+# (search example.org) na obce adresy w internecie, ssh czekało 10 s i padło bez słowa
 # dlaczego. Okno mówi, NA JAKI ADRES poszła nazwa, i ostrzega przed adresem spoza sieci.
 resolve_note() {   # -> "" dla IP; "nazwa -> adres [ostrzeżenie]" dla nazwy
     local ip

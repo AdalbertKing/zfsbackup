@@ -5915,7 +5915,7 @@ is_private_addr() {
 # This is not hypothetical. On site-a, `pve2` from pve1 has no /etc/hosts
 # entry, so the resolver appends the search domain and `getent hosts pve2`
 # answers with FOUR public addresses belonging to the real, unrelated
-# site-a.net. Nothing in the flow noticed: the fingerprint was printed with
+# example.org. Nothing in the flow noticed: the fingerprint was printed with
 # a "CONFIRM this" line and the script carried on.
 #
 # Two fingerprints of that failure, both refused:
