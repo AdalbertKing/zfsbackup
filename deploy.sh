@@ -90,13 +90,13 @@ _DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Resolve REPO_URL now that $_DEPLOY_DIR exists (see the config block above).
 # `git remote get-url origin` on the checkout this file lives in is the only
 # answer that is right for BOTH the upstream repo and any fork of it. The
-# literal fallback is for a checkout with no origin at all -- unreachable in
-# practice, since the source() below already refuses to run outside a complete
-# checkout, but a bare URL beats an empty one that would make `git clone ""`
-# the failure the operator has to diagnose.
+# literal fallback is for a checkout with no origin at all (a GitHub archive, a
+# copied tree): it is the RELEASE repository, never the development one
+# (REV-20261028-179) -- the hourly self-update follows whatever is cloned here,
+# and a tree with no Git metadata says nothing about which channel it came from.
 if [ -z "$REPO_URL" ]; then
     REPO_URL="$(git -C "$_DEPLOY_DIR" remote get-url origin 2>/dev/null)"
-    [ -n "$REPO_URL" ] || REPO_URL="https://github.com/AdalbertKing/zfs-snapshot-all.git"
+    [ -n "$REPO_URL" ] || REPO_URL="https://github.com/AdalbertKing/zfsbackup.git"
 fi
 
 if [ -r "$_DEPLOY_DIR/lib-cron.sh" ]; then
@@ -2646,8 +2646,20 @@ do_rollback() {
     # Re-generate at the OLD revision -- a rollback that leaves the newer
     # generated scripts installed is the same defect mirrored, and worse,
     # because the operator has just been told the host is back on old code.
-    apply_repo_to_host "rollback" "$(printf '%.8s' "$target")" \
-        || warn "the rollback of the CHECKOUT succeeded, but re-generating the installed scripts at that revision did not -- this host is a mixture. Investigate before relying on it."
+    #
+    # REV-20261028-181: a failed re-application is NOT a rollback. It used to be
+    # a warning followed by "rolled back" and rc 0, so an operator or a script
+    # read success while the installed scripts were still (part of) the newer
+    # revision. Now: the hold stays and says so, nothing retries, rc 1.
+    if ! apply_repo_to_host "rollback" "$(printf '%.8s' "$target")"; then
+        write_state_file "$UPDATE_HOLD_FILE" \
+            "rollback $(printf '%.8s' "$from") -> $(printf '%.8s' "$target") INCOMPLETE on $(date '+%Y-%m-%d %H:%M:%S'): checkout at $(printf '%.8s' "$target"), re-deployment FAILED -- host is a mixture" \
+            || warn "could not refresh the hold message at $UPDATE_HOLD_FILE (the hold from before the reset is still in place)"
+        warn "rollback INCOMPLETE: the CHECKOUT is back at $(printf '%.8s' "$target"), but re-deploying the host at that revision FAILED -- the installed scripts may still be (partly) from $(printf '%.8s' "$from"). This host is a mixture: do not rely on it."
+        local _gd=""; [ -e "$GRANT_DATASETS_FILE" ] && _gd=$(read_state_file "$GRANT_DATASETS_FILE")
+        warn "automatic updates stay HELD and nothing retries. Read $UPDATE_STATE_DIR/last-apply.log, fix the cause, then re-deploy this revision by hand: bash ${REPO_DIR}/deploy.sh${_gd:+ --grant-datasets=$_gd}"
+        return 1
+    fi
     log "rolled back $(printf '%.8s' "$from") -> $(printf '%.8s' "$target")"
     log "AUTOMATIC UPDATES ARE NOW HELD -- without this the next hourly run would pull the same revision straight back."
     log "When the fix is on main:  bash $REPO_DIR/deploy.sh --resume-updates"
