@@ -836,7 +836,7 @@ while :; do
                   --yesno "$(Tv 'Na liście czeka zmian: $np. Wyjść bez zapisu?' '$np' "$np")" 8 "$W"
                [ $? -ne 0 ] && continue   # Wróć albo Esc = zostań
            fi
-           clear 2>/dev/null; wt_end "$(T 'Zmień relację: przerwane, nic nie zmieniono')"; exit 1; }
+           clear 2>/dev/null; wt_end_nochange "$(T 'Zmień relację: przerwane, nic nie zmieniono')"; exit 1; }
     fi
     ACTION="$WT_OUT"; LAST_ACTION="$ACTION"
     case "$ACTION" in
@@ -950,7 +950,7 @@ while :; do
         def="$PROFILE"; awk -F'\t' -v n="$def" '$1==n{f=1} END{exit !f}' "$TMPD/prof.tsv" || def="${items[2]:-${items[0]}}"
         [ "$CUR_P" = "$HNAME" ] && def=__manual__
         wt --title "$(Tv 'Zmień relację $NAME -- użyj szablonu' '$NAME' "$NAME")" --ok-button "$(T Dalej)" --cancel-button "$(T Wstecz)" --notags --default-item "$def" \
-           --menu "$(Tv 'Obecny szablon: $(cur_words)\nSekcje relacji zostaną wygenerowane od nowa z wybranego szablonu\n(retencja, harmonogramy). Dane nie są przenoszone, seed nie jest potrzebny.\nTen sam szablon = odświeżenie (rozrzut minut, retencja źródła per szczebel).' '$(cur_words)' "$(cur_words)")" \
+           --menu "$(Tv 'Obecny szablon: $(cur_words)\nSekcje relacji zostaną wygenerowane od nowa z wybranego szablonu\n(retencja, harmonogramy). Dane nie są przenoszone, pełna kopia od nowa nie jest potrzebna.\nTen sam szablon = odświeżenie (rozrzut minut, retencja źródła per szczebel).' '$(cur_words)' "$(cur_words)")" \
            "$(fit $((${#items[@]} / 2 + 5)))" "$W" "$(lhfit $((${#items[@]} / 2)) 4)" "${items[@]}" || continue 2
         if [ "$WT_OUT" = __manual__ ]; then
             # Ręcznie: tabela szczebli (snaponly -- blok "harm" niżej, ukryty szablon relacji).

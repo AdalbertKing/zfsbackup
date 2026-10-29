@@ -100,9 +100,14 @@ save() {   # plan czasownika, potem WYKONAJ
     exit "$RC"
 }
 
+# U120: opis klucza jest trzecią kolumną po kluczu (16) i wartości (26); przy limicie 100
+# kolumn z wt-lib zostawało mu ~45 znaków i ucinał się w pół słowa. To okno bierze pełną
+# szerokość terminala (do 160); klucze zostają nazwami z settings.ini -- to je admin wpisuje.
+geom_wide() { local c; geom; c=$(tput cols 2>/dev/null) || c=80; case "$c" in ''|*[!0-9]*) c=80 ;; esac
+              W=$((c - 4)); [ "$W" -gt 160 ] && W=160; return 0; }
 LAST="${KEYS[0]}"
 while :; do
-    geom
+    geom_wide
     items=(); prev=""
     for k in "${KEYS[@]}"; do
         sec="${k%%.*}"
@@ -126,7 +131,7 @@ while :; do
     wt --title "$(T 'Ustawienia hosta')" --ok-button "$(T Wybierz)" --cancel-button "$(T Wyjdź)" --notags --default-item "$LAST" \
        --menu "$(T 'Wybierz pozycję, aby zmienić jej wartość. Nic nie zostanie zapisane, dopóki nie wybierzesz „Zapisz zmiany” i WYKONAJ. Nawias przy wartości mówi, skąd ona pochodzi, jeśli nie ma jej w pliku ustawień.')" \
        "$H" "$W" "$(lhfit $((${#items[@]} / 2)) 3)" "${items[@]}" \
-       || { clear 2>/dev/null; wt_end "$(T 'Ustawienia: wyjście, nic nie zapisano')"; exit 1; }
+       || { clear 2>/dev/null; wt_end_nochange "$(T 'Ustawienia: wyjście, nic nie zapisano')"; exit 1; }
     LAST="$WT_OUT"
     case "$WT_OUT" in
         \#*) ;;

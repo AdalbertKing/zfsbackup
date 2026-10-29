@@ -1074,9 +1074,23 @@ def load_datasets(repo, files, data, host="", port=""):
     return data.datasets[key]
 
 
+_ZTREE_LOCK = None
+
+
 def load_ztree(repo, files, data, roots):
-    """zfs-tree --json ROOT... (F4 Kopie): datasety pod korzeniami kopii, z liczba migawek."""
+    """zfs-tree --json ROOT... (F4 Kopie): datasety pod korzeniami kopii, z liczba migawek.
+    Jeden naraz (blokada): wczytanie w tle po odczycie (prefetch_kopie) i F4 nie pytaja ZFS
+    dwa razy o to samo -- F4 czeka na tlo i bierze jego wynik."""
+    global _ZTREE_LOCK
+    if _ZTREE_LOCK is None:
+        import threading
+        _ZTREE_LOCK = threading.Lock()
     key = tuple(roots)
+    with _ZTREE_LOCK:
+        return _load_ztree_locked(repo, files, data, roots, key)
+
+
+def _load_ztree_locked(repo, files, data, roots, key):
     if key in data.ztree:
         return data.ztree[key]
     if files.get("zfs_tree"):
@@ -1686,11 +1700,17 @@ def build_jobs(data, now):
                 # nie etykieta transferu, z ktorego wiersz jest skopiowany.
                 _pm = re.search(r'zfs-job\.sh "([^"]+)"', cl)
                 _pl = (_pm.group(1).split(" ", 1) + [""])[1] if _pm else ""
-                pit.update({"task": _(u"lokalny prune"), "keep": keep_cell(ret), "schedule": psched, "czas": "-", "gb": "-", "clabel": _pl,
-                            "vol": None, "srow": None, "next_epoch": pnxt,
+                # Statystyki TEJ linii: srow None dawal w panelu F2/F3 "brak biegow w
+                # dzienniku", choc lista obok pokazywala jej biegi (przejscie GUI pve10,
+                # 2026-10-28: pve9 lokalny prune hourly: enc, 144 wywolania w job-stats).
+                _ps = job_stats_for(data, j, _pl)[0] if _pl else None
+                _pc = ("?" if data.failed("stats") else
+                       times_cell(_ps.get("last_s"), _ps.get("avg_s"), _ps.get("max_s")) if _ps else "-")
+                pit.update({"task": _(u"lokalny prune"), "keep": keep_cell(ret), "schedule": psched, "czas": _pc, "gb": "-", "clabel": _pl,
+                            "vol": None, "srow": _ps, "next_epoch": pnxt,
                             "next": fmt_when(pnxt, now) if pnxt else "?", "jobs": [j],
                             "verdict": v0, "vword": _(VERDICTS.get(v0, (v0, 0))[0]),
-                            "reasons": list(reasons0), "fails": [], "discards": [], "srows": []})
+                            "reasons": list(reasons0), "fails": [], "discards": [], "srows": [_ps] if _ps else []})
                 items.append(pit)
                 break
     # REPLIKI NA F2 (2026-10-08, wlasciciel: "czy zadania repliki wchodza do listy
@@ -1961,6 +1981,10 @@ def render_tabbed(data, width, height, now, ch, screen, title, heads, cells, cur
     hdr, lines = table_fit(heads, cells, inner, ch, prio, flex)
     list_h = max(1, top_h - 4)
     first = max(0, cursor - list_h + 1)
+    # Ostatni wiersz okna zajmuje "... jeszcze N", gdy nizej sa dalsze -- kursor na nim
+    # znikal (F2 otwarte przy "teraz": panel mowil o biegu, ktorego lista nie pokazywala).
+    if list_h > 1 and cursor == first + list_h - 1 and len(lines) > first + list_h:
+        first += 1
     body = [hdr, ch.dash * inner]
     cur_y = None
     for i in range(first, min(len(lines), first + list_h)):
@@ -2118,6 +2142,12 @@ def job_id_cell(its, jobs=None):
     return (u"%s: %s" % (tier, short)) if tier and short else (tier or short or u"-")
 
 
+def run_is_prune(it):
+    """Bieg porzadkowy (lokalny/zdalny prune) -- ta sama proba co przy wolumenie biegu."""
+    j = it.get("job") or (it.get("jobs") or [{}])[0]
+    return j.get("section_kind") == "prune" or u"prune" in (it.get("task") or u"")
+
+
 def build_runs(data, jobrows, now, show_done=True, grouped=False):
     """Wiersze PRZEBIEGOW: bieg = (zadanie, chwila). Zadania z jedna linia crona
     (jedna etykieta) ida razem -- pve2: subvol-103 i ROOT/pve-1 w jednym snapget,
@@ -2159,7 +2189,7 @@ def build_runs(data, jobrows, now, show_done=True, grouped=False):
         # pobranie hourly i daily w jednym snapget) nie dostaja go po razie (zmierzone 10-27).
         if show_done and lbl and lbl not in shown:
             shown.add(lbl)
-            prev = None
+            prev, mine = None, []
             for x in runs_by.get(lbl, []):
                 st, en = iso_epoch(x.get("start") or ""), iso_epoch(x.get("end") or "")
                 at = en or st
@@ -2169,10 +2199,24 @@ def build_runs(data, jobrows, now, show_done=True, grouped=False):
                 r = dict(base)
                 r.update({"past": True, "at": at, "start": st, "end": en, "rc": x.get("rc"), "err": x.get("error") or "",
                           "prev_end": p_end})
-                out.append(r)
+                mine.append(r)
+            # U112 (wlasciciel 2026-10-28, symulacja A): godzinowe prune to byly dwie trzecie
+            # z ~200 wierszy F2 na pve10. Udane biegi jednej linii crona ida w JEDEN wiersz
+            # "x N" w miejscu ostatniego; bieg z bledem, pominiety albo trwajacy zostaje
+            # osobnym wierszem, zeby go nie przeoczyc.
+            okr = [r for r in mine if r.get("rc") == 0]
+            if run_is_prune(it0) and len(okr) > 1:
+                fold = dict(okr[-1])
+                fold.update({"fold_n": len(okr), "fold_from": okr[0]["at"],
+                             "fold_bad": len([r for r in mine if r.get("rc") not in (0, 75, -1, None)])})
+                mine = [r for r in mine if r.get("rc") != 0] + [fold]
+                mine.sort(key=lambda r: r["at"])
+            out += mine
         t, n = it0.get("next_epoch"), 0
         sched = it0.get("schedule") or ""
-        while t and n < 48 and (n == 0 or t <= now + PRZ_AHEAD_H * 3600):
+        # Z nadchodzacych prune tylko najblizszy (U112); transfery i migawki -- kazdy bieg.
+        nmax = 1 if run_is_prune(it0) else 48
+        while t and n < nmax and (n == 0 or t <= now + PRZ_AHEAD_H * 3600):
             r = dict(base)
             r.update({"past": False, "at": t})
             out.append(r)
@@ -2285,6 +2329,11 @@ def run_result(r):
         return _(u"nadchodzący")
     rc = r.get("rc")
     if rc == 0:
+        # Zwiniety prune (U112): "xN" w WYNIKU, nie w Co -- przy 80 kolumnach Co znika
+        # (prio tabeli), a wiersz "pve9 OK" nie mowil, ze to 12 biegow (kampania 2026-10-28).
+        if r.get("fold_n"):
+            return (_(u"OK \u00d7%d (błędy: %d)") % (r["fold_n"], r["fold_bad"])) if r.get("fold_bad") else \
+                (u"OK \u00d7%d" % r["fold_n"])
         return u"OK"
     if rc == 75:
         return _(u"pominięty")
@@ -2304,6 +2353,9 @@ def run_pairs(r, now, ch):
                  (_(u"Wynik"), run_result(r))]
         if r.get("start") and r.get("end"):
             pairs.append((_(u"Czas"), fmt_dur(r["end"] - r["start"])))
+        if r.get("fold_n"):
+            pairs.append((_(u"Zwinięte"), _(u"udane biegi: %d, od %s (ten = ostatni)") % (
+                r["fold_n"], time.strftime("%H:%M", time.localtime(r["fold_from"])))))
         if r.get("rc") == 75:
             pairs.append((_(u"Powód"), _(u"pominięty: trwał inny bieg tego zadania (blokada)")))
         elif r.get("err"):
@@ -2905,7 +2957,9 @@ def guard_states(settings_file=None, confs=None):
 def guard_label(states):
     pl = {"on": _(u"wł."), "off": _(u"wył.")}
     cap, gro = states
-    return _(u"ochrona: bezpiecznik %s · przyrost %s") % (pl.get(cap, u"?"), pl.get(gro, u"?"))
+    # U119: "ochrona: bezpiecznik · przyrost" bylo zargonem -- slowa mowia, co strażnik
+    # ROBI (kasuje przy pelnej puli / alarmuje przy skoku danych), jak sekcje F10.
+    return _(u"kasowanie przy pełnej puli: %s · alarm przyrostu: %s") % (pl.get(cap, u"?"), pl.get(gro, u"?"))
 
 
 def top_bar(data, width, now, ascii_only, err_count):
@@ -3344,6 +3398,14 @@ def compact_paths(paths):
     return "%s: %s" % ("/".join(common), ", ".join("/".join(x[len(common):]) for x in parts))
 
 
+def host_port_words(rel):
+    """U114: "Peer X   endpoint X:22" -> "X, ssh port 22" (adres, ktorym relacja chodzi TERAZ)."""
+    ep = rel.get("active_endpoint") or ""
+    h, _s, port = ep.rpartition(":") if ":" in ep else (ep, "", "")
+    h = h or rel.get("peer_host") or "?"
+    return _(u"%s, ssh port %s") % (h, port) if port else h
+
+
 def _relation_opis_lines(row, data, now, ch, w, repo=None, files=None):
     """Zakladka Opis: co/jak dlugo trzyma/czy dziala/komendy, grupami po
     pytaniu operatora, PUSTA LINIA miedzy grupami, bez linii-linijek."""
@@ -3354,8 +3416,8 @@ def _relation_opis_lines(row, data, now, ch, w, repo=None, files=None):
         (_("Kierunek"), row.get("dir") or "?"),
         (_(u"Źródło"), _(u"%s   cel %s") % (", ".join(rel.get("sources") or []) or "?", rel.get("client_target") or _(SNAP_TARGET)))
         if rel.get("mode") == "local" else
-        ("Peer", "%s   endpoint %s%s" % (rel.get("peer_host") or "?", rel.get("active_endpoint") or "?",
-                                          (_("   w cronie: %s") % rel.get("installed_endpoint")) if rel.get("installed_endpoint") and rel.get("installed_endpoint") != rel.get("active_endpoint") else "")),
+        (_("Drugi host"), host_port_words(rel) +
+         ((_("   w cronie: %s") % rel.get("installed_endpoint")) if rel.get("installed_endpoint") and rel.get("installed_endpoint") != rel.get("active_endpoint") else "")),
         (_("Historia"), "  ".join(x for x in [
             _(u"utworzona %s") % rel["created_at"] if rel.get("created_at") else "",
             _(u"pełna kopia %s") % rel["seed_completed_at"] if rel.get("seed_completed_at") else "",
@@ -3437,7 +3499,7 @@ def _relation_opis_lines(row, data, now, ch, w, repo=None, files=None):
                     sched = _tf("send_schedule", u) or f.get("send_schedule") or t.get("send_schedule") or "?"
                     pref = f.get("prefix") or t.get("prefix") or "?"
                     _ret = f.get("retain") or f.get("keep") or t.get("retain") or t.get("keep") or ""
-                    key = (_w, _(u"co: %s   stempel %s%s") % (cron_words(sched), pref, (_(u"   trzyma %s") % keep_cell(_ret)) if _ret else ""))
+                    key = (_w, _(u"co: %s   migawki %s*%s") % (cron_words(sched), pref, (_(u"   trzyma %s") % keep_cell(_ret)) if _ret else ""))
                     pol.setdefault(key, []).append(sec.get("name") or "?")
                     if key not in order:
                         order.append(key)
@@ -3525,10 +3587,8 @@ def _relation_opis_lines(row, data, now, ch, w, repo=None, files=None):
         out.extend(detail_kv(ch, [(_(u"Ostatni transfer"), txt)], w))
     else:
         out.extend(detail_kv(ch, [(_(u"Ostatni transfer"), _(u"brak zapisu w historii"))], w))
-    out.append("")
-    out.append(_(u"komendy"))
-    for v in verbs_for(rel):
-        out.append("  " + v)
+    # U114 (symulacja A, 2026-10-28): bez sekcji "komendy" -- te same czynnosci sa pod
+    # klawiszami na ramce, a okno potwierdzenia pokazuje polecenie przed WYKONAJ.
     return out
 
 
@@ -3637,15 +3697,31 @@ def section_header(ch, title, w):
     return (ch.dash * 2 + " " + title + " " + ch.dash * max(0, w - len(title) - 4))[:w]
 
 
-def relation_window_lines(row, data, now, ch, width, repo=None, files=None):
+RELATION_TABS = (u"Opis", u"Config")
+
+
+def relation_window_lines(row, data, now, ch, width, repo=None, files=None, tab=None):
     """Tresc okna szczegolow, jako linie; okno przewija sie, wiec bez limitu.
 
     JEDEN UKLAD dla relacji (Enter na F3), zadania (Enter na F2) i pary (Enter
     na parze w F3) -- R4-6/R4-7, wlasciciel 2026-09-24: najpierw szczegoly,
     pod nimi sekcja CONFIG, potem CRON. Zakladki Opis/Config/Cron z R3-2
     zniknely: to byla ukryta funkcja (trzeba bylo wiedziec o Tab), a okno
-    zadania mialo W CRONIE bez configu."""
+    zadania mialo W CRONIE bez configu. U114 (2026-10-28): okno RELACJI (tab != None)
+    znow ma dwie zakladki, Opis i Config, z klawiszem lewo/prawo na ramce."""
     w = width - 4
+    if row["kind"] == "relation" and tab is not None:
+        # U114 (wlasciciel 2026-10-28, symulacja A): okno relacji ma dwie zakladki, Opis i
+        # Config (config + cron), przelaczane strzalkami lewo/prawo podpisanymi na ramce.
+        # Zakladki z R3-2 zdjete 2026-09-24, bo byly ukryte (trzeba bylo wiedziec o Tab);
+        # te sa na ramce. Okno zadania (F2) zostaje jednym przewijaniem.
+        if tab == 0:
+            return _relation_opis_lines(row, data, now, ch, w, repo, files)
+        out = [section_header(ch, "CONFIG", w)]
+        out.extend(_relation_config_lines(row, data, ch, w, repo, files))
+        out.extend(["", section_header(ch, "CRON", w)])
+        out.extend(_relation_cron_lines(row, ch, w))
+        return out
     if row["kind"] == "relation":
         out = _relation_opis_lines(row, data, now, ch, w, repo, files)
     else:
@@ -4063,6 +4139,21 @@ def replica_stats_row(data, name):
     return None
 
 
+def replica_last_run(srow, stats_failed=False):
+    """Kolumna "Ostatni bieg" w F6: wynik i czas ostatniego biegu z job-stats. "Wykonana"
+    mowi tylko, kiedy kopia byla ostatnio aktualna -- na pve10 replika calapula
+    padla 4 razy z 4 (rc=1), a lista pokazywala samo "Wykonana 22.10" (2026-10-28)."""
+    if stats_failed:
+        return u"?"
+    if not srow:
+        return u"-"
+    rc = srow.get("last_rc")
+    word = u"OK" if rc == 0 else (_(u"pominięty") if rc == 75 else _(u"BŁĄD rc=%s") % rc)
+    at = srow.get("last_at") or ""
+    m = re.match(r"\d{4}-(\d{2})-(\d{2}) (\d{2}:\d{2})", at)
+    return (u"%s %s.%s %s" % (word, m.group(2), m.group(1), m.group(3))) if m else word
+
+
 def replica_when(r, long=False):
     """Harmonogram repliki słowami; '+ po podłączeniu', gdy replika rusza też po podłączeniu
     dysku (on_insert, P5 2026-10-09)."""
@@ -4184,6 +4275,7 @@ def render_nosniki(data, cursor, width, height, now, ch, message="", focus="list
         st = MEDIA_STATES.get(r.get("present", "unknown"), MEDIA_STATES["unknown"])
         s = r.get("schedule") or "?"
         cells.append([r.get("name") or "?", replica_type_word(r), (r.get("last_current") or _(u"brak"))[:16],
+                      replica_last_run(replica_stats_row(data, r.get("name")), data.failed("stats")),
                       _(u"po podłączeniu") if s == "on-insert" else cron_words(s) + (_(u" + po podłączeniu") if r.get("on_insert") == "yes" else "")])
     det_title, det, child = u"", [], None
     if reps and 0 <= cursor < len(reps):
@@ -4201,9 +4293,9 @@ def render_nosniki(data, cursor, width, height, now, ch, message="", focus="list
         det_title = _(u"stany nośnika")
         det = [(_(MEDIA_STATES[k][0]), _(MEDIA_STATES[k][2])) for k in ("here", "available", "away", "wrong_medium")]
     return render_tabbed(data, width, height, now, ch, "nosniki", _(u"Repliki backupu kolektora (%d)") % len(reps),
-                         [_(u"Replika"), _(u"Typ"), _(u"Wykonana"), _(u"Harmonogram")], cells, cursor,
+                         [_(u"Replika"), _(u"Typ"), _(u"Wykonana"), _(u"Ostatni bieg"), _(u"Harmonogram")], cells, cursor,
                          (_(u"Enter szczegóły   Ins nowa   Del usuń   Tab do datasetów")) if reps else _(u"Ins nowa replika"),
-                         det_title, det, child, focus, pair_cursor, screen_actions("nosniki"), empty, prio=[0, 1, 2, 3], flex=3)
+                         det_title, det, child, focus, pair_cursor, screen_actions("nosniki"), empty, prio=[0, 3, 1, 2, 4], flex=4)
 
 
 # --- F5 Szablony (uwaga 24, 2026-10-09) ------------------------------------
@@ -4583,9 +4675,9 @@ HELP = [
     u"                 (adres, tryb, godzina maila, mail 'wszystko OK'), próg pojemności,",
     u"                 strażnik, szablon nowej relacji, aktualizacja, język GUI; wysłanie",
     u"                 maila testowego. Zapis: najpierw lista zmian, potem WYKONAJ.",
-    u"                 Pasek u góry: „ochrona” -- czy na tym hoście działa bezpiecznik",
-    u"                 pojemności (pełna pula) i strażnik nagłego przyrostu danych;",
-    u"                 włączasz je w F10.",
+    u"                 Pasek u góry: „kasowanie przy pełnej puli” i „alarm przyrostu”",
+    u"                 -- czy na tym hoście działa strażnik pojemności i strażnik",
+    u"                 nagłego przyrostu danych; włączasz je w F10.",
     u"  Kierunek       lewa strona to ZAWSZE ten host: pve10>pve9 wysyłam,",
     u"                 pve10<pve9 pobieram, pve10<>pve9 obie strony, local = na tym hoście",
     "",
@@ -4673,6 +4765,10 @@ class UI(object):
         self.rows = build_relations(self.data, self.now())
         self.jobrows = sort_zad_rows(build_jobs(self.data, self.now()), self.zad_sort, self.data)
         self.runrows = build_runs(self.data, self.jobrows, self.now(), self.prz_done, self.prz_group)
+        # F2 otwiera sie PRZY "teraz" (najblizszy nadchodzacy bieg), nie na najstarszym
+        # biegu sprzed 12 h (przejscie GUI pve10, 2026-10-28). Home = gora listy.
+        self.cursor["zadania"] = self.run_cursor_for(None)
+        self.prefetch_kopie()
 
     def now(self):
         return self.now_fixed if self.now_fixed is not None else int(time.time())
@@ -4792,6 +4888,9 @@ class UI(object):
             try:
                 with io.open(status, encoding="utf-8", errors="replace") as fh:
                     said = fh.readline().strip()
+                    # wt_end_nochange: okno zamkniete bez zmian -- bez pelnego odswiezenia
+                    if fh.readline().strip() == "nochange":
+                        self.noreload_after = True
                 os.unlink(status)
             except (IOError, OSError):
                 said = u""
@@ -4961,6 +5060,32 @@ class UI(object):
         self.runrows = build_runs(self.data, self.jobrows, self.now(), self.prz_done, self.prz_group)
         for k in self.cursor:
             self.cursor[k] = min(self.cursor[k], max(0, self.count(k) - 1))
+        if full:
+            self.prefetch_kopie()
+
+    def prefetch_kopie(self):
+        """Kampania 2026-10-28: pierwsze F4 stalo 5,5 s z zamrozonym ekranem (pve10: zfs-tree
+        po migawkach kazdego korzenia kopii). Po kazdym pelnym odczycie drzewo kopii czyta sie
+        w tle, na zywo z ZFS jak dotad; F4 bierze gotowe albo czeka na tlo (load_ztree)."""
+        if self.files.get("offline") or self.exec_log:
+            return
+        import threading
+
+        def _run(ui=self, data=self.data):
+            try:
+                groups = kopie_groups(ui.rows, data, ui.now(), ui.ch)
+                roots = []
+                for g in groups:
+                    for r in g["roots"]:
+                        if r not in roots:
+                            roots.append(r)
+                if roots:
+                    load_ztree(ui.repo, ui.files, data, roots)
+            except Exception:
+                pass   # F4 i tak wczyta sam
+        t = threading.Thread(target=_run)
+        t.daemon = True
+        t.start()
 
     def run_cursor_for(self, old):
         """Po przebudowie Przebiegow: ten sam bieg (zadanie i chwila), inaczej
@@ -6049,6 +6174,10 @@ class UI(object):
                 n = self.window[1]["name"]
                 self.window, self.scroll = None, 0
                 return self.run_dialog([self.zb(), "edit-relation", n, "--ask"]) or "stay"
+            elif k in ("left", "right") and self.window[0] == "relacja" and self.window[1].get("kind") == "relation":
+                ob = self.window[1]
+                ob["tab"] = (ob.get("tab", 0) + (1 if k == "right" else -1)) % len(RELATION_TABS)
+                self.scroll = 0
             elif k in ("down", "j"):
                 self.scroll += 1
             elif k in ("up", "k"):
@@ -6338,7 +6467,8 @@ class UI(object):
 def relation_window_lines_dispatch(ui, obj, width):
     if obj.get("kind") == "panel":
         return detail_kv(ui.ch, obj["pairs"], width - 4)
-    return relation_window_lines(obj, ui.data, ui.now(), ui.ch, width, ui.repo, ui.files)
+    return relation_window_lines(obj, ui.data, ui.now(), ui.ch, width, ui.repo, ui.files,
+                                 tab=obj.get("tab", 0) if obj.get("kind") == "relation" else None)
 
 
 # render() w UI korzysta z tej wersji, zeby okno-panel i okno-relacja szly ta sama droga.
@@ -6449,7 +6579,11 @@ def _ui_render(self, width, height):
             if obj.get("template"):
                 foot = _(u"e zmienia szablon   Esc zamyka   strzałki/PgUp/PgDn przewijają")
             if obj.get("kind") == "relation":
-                title = _(u"Relacja %s") % obj["name"]
+                _t = obj.get("tab", 0)
+                # Podpowiedz lewo/prawo w TYTULE (tez ramka): w stopce przy 80 kolumnach wypychala
+                # licznik wierszy "1-9 z 111".
+                title = (_(u"Relacja %s") % obj["name"]) + u": " + u"  ".join(
+                    (u"[%s]" % _(n)) if i == _t else _(n) for i, n in enumerate(RELATION_TABS)) + u"   ←/→"
                 # Odzysk przeszedł na F11 (właściciel 2026-10-18) -- tu tylko zmiana.
                 foot = _(u"e zmienia   s jako szablon   c edycja ręczna   Esc zamyka")
                 if finish_argv(obj.get("rel") or {}):
@@ -6472,6 +6606,7 @@ def deaccent(text):
 _DEACCENT = {ord(a): b for a, b in zip(u"ąćęłńóśźżĄĆĘŁŃÓŚŹŻ", u"acelnoszzACELNOSZZ")}
 _DEACCENT[ord(u"→")] = ">"
 _DEACCENT[ord(u"←")] = "<"
+_DEACCENT[ord(u"\u00d7")] = "x"
 for _q in u"\u201e\u201d\u201c":   # cudzyslowy „ ” “ -> "
     _DEACCENT[ord(_q)] = '"'
 
@@ -6797,7 +6932,8 @@ def curses_loop(ui):
                 if getattr(ui, "noreload_after", False):
                     # U104 (wlasciciel 2026-10-28): przegladanie kopii niczego nie zmienia,
                     # wiec bez czekania na pelne odswiezenie -- dane odswieza Ctrl-R albo
-                    # kolejne okno. Wszystkie inne okna nadal odswiezaja (decyzja 2026-10-09).
+                    # kolejne okno. Tak samo okno, ktore samo powiedzialo "nic nie zmieniono"
+                    # (wt_end_nochange). Wszystkie inne okna nadal odswiezaja (decyzja 2026-10-09).
                     ui.noreload_after = False
                 else:
                     ui.refresh_bg()
