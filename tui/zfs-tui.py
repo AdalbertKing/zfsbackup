@@ -1065,12 +1065,14 @@ def collect(repo, files, only=None):
     files["_data"] = data
     plan = [("status", ["status", "--json"]), ("jobs", ["list-jobs", "--json"]),
             ("monitors", ["monitor", "--json"]), ("progress", ["progress", "--json"]),
-            ("replicas", ["list-replicas", "--json"]), ("stats", ["job-stats", "--json", "--vol-cache=300", "--runs=%d" % PRZ_PAST_H])]
+            ("replicas", ["list-replicas", "--json"]), ("stats", ["job-stats", "--json", "--vol-cache=300", "--runs=%d" % PRZ_RUNS_H])]
     # RÓWNOLEGLE (P2, właściciel 2026-10-15: powrót z okna do GUI > 5 s). Pełne odświeżenie
     # zostaje (decyzja 2026-10-09: powrót zawsze odświeża), ale sześć czasowników tylko do
     # odczytu szło PO KOLEI -- zmierzone na pve10: list-jobs 6,0 s + monitor 5,6 s +
     # job-stats 2,6 s + reszta < 0,5 s. Razem trwa tyle, co najwolniejszy.
-    want = [(key, args) for key, args in plan if not only or key == only]
+    if isinstance(only, str):
+        only = (only,)
+    want = [(key, args) for key, args in plan if only is None or key in only]
     live = [(key, args) for key, args in want if not files.get(key) and not files.get("offline")]
     got = {}
     if len(live) > 1:
@@ -1950,6 +1952,10 @@ def sort_zad_rows(rows, mode, data):
 # Lista = kiedy i z jakim skutkiem; panel = jak ustawione + ten bieg; dol =
 # zrodlo -> cel tego biegu. Kazdy fakt w jednym miejscu.
 PRZ_PAST_H = 12
+# F6 (U130): przebiegi repliki siegaja dalej -- replika "pn-pt" ma przerwe pt->pn. Czytnik
+# job-stats bierze tyle godzin biegow (pve10: 48 h ~5 s, 168 h ~12 s; idzie w drugim etapie),
+# F2 nadal pokazuje PRZ_PAST_H.
+PRZ_RUNS_H = 72
 PRZ_AHEAD_H = 6
 
 # ---------------------------------------------------------------------------
@@ -1963,7 +1969,7 @@ TABS = {
     "zadania": [("run", u"Źródło → cel")],
     "relacje": [("ds", u"Datasety"), ("zad", u"Zadania")],
     "szablony": [("sz", u"Szczeble"), ("uz", u"Używają")],
-    "nosniki": [("ds", u"Datasety"), ("run", u"Przebiegi")],
+    "nosniki": [("run", u"Przebiegi")],
     "odzysk": [("ds", u"Datasety")],
 }
 
@@ -2107,8 +2113,8 @@ def render_tabbed(data, width, height, now, ch, screen, title, heads, cells, cur
             cbody.append("")
         many = len(child["tabs"]) > 1
         snaps = any(it.get("relname") and it.get("pair") is not None for it in child.get("items") or [])
-        cfoot = ((_(u"m migawki   ") if snaps else u"") + u"Enter okno   " + (_(u"←→ zakładki   ") if many else u"")
-                 + _(u"Esc wraca   Tab do linii poleceń")) if in_child else ""
+        cfoot = (child.get("foot") or ((_(u"m migawki   ") if snaps else u"") + u"Enter okno   " + (_(u"←→ zakładki   ") if many else u"")
+                 + _(u"Esc wraca   Tab do linii poleceń"))) if in_child else ""
         bottom = box(ch, tab_title(child.get("name"), child["tabs"], child.get("ti", 0)), cbody, width, footer=cfoot)
         if pcur is not None:
             scr.cursor_y = len(out) + 1 + pcur
@@ -2218,7 +2224,7 @@ def run_is_prune(it):
     return j.get("section_kind") == "prune" or u"prune" in (it.get("task") or u"")
 
 
-def build_runs(data, jobrows, now, show_done=True, grouped=False):
+def build_runs(data, jobrows, now, show_done=True, grouped=False, past_h=PRZ_PAST_H):
     """Wiersze PRZEBIEGOW: bieg = (zadanie, chwila). Zadania z jedna linia crona
     (jedna etykieta) ida razem -- pve2: subvol-103 i ROOT/pve-1 w jednym snapget,
     jeden bieg, nie dwa. Wiersze "now" (kreska) i "grp" (naglowek relacji) sa
@@ -2264,7 +2270,7 @@ def build_runs(data, jobrows, now, show_done=True, grouped=False):
                 st, en = iso_epoch(x.get("start") or ""), iso_epoch(x.get("end") or "")
                 at = en or st
                 p_end, prev = prev, (en or st)
-                if at is None or at < now - PRZ_PAST_H * 3600:
+                if at is None or at < now - past_h * 3600:
                     continue
                 r = dict(base)
                 r.update({"past": True, "at": at, "start": st, "end": en, "rc": x.get("rc"), "err": x.get("error") or "",
@@ -2612,27 +2618,31 @@ def tpl_children(tab, p, rows, now, ch):
     return {"heads": [_(u"Szczebel"), _(u"Kiedy"), _(u"Trzyma"), _(u"Prefiks migawek")], "items": items, "empty": _(u"szablon bez szczebli")}
 
 
-def rep_children(tab, r, data, now, ch):
-    """F6: Datasety repliki (co trafia na dysk) albo jej przebiegi."""
-    if tab == "run":
-        d = r.get("dst") or "\0"
-        ts = [t for t in (data.progress or {}).get("jobs", [])
-              if (t.get("target") or "") == d or (t.get("target") or "").startswith(d + "/")]
-        ts.sort(key=lambda t: int(t.get("finished_epoch") or t.get("started_epoch") or 0), reverse=True)
-        items = [transfer_item(t, data, now, ch) for t in ts[:20]]
-        return {"heads": [_(u"Kiedy"), _(u"Wynik"), _(u"Dataset"), _(u"Czas"), _(u"Dane")], "items": items, "prio": [0, 1, 2, 4, 3],
-                "empty": _(u"brak przebiegów w historii transferów (replika jeszcze nie biegła albo dysku nie było)")}
+def rep_children(tab, r, data, now, ch, jobrows=None):
+    """F6, dolna zakladka: PRZEBIEGI tej repliki jak na F2 -- wykonane, kreska "teraz",
+    nadchodzace (wlasciciel 2026-10-29, U130: "Wzór to okno jobs"). Zrodlo -> cel stoi
+    w prawym panelu (grupa Co)."""
+    bar = u"\u2500\u2500 " if not ch.ascii else u"-- "
+    rows = [x for x in build_runs(data, jobrows or [], now, True, False, past_h=PRZ_RUNS_H)
+            if x.get("kind") == "now" or (x.get("item") or {}).get("kind") == "replica"
+            and (x["item"].get("replica") or {}).get("name") == r.get("name")]
+    if not any(x.get("kind") == "run" for x in rows):
+        rows = []
+    elif not any(x.get("kind") == "run" and x.get("past") for x in rows):
+        rows = [x for x in rows if x.get("kind") != "now"]
     items = []
-    srcs = r.get("sources") or ([r["source"]] if r.get("source") else [])
-    rec = _(u"tak") if r.get("recursive") == "yes" else _(u"nie")
-    for s in srcs:
-        dst = r.get("dst") or "?"
-        items.append({"cells": [u"%s %s %s" % (s, ch.right, dst), rec],
-                      "pairs": [(_(u"Źródło"), s), (_(u"Cel"), _(u"%s   (pula %s)") % (dst, dst.split("/")[0])),
-                                (_(u"Z dziećmi"), rec),
-                                (_(u"Historia"), _(u"wszystkie migawki") if (r.get("history") or "all") == "all" else r.get("history"))],
-                      "title": u"%s -- dataset %s" % (r.get("name"), s)})
-    return {"heads": [_(u"Źródło %s cel") % ch.right, _(u"Z dziećmi")], "items": items, "empty": _(u"replika bez źródeł")}
+    for x in rows:
+        if x.get("kind") == "now":
+            items.append({"cells": [bar + _(u"teraz %s") % time.strftime("%H:%M", time.localtime(x["at"])), u" ", u" ", u" "],
+                          "pairs": [], "title": r.get("name") or u""})
+            continue
+        czas = fmt_dur(x["end"] - x["start"]) if x.get("past") and x.get("start") and x.get("end") else u"-"
+        rb = run_bytes(x, data)
+        items.append({"cells": [run_when(x["at"]), run_result(x), czas, hbytes_short(rb) if rb is not None else u"-"],
+                      "pairs": run_pairs(x, now, ch), "title": _(u"%s -- bieg") % r.get("name")})
+    return {"heads": [_(u"Kiedy"), _(u"Wynik"), _(u"Czas"), _(u"Dane")], "items": items, "prio": [0, 1, 3, 2],
+            "empty": _(u"brak przebiegów tej repliki w oknie %dh wstecz i %dh naprzód (dysku nie było albo nie ma harmonogramu)")
+            % (PRZ_RUNS_H, PRZ_AHEAD_H)}
 
 
 def odz_children(tab, item, rows, data, now, ch):
@@ -3086,7 +3096,10 @@ def screen_actions(active, hide_gone=False, paused=False, show_done=True, groupe
                 ("F9", u"Eksport/Import", u"Plik")]
     if active == "odzysk":
         # KOPIE (U82): Enter przeglada (migawka RO + mc), F9 przywraca -- ten sam wybor zrodla.
-        return [("F7", u"Przeglądaj", u"Przeglądaj"), ("F9", u"Przywróć", u"Przywróć")]
+        # F8 grupuje po relacji jak F9 na F2 (wlasciciel 2026-10-29: „tak jak F2 -- wszystkie
+        # mozliwosci”); F9 zostaje Przywroc, wiec grupowanie jest tu pod F8.
+        return [("F7", u"Przeglądaj", u"Przeglądaj"), ("F8", u"Jedna lista" if grouped else u"Grupuj po relacji", u"Grupuj"),
+                ("F9", u"Przywróć", u"Przywróć")]
     if active == "nosniki":
         # Krótkie (3. pole) tylko, gdy pasek się nie mieści: przy 80 kolumnach F9 wypychał F10.
         # "Przywróć z dysku" przeszedł na F11 Odzysk (właściciel 2026-10-18).
@@ -4314,7 +4327,12 @@ def replica_detail_pairs(r, ch, srow=None, stats_failed=False):
              (_(u"Rodzaj"), replica_kind(r)[1]),
              (_(u"Na dysku"), replica_disk_words(r)),
              (_(u"Szyfrowane"), replica_crypt_words(r)),
-             (_(u"Cel"), _(u"%s   (pula %s)") % (r.get("dst", "?"), (r.get("dst") or "?").split("/")[0])),
+             (_(u"Cel"), _(u"%s   (pula %s)") % (r.get("dst", "?"), (r.get("dst") or "?").split("/")[0]))]
+    # U130 (wlasciciel 2026-10-29): zrodla repliki w panelu, nie w dolnej zakladce
+    for _s in r.get("sources") or ([r["source"]] if r.get("source") else []):
+        pairs.append((_(u"Źródło %s cel") % ch.right, u"%s %s %s" % (_s, ch.right, r.get("dst") or "?")))
+    pairs += [(_(u"Z dziećmi"), _(u"tak") if r.get("recursive") == "yes" else _(u"nie")),
+              (_(u"Historia"), _(u"wszystkie migawki") if (r.get("history") or "all") == "all" else r.get("history")),
              group(ch, _(u"Kiedy")),
              (_(u"Nośnik"), media_state_line(r, MEDIA_STATES.get(r.get("present", "unknown"), MEDIA_STATES["unknown"]))),
              (_(u"Kiedy"), when),
@@ -4333,7 +4351,7 @@ def replica_detail_pairs(r, ch, srow=None, stats_failed=False):
     return pairs
 
 
-def render_nosniki(data, cursor, width, height, now, ch, message="", focus="list", pair_cursor=0, ti=0):
+def render_nosniki(data, cursor, width, height, now, ch, message="", focus="list", pair_cursor=0, ti=0, jobrows=None):
     if data.failed("replicas"):
         scr = Screen()
         scr.lines = [top_bar(data, width, now, ch.ascii, len(data.errors))] + box(ch, _(u"Replika"), source_error_body(ch, "replicas", data, "list-replicas"), width)
@@ -4358,7 +4376,7 @@ def render_nosniki(data, cursor, width, height, now, ch, message="", focus="list
         det = replica_detail_pairs(r, ch, replica_stats_row(data, r.get("name")), data.failed("stats"))
         tabs = TABS["nosniki"]
         ti = ti % len(tabs)
-        child = rep_children(tabs[ti][0], r, data, now, ch)
+        child = rep_children(tabs[ti][0], r, data, now, ch, jobrows)
         child.update({"name": r.get("name"), "tabs": tabs, "ti": ti})
     empty = [_(u"Brak sekcji [replica:] w configu tego kolektora."),
              _(u"Brak skonfigurowanych replik dla tego kolektora"),
@@ -4368,7 +4386,7 @@ def render_nosniki(data, cursor, width, height, now, ch, message="", focus="list
         det = [(_(MEDIA_STATES[k][0]), _(MEDIA_STATES[k][2])) for k in ("here", "available", "away", "wrong_medium")]
     return render_tabbed(data, width, height, now, ch, "nosniki", _(u"Repliki backupu kolektora (%d)") % len(reps),
                          [_(u"Replika"), _(u"Typ"), _(u"Wykonana"), _(u"Ostatni bieg"), _(u"Harmonogram")], cells, cursor,
-                         (_(u"Enter szczegóły   Ins nowa   Del usuń   Tab do datasetów")) if reps else _(u"Ins nowa replika"),
+                         (_(u"Enter szczegóły   Ins nowa   Del usuń   Tab do przebiegów")) if reps else _(u"Ins nowa replika"),
                          det_title, det, child, focus, pair_cursor, screen_actions("nosniki"), empty, prio=[0, 3, 1, 2, 4], flex=4)
 
 
@@ -4548,13 +4566,14 @@ def kopie_groups(rows, data, now, ch):
             if d and ":" not in d and d not in roots:
                 roots.append(d)
         groups.append({"kind": "relation", "name": x["name"], "word": _(u"relacja %s") % x["name"],
-                       "what": u"%s  %s" % (x.get("typ") or "", x.get("dir") or ""), "roots": roots, "note": ""})
+                       "what": u"%s  %s" % (x.get("typ") or "", x.get("dir") or ""), "roots": roots, "note": "",
+                       "typ": x.get("typ") or "", "dir": x.get("dir") or ""})
     for r in ((data.replicas or {}).get("replicas") or []) if data is not None else []:
         here = r.get("present") == "here"
         srcs = r.get("sources") or [s for s in (r.get("source") or "").split(",") if s]
         roots = [u"%s/%s" % (r.get("dst", "").rstrip("/"), s) for s in srcs] if here and r.get("dst") else []
         groups.append({"kind": "replica", "name": r.get("name") or "?", "word": _(u"replika %s") % (r.get("name") or "?"),
-                       "what": r.get("media") or "", "roots": roots,
+                       "what": r.get("media") or "", "roots": roots, "typ": _(u"replika"), "dir": r.get("media") or "",
                        "note": u"" if here else _(u"nośnik niepodłączony -- podłącz go, potem Ctrl-R")})
     return groups
 
@@ -4594,6 +4613,89 @@ def kopie_snap_items(doc, ds):
                       "name": nm if "@" in nm else u"%s@%s" % (ds, short), "creation": int(s.get("creation") or 0),
                       "kopie": True})
     return items
+
+
+def render_kopie_tab(data, items, selix, cursor, focus, scur, snaps, snaps_err, width, height, now, ch, ctx=None, grouped=False):
+    """F4 Kopie w UKLADZIE F2 (wlasciciel 2026-10-29: „Zrób go taki sam jak w jobs. To jest
+    eleganckie okno”; dwa panele z drzewem: „badziewne okno”). Ta sama funkcja co F2/F3
+    (render_tabbed): u gory TABELA kopii -- jeden wiersz = jeden dataset kopii -- z prawej
+    fakty o wierszu, na dole zakladka Migawki (kolumny jak `zfs list -t snapshot`). Stan i
+    klawisze bez zmian: Tab/Enter do migawek, Enter na migawce przeglada, F9 przywraca."""
+    cells, rows = [], []
+    bar = u"|" if ch.ascii else u"│"
+    last_g, ccur = None, 0
+    for i in selix:
+        it = items[i]
+        g = it.get("g")
+        # GRUPY jak F2 po F9: naglowek relacji z rodzajem i kierunkiem (tylko do czytania),
+        # pod nim jej kopie z wcieciem. Kursor chodzi po kopiach; ccur = jego wiersz w tabeli.
+        if grouped and g is not None and g is not last_g:
+            cells.append([(u"> " if ch.ascii else u"▸ ") + g["name"], u"%s  %s" % (g.get("typ") or u"", g.get("dir") or u""), u" ", u" "])
+            last_g = g
+        if len(rows) == cursor:
+            ccur = len(cells)
+        rows.append(it)
+        if it.get("any"):
+            cells.append([_(u"inny dysk -- pula spoza relacji i replik"), u" ", u" ", u" "] if grouped
+                         else [u" ", u" ", _(u"inny dysk -- pula spoza relacji i replik"), u" ", u" "])
+            continue
+        if it.get("note"):
+            cells.append([u"  %s %s" % (bar, it["note"]), u" ", u" ", u" "] if grouped
+                         else [g["name"], g.get("typ") or u" ", it["note"], u" ", u" "])
+            continue
+        ds = it["ds"] + (u"  (zvol)" if it.get("type") == "volume" else u"")
+        when = fmt_when_short(it["newest"], now) if it.get("newest") else u"-"
+        if grouped:
+            cells.append([u"  %s %s" % (bar, ds), u" ", str(it.get("snaps") or 0), when])
+        else:
+            cells.append([g["name"], g.get("typ") or u"", ds, str(it.get("snaps") or 0), when])
+    if not grouped:
+        ccur = cursor
+    cur = rows[cursor] if 0 <= cursor < len(rows) else {}
+    det_title, det, child = u"", [], None
+    if cur.get("ds"):
+        g = cur["g"]
+        det_title = u"%s -- %s" % (g["name"], cur["ds"].rsplit("/", 1)[-1])
+        det = [group(ch, _(u"Kopia")), (_(u"Dataset"), cur["ds"]),
+               (_(u"Relacja"), u"%s  %s" % (g["name"], g.get("typ") or u"")),
+               (_(u"Kierunek"), g.get("dir") or u"-"),
+               (_(u"Migawek"), str(cur.get("snaps") or 0)),
+               (_(u"Najnowsza"), fmt_full(cur["newest"]) if cur.get("newest") else u"-")]
+        if cur.get("type") == "volume":
+            det.append((_(u"Rodzaj"), _(u"dysk maszyny (zvol) -- przy przeglądaniu wybierzesz partycję")))
+        if ctx and (ctx.get("dataset") or ctx.get("at")) and ctx.get("rel") == g["name"]:
+            det = [group(ch, _(u"Wskazane")),
+                   (_(u"Dataset"), ctx.get("dataset") or _(u"(wybierzesz w oknie)")),
+                   (_(u"Chwila"), time.strftime("%Y-%m-%d %H:%M", time.localtime(ctx["at"])) if ctx.get("at") else _(u"najnowsza migawka"))] + det
+        sitems = []
+        for x in snaps or []:
+            y = dict(x)
+            y["title"] = y.get("name") or u""
+            # w panelu sama migawka (@...) -- pelna nazwa ds@... w waskim panelu lamala sie na dwa
+            # wiersze; dataset stoi wiersz nizej i w tytule zakladki
+            y["pairs"] = [group(ch, _(u"Migawka")), (_(u"Migawka"), u"@" + (y.get("name") or u"").split("@", 1)[-1]),
+                          (_(u"Czas"), fmt_full(y.get("creation")) if y.get("creation") else u"-"),
+                          (_(u"Dataset"), cur["ds"]), (_(u"Relacja"), g["name"])]
+            sitems.append(y)
+        child = {"name": cur["ds"], "tabs": [("snaps", _(u"Migawki"))], "ti": 0,
+                 "heads": [u"NAME", u"USED", u"REFER", u"CREATION"], "items": sitems,
+                 "empty": snaps_err or _(u"brak migawek"),
+                 "foot": _(u"Enter przeglądaj   F9 przywróć   Esc wraca   Tab do linii poleceń")}
+    elif cur.get("note"):
+        g = cur["g"]
+        det_title = g["name"]
+        det = [(_(u"Relacja"), u"%s  %s" % (g["name"], g.get("typ") or u"")), (_(u"Kierunek"), g.get("dir") or u"-"),
+               (_(u"Uwaga"), cur["note"])]
+    elif cur.get("any"):
+        det_title = _(u"inny dysk")
+        det = [(_(u"Inny dysk"), _(u"najpierw zaimportuj pulę (zpool import), potem Enter"))]
+    host = (data.jobs or {}).get("host") if data is not None and data.jobs else ""
+    title = (_(u"Kopie na %s") % (host or u"")).strip() + (_(u", po relacjach") if grouped else u"")
+    heads = ([_(u"Kopia"), _(u"Rodzaj"), _(u"Migawek"), _(u"Najnowsza")] if grouped
+             else [_(u"Relacja"), _(u"Rodzaj"), _(u"Kopia"), _(u"Migawek"), _(u"Najnowsza")])
+    return render_tabbed(data, width, height, now, ch, "odzysk", title, heads, cells, ccur,
+                         _(u"Enter/Tab do migawek"), det_title, det, child, focus, scur, screen_actions("odzysk", grouped=grouped),
+                         prio=([0, 3, 2, 1] if grouped else [0, 2, 4, 3, 1]))
 
 
 def render_kopie(data, items, sel, focus, scur, snaps, snaps_err, width, height, now, ch, ctx=None):
@@ -4759,7 +4861,7 @@ HELP = [
     u"  PANELE (każdy ekran): lista = wybór i stan; panel obok = fakty o",
     u"                 zaznaczonym wierszu, których nie widać na liście; na dole zakładki",
     u"                 z tym, co wiersz zawiera (F3: Datasety, Zadania; F5: Szczeble,",
-    u"                 Używają; F6: Datasety, Przebiegi; F4: Datasety). Tab wchodzi",
+    u"                 Używają; F6: Przebiegi; F4: Migawki). Tab wchodzi",
     u"                 na dół, strzałki w lewo/prawo zmieniają zakładkę, panel obok",
     u"                 pokazuje zaznaczony element, Enter jego pełne okno, Esc",
     u"                 wraca do listy, kolejny Tab do linii poleceń. Datasety relacji",
@@ -4827,6 +4929,7 @@ class UI(object):
         self.kopie_ctx = None   # F4 Kopie otwarte z Przebiegow/Relacji: {"rel", "dataset", "at"}
         self.zad_sort = 0   # kolejnosc zadan (F3 zakladka Zadania): relacje, w srodku wg nastepnego
         self.prz_done, self.prz_group = True, False   # F2 Przebiegi: F8 wykonane, F9 grupy
+        self.kopie_group = False                      # F4 Kopie: F8 grupy (jak F9 na F2)
         # LINIA POLECEN (wlasciciel 2026-09-11: "chcemy moc w kazdej chwili
         # pisac komendy z palca"). Styl mc: kazdy drukowalny znak leci tu,
         # Enter wykonuje NA PIERWSZYM PLANIE (curses zawieszone), historia w
@@ -4938,6 +5041,7 @@ class UI(object):
         zmieniono"), a GUI pokazuje je po powrocie zamiast "[rc=1] <cala linia polecenia>"
         (kampania 3, wlasciciel 2026-10-23: Esc wygladal jak blad)."""
         self.pending_title = _(WINDOW_TITLES.get(verb, verb))
+        self.pending_reload = self.RELOAD_AFTER.get(verb)
         log_path = self.start_verb_log(verb, line)
         status = (log_path + ".status") if log_path else os.path.join(
             "/tmp", "zfs-tui-%d-%s.status" % (os.getpid(), time.strftime("%H%M%S")))
@@ -5042,21 +5146,49 @@ class UI(object):
     BG_NOTE = u"   (odświeżam w tle…)"
     BG_KEY_WAIT = 30   # s: tyle klawisz po oknie czeka na świeże dane, potem przepada (REV-172)
 
-    def refresh_bg(self):
+    # POWROT W DWOCH ETAPACH (wlasciciel 2026-10-29: "Zbyt dlugo trwaja powroty z opcji do
+    # glownego okna"). Zmierzone na pve10, szesc czytnikow naraz: status 0,7 s, list-replicas
+    # 1,2 s, progress 2,0 s, list-jobs 2,3 s -- a monitor 4,4 s i job-stats 6,8 s. Ekran czeka
+    # tylko na cztery szybkie; monitor i statystyki przebiegow dochodza drugim etapem, a do
+    # tego czasu stoja ich poprzednie wartosci z dopiskiem MON_NOTE na linii komunikatu.
+    SLOW_READERS = ("monitors", "stats")
+    FAST_READERS = ("status", "jobs", "progress", "replicas")
+    MON_NOTE = u"   (monitor i przebiegi: sprawdzam…)"
+    # Co czytac po oknie, ktore cos zapisalo (zamkniecie bez zmian = nic, wt_end_nochange).
+    # Brak wpisu = wszystko. Szablon zmienia tylko liste szablonow; ustawienia -- tylko status.
+    RELOAD_AFTER = {"save-profile": (), "delete-profile": (), "settings": ("status",)}
+
+    def refresh_bg(self, only=None):
         if self.files.get("offline") or self.exec_log or any(self.files.get(k) for k in ("status", "jobs", "monitors")):
-            self.refresh()
+            self.refresh(only)
             return
         bg = getattr(self, "_bg", None)
         if bg is not None and bg[0].is_alive():
             return
         import threading
+        old = self.data
+        if only is not None:
+            # Odczyt celowany: reszta danych zostaje; listy czytane na zadanie odpadaja.
+            old.profiles = None
+            if self.screen == "szablony":
+                self.ensure_profiles()
+            if not only:
+                return
+        fast = tuple(k for k in self.FAST_READERS if only is None or k in only)
+        slow = tuple(k for k in self.SLOW_READERS if only is None or k in only)
+        new = Data()
+        for k in self.FAST_READERS + self.SLOW_READERS:
+            if k not in fast:                       # wolne i niezamowione: poprzednia wartosc
+                setattr(new, k, getattr(old, k))
+                if k in old.errors:
+                    new.errors[k] = old.errors[k]
         files2 = dict(self.files)
-        files2["_data"] = Data()
-        box = {}
+        files2["_data"] = new
+        box = {"full": only is None}
 
         def _run():
             try:
-                box["data"] = collect(self.repo, files2)
+                box["data"] = collect(self.repo, files2, fast)
             except Exception as e:   # pokaż, nie wysadzaj GUI
                 box["err"] = str(e)
         t = threading.Thread(target=_run)
@@ -5065,6 +5197,55 @@ class UI(object):
         self._bg = (t, box)
         if not (self.message or "").endswith(_(self.BG_NOTE)):
             self.message = (self.message or "") + _(self.BG_NOTE)
+        if slow:
+            # Drugi etap rusza dopiero PO pierwszym (poll_bg -> start_slow): pve10 ma dwa rdzenie,
+            # cztery szybkie czytniki same trwaja 0,9 s, w tloku z monitorem i job-stats 6,7 s.
+            self._slow_want = tuple(sorted(set(getattr(self, "_slow_want", ()) or ()) | set(slow)))
+
+    def start_slow(self):
+        slow, self._slow_want = getattr(self, "_slow_want", ()) or (), ()
+        mon = getattr(self, "_bgslow", None)
+        if slow and not (mon is not None and mon[0].is_alive()):
+            import threading
+            files3 = dict(self.files)
+            files3["_data"] = Data()
+            mbox = {"keys": slow}
+
+            def _run_slow():
+                try:
+                    mbox["data"] = collect(self.repo, files3, slow)
+                except Exception as e:
+                    mbox["err"] = str(e)
+            ts = threading.Thread(target=_run_slow)
+            ts.daemon = True
+            ts.start()
+            self._bgslow = (ts, mbox)
+
+    def slow_pending(self):
+        return getattr(self, "_bgslow", None) is not None
+
+    def poll_slow(self):
+        """Drugi etap: monitor i job-stats. -> True, gdy weszly (przerysuj). Czeka, az wejdzie
+        pierwszy etap -- inaczej pierwszy nadpisalby je poprzednimi wartosciami."""
+        mon = getattr(self, "_bgslow", None)
+        if mon is None or mon[0].is_alive() or getattr(self, "_bg", None) is not None:
+            return False
+        self._bgslow = None
+        msg = self.message or u""
+        if _(self.MON_NOTE) in msg:
+            self.message = msg.replace(_(self.MON_NOTE), u"")
+        d = mon[1].get("data")
+        if d is None:
+            self.message = (self.message or "") + _(u"   monitor nie odpowiedział: %s") % mon[1].get("err", "?")
+            return True
+        for k in mon[1]["keys"]:
+            setattr(self.data, k, getattr(d, k))
+            if k in d.errors:
+                self.data.errors[k] = d.errors[k]
+            else:
+                self.data.errors.pop(k, None)
+        self.apply_data(self.data, full=False)
+        return True
 
     ACTION_KEYS = ("F7", "F8", "F9", "enter", "del", "e")
     # REV-20261023-173: po NIEUDANYM odświeżeniu nie wystarcza lista klawiszy-czynności (Ins na
@@ -5101,12 +5282,15 @@ class UI(object):
         if (self.message or "").endswith(_(self.BG_NOTE)):
             self.message = self.message[:-len(_(self.BG_NOTE))]
         data = bg[1].get("data")
+        self.start_slow()
         if data is None:
             self.message = (self.message or "") + _(u"   odświeżenie w tle nie wyszło: %s") % bg[1].get("err", "?")
             self.bg_failed = True   # REV-172: wiersze zostają stare -- czynności czekają na Ctrl-R
             return True
         self.files["_data"] = data
-        self.apply_data(data, full=True)
+        self.apply_data(data, full=bg[1].get("full", True))
+        if self.slow_pending() and _(self.MON_NOTE) not in (self.message or u""):
+            self.message = (self.message or u"") + _(self.MON_NOTE)
         before = getattr(self, "rel_names_before_bg", None)
         self.rel_names_before_bg = None
         if before is not None and self.cursor_to_new(before):
@@ -5114,7 +5298,11 @@ class UI(object):
         return True
 
     def refresh(self, only=None):
+        if only is not None:
+            self.data.profiles = None           # odczyt celowany (RELOAD_AFTER): szablony od nowa
         self.apply_data(collect(self.repo, self.files, only), full=(only is None))
+        if only is not None and self.screen == "szablony":
+            self.ensure_profiles()
 
     def apply_data(self, data, full=True):
         self.data = data
@@ -5134,6 +5322,11 @@ class UI(object):
         self.jobrows = sort_zad_rows(build_jobs(self.data, self.now()), self.zad_sort, self.data)
         self.runrows = build_runs(self.data, self.jobrows, self.now(), self.prz_done, self.prz_group)
         for k in self.cursor:
+            # F4 liczy wiersze z drzewa kopii (zfs-tree) -- poza F4 nie czytamy go tu w glownym
+            # watku: na pve10 to bylo 5 s zamrozonego "Wczytuję… 0 s" po KAZDYM oknie (zrzut stosu,
+            # 2026-10-29). Drzewo czyta prefetch_kopie w tle, kursor F4 przycina kopie_state.
+            if k == "odzysk" and self.screen != "odzysk":
+                continue
             self.cursor[k] = min(self.cursor[k], max(0, self.count(k) - 1))
         if full:
             self.prefetch_kopie()
@@ -5406,7 +5599,9 @@ class UI(object):
                     roots.append(r)
         tree = load_ztree(self.repo, self.files, self.data, roots)[0] if roots else []
         items = kopie_items(groups, tree)
-        return items, [i for i, x in enumerate(items) if x.get("ds") or x.get("any")]
+        # Wiersz notatki (replika bez nosnika, relacja bez kopii) tez jest w tabeli -- operator
+        # ma go widziec; akcji na nim nie ma (klawisze nizej).
+        return items, [i for i, x in enumerate(items) if x.get("ds") or x.get("any") or x.get("note")]
 
     def kopie_current(self):
         items, selix = self.kopie_state()
@@ -6197,7 +6392,11 @@ class UI(object):
                     self.window, self.scroll = obj["back_to"], 0
                     return "stay"
                 self.window, self.scroll = None, 0
-                if obj.get("proc") is not None and obj["proc"].poll() is None:
+                if obj.get("proc") is None:
+                    # Okno tylko pokazywalo (klucz nosnika F8, odmowa importu): nic nie
+                    # biegło, nic do czytania (wlasciciel 2026-10-29, Esc po F8 Klucz).
+                    return "stay"
+                if obj["proc"].poll() is None:
                     self.message = _(u"proces biegnie dalej (pid %d); wyjście: %s") % (obj["proc"].pid, obj["path"])
                 self.refresh_bg()
                 self.wait_fresh = True
@@ -6277,6 +6476,9 @@ class UI(object):
         # numerze -- inaczej przelaczenie widoku przenosiloby operatora na cudze zadanie.
         if k == "F7" and self.screen == "zadania":
             self.run_job_now()
+            return "stay"
+        if k == "F8" and self.screen == "odzysk":
+            self.kopie_group = not self.kopie_group    # kursor zostaje na tej samej kopii
             return "stay"
         if k in ("F8", "F9") and self.screen == "zadania":
             c0 = self.cursor["zadania"]
@@ -6427,6 +6629,8 @@ class UI(object):
         elif k in ("F7", "enter", "F9") and n and self.screen == "odzysk":
             self.cursor["odzysk"] = c
             it = self.kopie_current()
+            if it.get("note"):
+                return "stay"      # replika bez nosnika / relacja bez kopii: nie ma czego otworzyc
             if self.focus == "pairs":
                 snaps = self.kopie_snaps(it)[0]
                 s_ = snaps[min(self.pair_cursor, len(snaps) - 1)] if snaps else None
@@ -6566,14 +6770,16 @@ def _ui_render(self, width, height):
                                focus=self.focus, pair_cursor=self.pair_cursor, ti=self.ctab.get("szablony", 0))
     elif self.screen == "odzysk":
         items, selix = self.kopie_state()
-        c = self.cursor["odzysk"]
+        # przyciecie tutaj, nie w apply_data (tam drzewa kopii nie czytamy poza F4)
+        c = self.cursor["odzysk"] = min(self.cursor["odzysk"], max(0, len(selix) - 1))
         it = items[selix[c]] if 0 <= c < len(selix) else {}
         snaps, serr = self.kopie_snaps(it) if it.get("ds") else ([], None)
-        base = render_kopie(self.data, items, selix[c] if 0 <= c < len(selix) else -1, self.focus, self.pair_cursor,
-                            snaps, serr, width, sh, now, self.ch, ctx=self.kopie_ctx)
+        base = render_kopie_tab(self.data, items, selix, c, self.focus, self.pair_cursor,
+                                snaps, serr, width, sh, now, self.ch, ctx=self.kopie_ctx, grouped=self.kopie_group)
     else:
         base = render_nosniki(self.data, self.cursor["nosniki"], width, sh, now, self.ch, self.message,
-                              focus=self.focus, pair_cursor=self.pair_cursor, ti=self.ctab.get("nosniki", 0))
+                              focus=self.focus, pair_cursor=self.pair_cursor, ti=self.ctab.get("nosniki", 0),
+                              jobrows=self.jobrows)
     # LINIA POLECEN ZAWSZE NA DOLE, takze pod oknem (wlasciciel 2026-10-18: okna
     # nie na caly ekran, na dole widac bash i polecenie zlozone przez okno). Okno
     # potwierdzenia pokazuje w niej swoje polecenie; Tab przenosi je do edycji.
@@ -6917,16 +7123,17 @@ def curses_loop(ui):
             # (to pliki, nie komenda), i curses maluje roznice, nie ekran.
             if ui.window and ui.window[0] == "output" and ui.window[1].get("proc") is not None and ui.window[1]["proc"].poll() is None:
                 stdscr.timeout(500)          # ogon pliku wyjscia zyje
-            elif ui.bg_pending():
+            elif ui.bg_pending() or ui.slow_pending():
                 stdscr.timeout(300)          # dane z tła: przerysuj, gdy dojdą
             else:
                 stdscr.timeout(-1)
             k, seqname, is_char = read_key()
             if k == -1:
-                if ui.poll_bg():
-                    continue
+                ui.poll_bg()
+                ui.poll_slow()
                 continue
             ui.poll_bg()
+            ui.poll_slow()
             if k == curses.KEY_RESIZE:
                 continue
             name = seqname if k == -2 else KEYMAP.get(k)
@@ -7012,8 +7219,9 @@ def curses_loop(ui):
                     # (wt_end_nochange). Wszystkie inne okna nadal odswiezaja (decyzja 2026-10-09).
                     ui.noreload_after = False
                 else:
-                    ui.refresh_bg()
-                    ui.wait_fresh = True
+                    only, ui.pending_reload = getattr(ui, "pending_reload", None), None
+                    ui.refresh_bg(only)
+                    ui.wait_fresh = only != ()
     curses.wrapper(main)
 
 

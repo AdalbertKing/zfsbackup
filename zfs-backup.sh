@@ -7628,6 +7628,17 @@ cmd_set_tiers() {
     fi
     EDIT_RELATION_NAME="$name"
     atomic_replace_and_install "$cronfile" "$workfile"
+    # A tier ADDED here gets its first snapshot now, as at creation and as set-datasets
+    # gives a new dataset (pve10, 2026-10-29: weekly added to pve9b, F7 ran the hourly
+    # lines, and the monitor read "no automated_weekly -- age from dataset creation" =
+    # CRITICAL, "stare", until Sunday). Only the added tier's lines run.
+    local _op _t
+    for _op in "${ops[@]}"; do
+        case "$_op" in --add-tier=*|--add-src-tier=*) ;; *) continue ;; esac
+        _t="${_op#*=}"
+        case "$_t" in hourly|daily|weekly|monthly|yearly) ;; *) continue ;; esac
+        FIRST_RUN_ANY=1 SNAPONLY_FIRST_TIER="$_t" snaponly_first_snapshots "$name"
+    done
 }
 
 
@@ -12673,6 +12684,7 @@ snaponly_first_snapshots() {   # <name>
         esac
     done < <(printf '%s\n' "$tab" | sed -n '/^# BEGIN zfs-backup-managed/,/^# END zfs-backup-managed/p' \
                  | grep -F -- " -L $name " \
+                 | { if [ -n "${SNAPONLY_FIRST_TIER:-}" ]; then grep -E "zfs-job[.]sh \"[^\"]*(__| )${SNAPONLY_FIRST_TIER} (snapshot|backup|copy) "; else cat; fi; } \
                  | { if [ "${FIRST_RUN_ANY:-0}" = 1 ]; then grep -E 'snap(get|send)\.sh '; else grep -F 'snapget.sh -s '; fi; } \
                  | { if [ -n "${SNAPONLY_FIRST_ONLY:-}" ]; then grep -F -e ":$SNAPONLY_FIRST_ONLY\"" -e "\"$SNAPONLY_FIRST_ONLY\"" \
                        -e ",$SNAPONLY_FIRST_ONLY\"" -e "\"$SNAPONLY_FIRST_ONLY," -e ",$SNAPONLY_FIRST_ONLY,"; else cat; fi; })
@@ -16393,8 +16405,8 @@ cmd_run_relation() {
         die "run-relation: '$name' is paused -- resume it first (resume-client $name). Nothing was run."
     fi
     local tab; tab=$(crontab_for_target) || die "run-relation: cannot read the crontab of '$(cron_target_user)'"
-    local line label key hour
-    local -A fine=() first=()
+    local line label key tier rank
+    local -A fine=() best=()
     local -a order=()
     while IFS= read -r line; do
         [ -n "$line" ] || continue
@@ -16402,17 +16414,24 @@ cmd_run_relation() {
         # The job label ends in "(<notify id>)", one per dataset of the relationship.
         key=$(printf '%s' "$label" | sed -nE 's/.*\(([^)]+)\)$/\1/p')
         [ -n "$key" ] || key="${label:-$line}"
-        if [ -z "${first[$key]+x}" ]; then first[$key]="$line"; order+=("$key"); fi
-        hour=$(printf '%s' "$line" | awk '{print $2}')
-        # hour '*' = runs every hour = the finest tier of this dataset
-        if [ "$hour" = "*" ] && [ -z "${fine[$key]+x}" ]; then fine[$key]="$line"; fi
+        # The LOWEST tier of the dataset, by its rank (owner 2026-10-29: "F7 najnizszy
+        # szczebel"). The tier is the word right before "snapshot|backup|copy (" in the
+        # label ("h hourly backup (x)", "... relacja-pve9b__daily snapshot (x)").
+        # It used to be "hour '*', else the first line in cron order": a relation with no
+        # hourly tier ran whichever line came first, e.g. its weekly. Equal ranks keep cron order.
+        tier=$(printf '%s' "$label" | sed -nE 's/.*[ _]([A-Za-z0-9-]+) (snapshot|backup|copy) \(.*/\1/p')
+        rank=$(tiers_cadence_rank "$tier")
+        if [ -z "${fine[$key]+x}" ]; then order+=("$key"); fi
+        if [ -z "${fine[$key]+x}" ] || [ "$rank" -lt "${best[$key]}" ]; then
+            fine[$key]="$line"; best[$key]="$rank"
+        fi
     done < <(printf '%s\n' "$tab" | sed -n '/^# BEGIN zfs-backup-managed/,/^# END zfs-backup-managed/p' \
                  | grep -F -- " -L $name " | grep -E 'snap(get|send)\.sh')
     [ "${#order[@]}" -gt 0 ] \
         || die "run-relation: no copy job of '$name' in the installed cron of '$(cron_target_user)' -- nothing to run"
     local cmd logf rc done_n=0 fail_n=0 busy_n=""
     for key in "${order[@]}"; do
-        line="${fine[$key]:-${first[$key]}}"
+        line="${fine[$key]}"
         cmd=$(printf '%s' "$line" | sed -E 's/^([^ ]+ ){5}//')
         label=$(printf '%s' "$cmd" | sed -nE 's/.*zfs-job\.sh "([^"]+)".*/\1/p')
         logf=$(printf '%s' "$cmd" | sed -nE 's/.* --log=([^ ]+).*/\1/p')
