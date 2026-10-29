@@ -17051,6 +17051,11 @@ RUNS
         [ -n "$_el" ] || continue
         [ "$_dat" = - ] && _dat=""; [ "$_dsc" = - ] && _dsc=""
         [ "$_eat" = - ] && _eat=""; [ "$_err" = - ] && _err=""
+        # A control character in an error text (ssh's "Connection reset by ... port 22" came
+        # with one) is invalid inside a JSON string, and json_escape -- pinned identical to
+        # the frozen engines' copy -- does not escape it: the GUI then dropped the WHOLE
+        # job-stats reading ("job-stats nie odpowiedział", pve10, 2026-10-29). A space here.
+        _err="${_err//[[:cntrl:]]/ }"; _dsc="${_dsc//[[:cntrl:]]/ }"
         [ "$first" -eq 1 ] || printf ','
         first=0
         printf '{"label":"%s","discard_at":"%s","discard":"%s","error_at":"%s","error":"%s"}' \
@@ -17090,6 +17095,7 @@ VOL
         while IFS=$'\t' read -r _rl _rb _re _rrc _rer; do
             [ -n "$_rl" ] || continue
             [ "$_rb" = - ] && _rb=""; [ "$_re" = - ] && _re=""; [ "$_rer" = - ] && _rer=""
+            _rer="${_rer//[[:cntrl:]]/ }"     # see the error field above
             [ "$first" -eq 1 ] || printf ','
             first=0
             printf '{"label":"%s","start":"%s","end":"%s","rc":%s,"error":"%s"}' \
@@ -20237,6 +20243,10 @@ status_json_record() {   # <client record path> <ask the peer: 0|1>
     jsonw_field profile            "${PROFILE:-}"
     jsonw_field source_profile     "${SOURCE_PROFILE:-}"
     jsonw_field client_target      "${CLIENT_TARGET:-}"
+    # The directory under the target the copies land in (snapget_local_base) -- the
+    # GUI rebuilt it from peer_host and showed a path that does not exist once the
+    # address changed (ab: peer 203.0.113.2, copies under 192.0.2.98; U111).
+    jsonw_field landing            "${LANDING_LABEL:-}"
     # KIERUNEK RELACJI, a nie domysl czytelnika (2026-09-21). GUI nie mialo skad
     # wziac trybu, wiec kazda relacje rysowalo jako "backup" -- lacznie z synchro,
     # ktora nie ma celu i lezy u siebie pod TA SAMA sciezka. Rekord wie to od
