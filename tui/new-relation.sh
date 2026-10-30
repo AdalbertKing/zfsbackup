@@ -569,6 +569,10 @@ is_passive_copy() { is_local_copy && sync_from_chain && [ "$(chain_ans)" = chain
 # odpowiada na podstawie faktów (ile i jak stara najnowsza); "resztki" = --own-snapshots.
 CHAIN_ANS=""; CHAIN_FOR=""
 chain_ans() {   # -> chain | own | "" (brak odpowiedzi dla obecnego koszyka)
+    # IFS ze spacją: CHAIN_FOR zapisano "${B_ROOT[*]}" przy zwykłym IFS, a build_argv woła tę
+    # funkcję z `local IFS=,` -- przy dwóch korzeniach "a,b" != "a b" i odpowiedź ginęła
+    # (kampania pve10, 2026-10-29: "robię własne" w podsumowaniu, bez --own-snapshots w komendzie).
+    local IFS=' '
     [ -n "$CHAIN_ANS" ] && [ "$CHAIN_FOR" = "${B_ROOT[*]}" ] && echo "$CHAIN_ANS"
 }
 chain_facts() {   # -> wiersze "  dataset: N migawek automated_*, najnowsza ... (... temu)"
@@ -585,7 +589,7 @@ chain_facts() {   # -> wiersze "  dataset: N migawek automated_*, najnowsza ... 
                 if [ "$ago" -lt 120 ]; then ago="$ago min"
                 elif [ "$ago" -lt 2880 ]; then ago="$((ago / 60)) $(T 'godz.')"
                 else ago="$((ago / 1440)) $(T dni)"; fi
-                echo "$(Tv '  $n: migawki automated_*: $f, najnowsza $when ($ago temu)' '$n' "$n" '$f' "$f" '$when' "$(date -d "@$e" '+%Y-%m-%d %H:%M')" '$ago' "$ago")"
+                echo "$(Tv '  $n: migawki automated_*: $f, najnowsza $when ($ago temu)' '$n' "$n" '$f' "$f" '$when' "$(date -d "@$e" '+%Y.%m.%d %H:%M')" '$ago' "$ago")"
             else
                 echo "$(Tv '  $n: migawki automated_*: $f' '$n' "$n" '$f' "$f")"
             fi
@@ -1049,7 +1053,7 @@ summary_text() {
         echo "$(T '   Relacja obejmie:')"
         basket_entries "$BASKET_DS_JSON" | while IFS=$'\t' read -r n r; do
             [ -n "$n" ] || continue
-            if [ "$r" = flat ]; then echo "     [x] $n  $(T '(z dziećmi, także przyszłymi)')"; else echo "     [-] $n  $(T '(sam dataset; dzieci tylko wymienione)')"; fi
+            if [ "$r" = flat ]; then echo "     [x] $n  $(T '(z podrzędnymi, także przyszłymi)')"; else echo "     [-] $n  $(T '(sam dataset; podrzędne tylko wymienione)')"; fi
         done
     else
         for i in "${!B_ROOT[@]}"; do echo "    ${B_ROOT[$i]}  -- $(describe "$i")"; done
@@ -1219,7 +1223,9 @@ step_summary() {    # 0 = wykonano (RC_RUN), 1 = wstecz, 2 = do datasetów, 3 = 
         fi
         [ "$RC_RUN" -eq 0 ] && NR_DONE=1
         if [ "$RC_RUN" -eq 0 ]; then
-            result_box "$(T 'Nowa relacja: GOTOWE')" 0 "$TMPD/run.log" "$(Tv 'Relacja '\''$RNAME'\'' założona (rc=0).' '$RNAME' "$RNAME")${ZFS_TUI_LOG:+\n\n$(T 'Dziennik:') $ZFS_TUI_LOG}"
+            # Sukces jednym zdaniem = linia komunikatu GUI, bez okna z <Ok>; dziennik dopisuje GUI
+            # (kampania pve10, 2026-10-29: linia "Dziennik:" robila z sukcesu okno).
+            result_box "$(T 'Nowa relacja: GOTOWE')" 0 "$TMPD/run.log" "$(Tv 'Relacja '\''$RNAME'\'' założona (rc=0).' '$RNAME' "$RNAME")"
         elif [ "$GRANT" -eq 0 ] && grep -q -- '--commit-scope=' "$TMPD/run.log"; then
             # To nie awaria: wybrano "zatwierdzę sam", więc instalacja MA stanąć w tym miejscu.
             cmd_oneline >"$HOME/new-relation-$RNAME.cmd" 2>/dev/null; echo >>"$HOME/new-relation-$RNAME.cmd"
