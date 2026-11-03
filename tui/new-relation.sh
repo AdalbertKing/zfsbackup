@@ -277,7 +277,7 @@ raw_default() {
 # --- krok 5: dokąd (tylko backup) ---------------------------------------------
 # Lekcja ze starego kreatora: lista pokazywała cudze lądowiska i podgląd jeździł za
 # kursorem. Tu kandydatów jest mało i każdy ma POWÓD; reszta to "inna ścieżka".
-TARGET=""; PROFILE=""; RNAME=""; ACCT="root"; ACCT_OTHER=""; SRCKEEP=""
+TARGET=""; PROFILE=""; RNAME=""; ACCT="root"; ACCT_OTHER=""; SRCKEEP=""; FORCE_PASSIVE=0
 EXFAM="__replicate_,vzdump,__migration__"; GRANT=1; MANUAL=0; SRCPROF=""; RAW=0
 # Zamrażanie ma DWIE połowy (zmierzone pve10 <- pve9b, 2026-09-20): szablon, który każe
 # zamrażać, ORAZ zgoda źródła, żeby konto kolektora mogło zamrażać jego gości. Bez zgody
@@ -542,16 +542,21 @@ account_is_flat() {    # <konto: "" = root> -> 0, gdy żywa relacja NA TYM KONCI
 # migawki c na kopiach b zepsułyby b przyjmowanie kopii z a. Silnik tego sam nie rozstrzyga
 # (nie odróżni łańcucha od resztek tej samej relacji po eksport -> usuń -> import), więc
 # kreator mówi to wprost i poleca passive-flat; decyduje admin.
-sync_from_chain() {   # -> 0, gdy lustro/backup/kopia lokalna i któryś korzeń koszyka ma już migawki naszej rodziny
+sync_from_chain() {   # -> 0, gdy lustro/backup/kopia lokalna/migawki zdalne i koszyk ma już migawki naszej rodziny
     # Kopia lokalna (2026-10-24, Site-A pve2): kopiuje z repliki pvesr, której migawki robi
     # węzeł gościa -- to też łańcuch, tylko po tej samej stronie.
-    [ "$MODE" = sync ] || [ "$MODE" = backup ] || is_local_copy || return 1
+    # Migawki zdalne (U141, 2026-11-03): rodzina bez etykiety kolektora -- gdy na źródle już
+    # jest, ktoś musi powiedzieć, kto ją robi (przejmuję resztki / osobna rodzina z etykietą).
+    [ "$MODE" = sync ] || [ "$MODE" = backup ] || [ "$MODE" = snaponly ] || is_local_copy || return 1
     local r n c f e
     for r in ${B_ROOT[@]+"${B_ROOT[@]}"}; do
         while IFS=$'\t' read -r n c f e; do
-            [ "$n" = "$r" ] || continue
-            # Backup i kopia lokalna: tylko NASZA rodzina (automated_*) -- ręczna migawka to nie łańcuch.
-            { [ "$MODE" = backup ] || is_local_copy; } && c="${f:-0}"
+            # U138 (Dąbrowska 2026-11-01): korzeń `rpool/data` sam nie ma migawek, mają je dyski
+            # pod nim (repliki pvesr) -- liczą się też dzieci korzenia. Lustro jak dotąd: sam korzeń.
+            if [ "$MODE" = sync ]; then [ "$n" = "$r" ] || continue
+            else case "$n" in "$r"|"$r"/*) ;; *) continue ;; esac; fi
+            # Backup, kopia lokalna, migawki zdalne: tylko NASZA rodzina (automated_*) -- ręczna migawka to nie łańcuch.
+            { [ "$MODE" = backup ] || [ "$MODE" = snaponly ] || is_local_copy; } && c="${f:-0}"
             case "$c" in ''|*[!0-9]*) c=0 ;; esac
             [ "$c" -gt 0 ] && return 0
         done <"$TMPD/own.tsv" 2>/dev/null
@@ -562,12 +567,28 @@ REC_PROFILE=passive-flat
 is_local_copy() { [ "$MODE" = local ] && [ "$NOCOPY" -eq 0 ]; }
 # Kopia lokalna, która przyjmuje cudze migawki (--passive): nic na źródle nie tworzy, więc nie
 # zamraża gości i nie ma retencji źródła (kampania 1.0, 2026-10-25).
-is_passive_copy() { is_local_copy && sync_from_chain && [ "$(chain_ans)" = chain ]; }
+is_passive_copy() {
+    is_local_copy || return 1
+    # U138 (wlasciciel 2026-11-01: odpowiedz "lancuch" z okna "Migawki naszej rodziny juz sa na
+    # zrodle" ma sie dac wymusic, gdy migawek jeszcze nie ma): przelacznik w Zaawansowanych, gdy
+    # tego okna nie ma (zrodlo bez migawek rodziny).
+    if sync_from_chain; then [ "$(chain_ans)" = chain ]; else [ "${FORCE_PASSIVE:-0}" -eq 1 ]; fi
+}
 # KTO ROBI TE MIGAWKI? (właściciel 2026-10-24, wariant A). Silnik nie odróżni żywego łańcucha
 # od resztek starej relacji -- zmierzone na pve10<>pve11: lustro założone od nowa na migawkach
 # swojej poprzedniczki wyszło PASYWNE i przestało robić migawki. Pyta więc kreator, a admin
 # odpowiada na podstawie faktów (ile i jak stara najnowsza); "resztki" = --own-snapshots.
 CHAIN_ANS=""; CHAIN_FOR=""
+step_passive() {   # U138: kopia lokalna pasywnie, choc na zrodle nie ma jeszcze migawek rodziny
+    local def=no; [ "${FORCE_PASSIVE:-0}" -eq 1 ] && def=yes
+    geom
+    wt --title "$(T 'Pasywnie?')" --ok-button "$(T Dalej)" --cancel-button "$(T Wstecz)" --notags --default-item "$def" \
+       --menu "$(T 'Na źródle nie ma jeszcze migawek naszej rodziny. Pasywnie: kopia tylko PRZYJMUJE migawki,\nktóre zrobi ktoś inny (np. relacja migawek zdalnych + replika pvesr), i niczego na źródle\nnie tworzy ani nie kasuje. Do czasu, aż tamte się pojawią, kopia nie ma czego kopiować.')" "$H" "$W" 2 \
+       no "$(T 'Nie -- kopia robi własne migawki')" \
+       yes "$(T 'Tak -- pasywnie, przyjmuje cudze migawki (łańcuch)')" || return 1
+    [ "$WT_OUT" = yes ] && FORCE_PASSIVE=1 || FORCE_PASSIVE=0
+    return 0
+}
 chain_ans() {   # -> chain | own | "" (brak odpowiedzi dla obecnego koszyka)
     # IFS ze spacją: CHAIN_FOR zapisano "${B_ROOT[*]}" przy zwykłym IFS, a build_argv woła tę
     # funkcję z `local IFS=,` -- przy dwóch korzeniach "a,b" != "a b" i odpowiedź ginęła
@@ -580,7 +601,8 @@ chain_facts() {   # -> wiersze "  dataset: N migawek automated_*, najnowsza ... 
     now=$(date +%s)
     for r in ${B_ROOT[@]+"${B_ROOT[@]}"}; do
         while IFS=$'\t' read -r n c f e; do
-            [ "$n" = "$r" ] || continue
+            if [ "$MODE" = sync ]; then [ "$n" = "$r" ] || continue
+            else case "$n" in "$r"|"$r"/*) ;; *) continue ;; esac; fi
             case "$f" in ''|*[!0-9]*) f=0 ;; esac
             [ "$f" -gt 0 ] || continue
             case "$e" in ''|*[!0-9]*) e=0 ;; esac
@@ -600,6 +622,17 @@ step_chain() {   # 0 = odpowiedź zapisana, 1 = wstecz
     local def="${CHAIN_ANS:-chain}" facts
     facts="$(chain_facts)"
     geom
+    if [ "$MODE" = snaponly ]; then
+        # U141: migawki zdalne niczego nie przyjmują -- zawsze robią swoje. Pytanie brzmi, czy
+        # rodzina na źródle jest ich (resztki, przejmuję) czy kogoś innego (osobna rodzina).
+        case "$def" in own|stamp) ;; *) def=own ;; esac
+        wt --title "$(title 5 "$(T 'Migawki naszej rodziny już są na źródle')")" --ok-button "$(T Dalej)" --cancel-button "$(T Wstecz)" --notags --default-item "$def" \
+           --menu "$(Tv 'Na $HOST są już migawki naszej rodziny:\n$facts\n\nKto je dziś robi? Najnowsza sprzed godziny-dwóch zwykle znaczy, że ktoś je robi.\nResztki: ta relacja przejmuje je do swojej retencji i robi dalej te same.\nInny twórca: ta relacja robi osobną rodzinę, z etykietą tego kolektora na początku nazwy.' '$HOST' "$(T 'źródle') $( [ -n "$HOST" ] && hostw || hostname -s)" '$facts' "$facts")" "$H" "$W" 2 \
+           own "$(T 'Nikt -- to resztki starej relacji, przejmuję je')" \
+           stamp "$(T 'Robi je inny kolektor albo cron -- osobna rodzina z etykietą')" || return 1
+        CHAIN_ANS="$WT_OUT"; CHAIN_FOR="${B_ROOT[*]}"
+        return 0
+    fi
     wt --title "$(title 5 "$(T 'Migawki naszej rodziny już są na źródle')")" --ok-button "$(T Dalej)" --cancel-button "$(T Wstecz)" --notags --default-item "$def" \
        --menu "$(Tv 'Na $HOST są już migawki naszej rodziny:\n$facts\n\nKto je dziś robi? Najnowsza sprzed godziny-dwóch zwykle znaczy, że ktoś je robi.\nŁańcuch: ta relacja je PRZYJMUJE i sama niczego tam nie tworzy ani nie kasuje.\nResztki: ta relacja robi WŁASNE; stare wejdą do jej retencji i z czasem znikną.' '$HOST' "$(T 'źródle') $( [ -n "$HOST" ] && hostw || hostname -s)" '$facts' "$facts")" "$H" "$W" 2 \
        chain "$(T 'Tworzy je inny kolektor, lub inna relacja albo stary cron -- łańcuch, przyjmuję')" \
@@ -648,7 +681,7 @@ step_profile() {
     fi
     items=(__manual__ "$(clip_label "$(printf '%-15s %s' "$(T 'Ręcznie…')" "$(T 'tabela szczebli: sposób, szczeble, liczby, zamrażanie')")" $((W - 10)))")
     # passive-flat polecany tylko przy odpowiedzi "łańcuch"; przy "resztki" relacja robi własne.
-    sync_from_chain && [ "$(chain_ans)" != own ] && ! is_local_copy && chain=1
+    sync_from_chain && [ "$(chain_ans)" != own ] && ! is_local_copy && [ "$MODE" != snaponly ] && chain=1
     while IFS=$'\t' read -r n w c q f sh hd; do
         [ -n "$n" ] || continue
         # Ukryte (od 2026-10-22 także fabryczne spoza piątki) nie idą na listę -- z jednym
@@ -987,7 +1020,9 @@ build_argv() {   # [install] -> ARGV[]
         [ "$RAW" -eq 1 ] && ARGV+=("--raw")
     fi
     # "Nikt ich nie robi -- resztki": seed i linia lustra nie robią się pasywne.
-    { [ "$MODE" = sync ] || [ "$MODE" = backup ]; } && sync_from_chain && [ "$(chain_ans)" = own ] && ARGV+=("--own-snapshots")
+    { [ "$MODE" = sync ] || [ "$MODE" = backup ] || [ "$MODE" = snaponly ]; } && sync_from_chain && [ "$(chain_ans)" = own ] && ARGV+=("--own-snapshots")
+    # U141: migawki zdalne, rodzinę robi ktoś inny -- osobna rodzina z etykietą kolektora.
+    [ "$MODE" = snaponly ] && sync_from_chain && [ "$(chain_ans)" = stamp ] && ARGV+=("--stamp-family")
     # Kopia lokalna z cudzych migawek (replika pvesr): przyjmuje, niczego na źródle nie tworzy ani nie kasuje.
     is_passive_copy && ARGV+=("--passive")
     a="$(account_name)"; [ -n "$a" ] && ARGV+=("--local-user=$a")
@@ -1073,6 +1108,9 @@ summary_text() {
         elif is_local_copy && [ "$(chain_ans)" = own ]; then
             echo "$(T 'WŁASNE MIGAWKI: stare migawki naszej rodziny na źródle to resztki -- kopia robi własne,')"
             echo "$(T '  stare wejdą do retencji źródła i z czasem znikną.')"
+        elif [ "$MODE" = snaponly ] && [ "$(chain_ans)" = stamp ]; then
+            echo "$(T 'OSOBNA RODZINA: migawki naszej rodziny na źródle robi kto inny -- ta relacja robi swoje')"
+            echo "$(T '  z etykietą tego kolektora na początku nazwy (--stamp-family); tamtych nie rusza.')"
         elif [ "$(chain_ans)" = own ]; then
             echo "$(T 'WŁASNE MIGAWKI: stare migawki naszej rodziny na źródle to resztki -- ta relacja robi własne')"
             echo "$(T '  (--own-snapshots); stare wejdą do jej retencji i z czasem znikną.')"
@@ -1087,6 +1125,9 @@ summary_text() {
             echo "$(Tv '  Szablon $PROFILE dołoży tam WŁASNE migawki -- na kopiach innego kolektora to psuje jego kopie.' '$PROFILE' "$PROFILE")"
             echo "$(Tv '  Bez własnych migawek: pole Harmonogram -> $REC_PROFILE.' '$REC_PROFILE' "$REC_PROFILE")"
         fi
+    elif is_passive_copy; then
+        echo "$(T 'PASYWNIE: migawki na źródle robi kto inny (np. replika pvesr) -- kopia je tylko przyjmuje,')"
+        echo "$(T '  niczego na źródle nie tworzy ani nie kasuje (--passive); retencja dotyczy samych kopii.')"
     fi
     # G-1 (kampania 2026-10-22, pve10): lustro pisze pod TYMI SAMYMI nazwami co źródło; pve10
     # miał własny hdd/archive i seed odmówił dopiero po założeniu relacji. Mówimy to tutaj.
@@ -1264,10 +1305,12 @@ field_applies() {   # <pole> -> 0, gdy pole jest w tej relacji
         target) [ "$MODE" = backup ] || { [ "$MODE" = local ] && [ "$NOCOPY" -eq 0 ]; } ;;
         # U32: lustro trzyma to, co źródło -- osobnej retencji "u źródła" nie ma.
         # Pasywna kopia lokalna nie ma retencji źródła -- migawki źródła nie są jej.
-        srcret) [ "$MODE" = backup ] || { is_local_copy && ! { sync_from_chain && [ "$(chain_ans)" = chain ]; }; } ;;
+        srcret) [ "$MODE" = backup ] || { is_local_copy && ! is_passive_copy; } ;;
+        # U138: pasywnie bez okna lancucha -- tylko kopia lokalna, gdy na zrodle nie ma migawek rodziny.
+        passive) is_local_copy && ! sync_from_chain ;;
         extra)  [ "$NOCOPY" -eq 0 ] ;;
         # Tylko gdy źródło ma już migawki naszej rodziny (lustro, backup).
-        chain)  { [ "$MODE" = sync ] || [ "$MODE" = backup ] || is_local_copy; } && sync_from_chain ;;
+        chain)  { [ "$MODE" = sync ] || [ "$MODE" = backup ] || [ "$MODE" = snaponly ] || is_local_copy; } && sync_from_chain ;;
         *)      return 0 ;;
     esac
 }
@@ -1304,6 +1347,7 @@ field_value() {   # <pole> -> wartość na karcie ("" = jeszcze nie ustawione)
                 esac ;;
         name)   echo "$RNAME" ;;
         acct)   a="$(account_name)"; echo "${a:-root}" ;;
+        passive) [ "${FORCE_PASSIVE:-0}" -eq 1 ] && echo "$(T 'tak -- przyjmuje cudze migawki (łańcuch)')" || echo "$(T 'nie')" ;;
         extra)
             # Kampania wariantów 2026-10-22: raw jest domyślne od kroku datasetów (raw_default), a karta
             # nieodwiedzonych Dodatkowych go nie wymieniała -- nie było widać, że kopia pójdzie zaszyfrowana.
@@ -1345,6 +1389,7 @@ run_field() {   # <pole> -> rc okna pola (0 = ustawione)
         chain)   step_chain; rc=$? ;;
         name)    step_name; rc=$? ;;
         acct)    step_account; rc=$? ;;
+        passive) step_passive; rc=$? ;;
         extra)   step_extra; rc=$? ;;
         *)       rc=1 ;;
     esac
@@ -1364,7 +1409,7 @@ CARD_NAMES_OF() {
         mode) echo "$(T 'Rodzaj')" ;; host) echo "$(T 'Źródło')" ;; ds) echo "$(T 'Datasety')" ;; target) echo "$(T 'Cel')" ;;
         profile) echo "$(T 'Harmonogram')" ;; srcret) echo "$(T 'Retencja źródła')" ;; silnik) echo "$(T 'Silnik')" ;;
         chain) echo "$(T 'Migawki na źródle')" ;;
-        name) echo "$(T 'Nazwa')" ;; acct) echo "$(T 'Konto')" ;; extra) echo "$(T 'Dodatkowe')" ;;
+        name) echo "$(T 'Nazwa')" ;; acct) echo "$(T 'Konto')" ;; passive) echo "$(T 'Pasywnie')" ;; extra) echo "$(T 'Dodatkowe')" ;;
     esac
 }
 
@@ -1372,11 +1417,13 @@ CARD_NAMES_OF() {
 # Właściciel: "Wstecz to wstecz", "to okno jest super, ale mylące", "do kompletnej przebudowy".
 # Kroki tego rodzaju relacji po kolei, Dalej = następny, Wstecz = POPRZEDNI (z zapamiętaną
 # odpowiedzią), Wstecz w kroku 1 = pytanie o przerwanie. Po ostatnim kroku PODSUMOWANIE:
-# Enter na pozycji = ten krok jeszcze raz i od razu powrót do podsumowania; konto i dodatki
-# siedzą w "Zaawansowane" (domyślne pasują prawie zawsze); dopiero tam "Utwórz relację".
+# Enter na pozycji = ten krok jeszcze raz i od razu powrót do podsumowania; konto jest krokiem
+# przejścia (U142), dodatki i "Pasywnie" siedzą w "Zaawansowane"; "Utwórz relację" jest na podsumowaniu.
 wz_steps() {   # -> kroki bieżącego rodzaju, w kolejności
     local f out=""
-    for f in mode host ds chain target profile srcret name; do field_applies "$f" && out="$out $f"; done
+    # U142 (wlasciciel 2026-11-01: "zmieniam usera, potem ten ciąg aż do okna z planem jest
+    # nieintuicyjny"): konto jest zwyklym krokiem przejscia, nie dwa poziomy nizej w Zaawansowanych.
+    for f in mode host ds chain target profile srcret name acct; do field_applies "$f" && out="$out $f"; done
     echo $out
 }
 wz_abort() {   # 0 = przerwij; 1 = zostań ("Zostań" albo Esc)
@@ -1400,17 +1447,19 @@ wz_walk() {   # <od którego kroku> -> 0 = doszedł do końca, 1 = przerwane
         fi
     done
 }
-wz_adv() {   # Zaawansowane: konto i dodatki; wraca do podsumowania
-    local pick=acct
+wz_adv() {   # Zaawansowane: dodatki i pasywnie; wraca do podsumowania
+    local pick=""
     while :; do
         WZ_SN=""
         CARD_TAGS=(); CARD_NAMES=(); CARD_VALUES=(); CARD_FIXED=()
-        field_applies acct && { CARD_TAGS+=(acct); CARD_NAMES+=("$(T 'Konto')"); CARD_VALUES+=("$(field_value acct)"); CARD_FIXED+=(0); }
+        field_applies passive && { CARD_TAGS+=(passive); CARD_NAMES+=("$(T 'Pasywnie')"); CARD_VALUES+=("$(field_value passive)"); CARD_FIXED+=(0); }
         field_applies extra && { CARD_TAGS+=(extra); CARD_NAMES+=("$(T 'Dodatkowe')"); CARD_VALUES+=("$(field_value extra)"); CARD_FIXED+=(0); }
+        [ "${#CARD_TAGS[@]}" -gt 0 ] || return 0
+        [ -n "$pick" ] || pick="${CARD_TAGS[0]}"
         CARD_ACT_TAGS=(); CARD_ACT_LABELS=()
         card_menu "$(T 'Nowa relacja: zaawansowane')" "$(T 'Rzeczy, których zwykle się nie zmienia.')" "$pick" "$(T Wstecz)" || return 0
         pick="$WT_OUT"
-        case "$pick" in acct|extra) run_field "$pick" ;; *) return 0 ;; esac
+        case "$pick" in passive|extra) run_field "$pick" ;; *) return 0 ;; esac
     done
 }
 wz_profile() {   # szablon z podsumowania: retencja źródła zależy od szablonu -> od razu też ona
@@ -1428,7 +1477,7 @@ while :; do
         CARD_TAGS+=("$f"); CARD_NAMES+=("$(CARD_NAMES_OF "$f")"); CARD_VALUES+=("$(field_value "$f")"); CARD_FIXED+=(0)
     done
     CARD_TAGS+=(adv); CARD_NAMES+=("$(T 'Zaawansowane')")
-    a="$(T 'konto') $(field_value acct)"; [ "$NOCOPY" -eq 0 ] && a="$a; $(field_value extra)"
+    a=""; field_applies passive && a="$(T 'pasywnie:') $(field_value passive)"; [ "$NOCOPY" -eq 0 ] && a="${a:+$a; }$(field_value extra)"
     CARD_VALUES+=("$a"); CARD_FIXED+=(0)
     miss="$(missing_fields)"
     CARD_ACT_TAGS=(create); CARD_ACT_LABELS=("$(T 'UTWÓRZ RELACJĘ -- plan, WYKONAJ')${miss:+   ($(T 'brak:') $miss)}")

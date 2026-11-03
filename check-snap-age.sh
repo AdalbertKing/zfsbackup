@@ -88,11 +88,28 @@ set -o pipefail
 # unresolvable dataset name, and every finding is written to stderr anyway, so
 # the detail survives in the log even when the exit code can only carry one.
 #
+# THE RELATIONSHIP'S START (-S EPOCH, U137 C2, owner 2026-11-03). Since variant C a
+# relationship takes no snapshot when it is created: a tier's first snapshot is its first
+# cron run, which for a yearly tier can be months away. With -S the age is measured from
+# the LATER of the newest matching snapshot and that start, so a tier that has not reached
+# its first run -- or a family whose newest snapshot predates the relationship (leftovers,
+# an old cron's) -- is not late while its age FROM THE START is under warn (past warn/crit it
+# alarms like any other: a first run that never came). Once the tier's own first snapshot exists it is newer than
+# the start and the check is exactly as without -S. The start is written once by
+# zfs-backup.sh and never moved, so -S cannot hide a tier that stopped.
+# -W prints a WAITING line (rc unchanged, 0) for each such dataset still under warn: the GUI asks
+# for it; the cron line does not, so the log is not filled every 15 minutes for a year.
+# With -S a dataset with no snapshot of the family is measured from the later of its creation
+# and the start. In -R mode a tree with NO snapshot at all anywhere (a relationship before its
+# first run) is not an empty container: its root is checked as an explicit target (v2.7, found
+# live on pve11 2026-11-03 -- a new relation read OK, not WAITING, and would have stayed silent
+# had its cron never run). A tree with any snapshot keeps the container leniency.
+#
 # Example:
 #   ./check-snap-age.sh "rpool/data/vm-106-disk-0" "automated_hourly" 90m 3h
 #   ./check-snap-age.sh -R "hdd/backups/pve1" "automated_daily" 30h 48h
 
-VERSION='v2.5'
+VERSION='v2.7'
 
 EXIT_OK=0
 EXIT_WARNING=1
@@ -108,7 +125,7 @@ fi
 # point no snapshot has been examined, so any answer about staleness would be
 # fabricated.
 usage() {
-    echo "Usage: $0 [-R] [-v] [-L LABEL] [-x PREFIX]... [-p PORT] [-k KNOWN_HOSTS] [-c CIPHER] [-K KEY] [-O OPTION]... <comma-separated list of [user@host:]datasets> <pattern> <warn> <crit>" >&2
+    echo "Usage: $0 [-R] [-v] [-L LABEL] [-x PREFIX]... [-S EPOCH] [-W] [-p PORT] [-k KNOWN_HOSTS] [-c CIPHER] [-K KEY] [-O OPTION]... <comma-separated list of [user@host:]datasets> <pattern> <warn> <crit>" >&2
     echo "   warn/crit are durations like 90m, 3h, 9d" >&2
     exit "$EXIT_UNKNOWN"
 }
@@ -116,6 +133,8 @@ usage() {
 VERBOSE=false
 RECURSE=false
 PAIR_LABEL=""
+SINCE=""
+REPORT_WAITING=false
 declare -a EXCLUDES=()
 PORT=22
 KNOWN_HOSTS_FILE=""
@@ -138,6 +157,9 @@ while [ "$#" -gt 0 ]; do
         # that must not count -- an aging excluded family must not page, and a
         # fresh excluded family must not paint a stale relation green.
         -x) EXCLUDES+=("${2:?-x requires a prefix}"); shift 2 ;;
+        # -S EPOCH: the relationship's (tier's) start -- see the header. -W: report WAITING.
+        -S) SINCE="${2:-}"; shift 2 ;;
+        -W) REPORT_WAITING=true; shift ;;
         # ssh options for "[user@]host:dataset" entries -- delsnaps.sh's spellings.
         -p) PORT="${2:-}"; shift 2 ;;
         -p*) PORT="${1#-p}"; shift ;;
@@ -152,6 +174,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 case "$PORT" in ''|*[!0-9]*) echo "UNKNOWN -- -p '$PORT' is not a port number" >&2; exit "$EXIT_UNKNOWN" ;; esac
+case "$SINCE" in *[!0-9]*) echo "UNKNOWN -- -S '$SINCE' is not an epoch (seconds)" >&2; exit "$EXIT_UNKNOWN" ;; esac
 case "$PAIR_LABEL" in
     *[!A-Za-z0-9._-]*) echo "UNKNOWN -- -L '$PAIR_LABEL' is not a valid relationship label (letters, digits, dot, dash, underscore only)" >&2; exit "$EXIT_UNKNOWN" ;;
 esac
@@ -454,7 +477,7 @@ check_one() {
             SAW_UNKNOWN=1
             return
         fi
-        any_snap=true
+        any_snap=true; WALK_SNAP=true
         snapname="${line#*@}"
         local _ex _skip=false
         for _ex in "${EXCLUDES[@]:-}"; do
@@ -491,6 +514,16 @@ check_one() {
         fi
     fi
 
+    # -S: nothing of this family since the relationship's start (or nothing at all) --
+    # the start is the reference, not the old snapshot or the dataset's creation.
+    local waiting=false older=""
+    if [ -n "$SINCE" ] && [ "$newest_epoch" -lt "$SINCE" ]; then
+        [ -n "$newest" ] && older="${newest#*@}"
+        newest_epoch="$SINCE"; waiting=true
+    elif [ -n "$SINCE" ] && [ "$from_creation" = true ]; then
+        waiting=true
+    fi
+
     local age=$((NOW - newest_epoch))
     # A timestamp in the future (clock skew, a pool imported from a host whose
     # clock ran ahead) is not negative age, it is no evidence of staleness.
@@ -507,13 +540,18 @@ check_one() {
 
     # Provenance is part of the contract: an operator reading "age=72h" must not
     # have to work out whether that is the age of a snapshot or of the dataset.
-    if [ "$from_creation" = true ]; then
+    if [ "$waiting" = true ]; then
+        detail="pattern=${PATTERN:-(any)} -- no snapshot of this family since the relationship's start ($(date -d "@$SINCE" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$SINCE")); age measured from that start${older:+ (newest before it: $older)}"
+        # A dataset created after the start is measured from its creation -- say that one.
+        [ "$newest_epoch" != "$SINCE" ] && detail="pattern=${PATTERN:-(any)} -- no snapshot of this family since the relationship's start ($(date -d "@$SINCE" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$SINCE")); the dataset is newer, age measured from its creation"
+        [ "$sev" -eq 0 ] && label="WAITING"
+    elif [ "$from_creation" = true ]; then
         detail="pattern=${PATTERN:-(any)} -- no snapshot found matching this pattern; age measured from dataset creation"
     else
         detail="pattern=${PATTERN:-(any)} newest=${newest#*@}"
     fi
 
-    if [ "$sev" -gt 0 ] || [ "$VERBOSE" = true ]; then
+    if [ "$sev" -gt 0 ] || [ "$VERBOSE" = true ] || { [ "$waiting" = true ] && [ "$REPORT_WAITING" = true ]; }; then
                 # Age in floored hours hid the minutes: with 12m/20m lab thresholds a
         # 21-minute breach printed "age=0h" next to CRITICAL, which reads as a
         # contradiction. Under two hours the minutes ARE the signal.
@@ -535,6 +573,7 @@ for entry in "${DATASETS[@]}"; do
     parse_remote "$entry"
     ru="$R_USER"; rh="$R_HOST"; ds="$R_DS"
     if [ "$RECURSE" = true ]; then
+        WALK_SNAP=false
         check_one "$ru" "$rh" "$ds" false
         out="$(zread "$ru" "$rh" list -H -o name -t filesystem,volume -r "$ds" 2>/dev/null)"; rc=$?
         if [ "$rc" -ne 0 ]; then
@@ -560,6 +599,9 @@ for entry in "${DATASETS[@]}"; do
             fi
             check_one "$ru" "$rh" "$child" false
         done <<< "$out"
+        # -S and not one snapshot anywhere in the tree: the relationship has not run yet
+        # (or never did). The root is held to the explicit check, measured from the start.
+        [ -n "$SINCE" ] && [ "$WALK_SNAP" = false ] && check_one "$ru" "$rh" "$ds" true
     else
         check_one "$ru" "$rh" "$ds" true
     fi

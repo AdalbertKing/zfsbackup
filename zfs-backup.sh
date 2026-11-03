@@ -1233,7 +1233,8 @@ Nothing was installed."
 # snaponly's answer to assert_no_foreign_source_pruner (REV-20261017-152 round 1
 # review: the owner allows independent collectors on one source). That guard
 # exists because two collectors pruning the SAME family delete each other's
-# bases. A snaponly family is `<label>_<prefix>`: the label is unique per source
+# bases. A STAMPED snaponly family (--stamp-family, U141) is `<label>_<prefix>`; a
+# plain one is guarded by snaponly_assert_plain_family_free instead. Stamped: the label is unique per source
 # (--join refuses a second machine under it) and holds no '_', so no other
 # collector's snaponly family can match it, and an ordinary family pattern
 # (automated_hourly, ...) does not match a name that starts with a collector
@@ -3851,6 +3852,73 @@ line_coverage_absorbed() {   # <lost line> ; proposed lines on stdin -> 0 absorb
     ' | grep -q ABSORBED
 }
 
+# The PVE guest guard (2026-10-28) changed how gen-cron renders a job that
+# already runs: every line on a guest's disks gains --pve-guests=<host>:<id>,
+# and disks of different guarded guests no longer share a line. A block
+# installed before that holds the old shapes, so the next install into the
+# same account -- adding an unrelated relation, say -- saw every one of them as
+# "would be DELETED" and refused (measured on pve11, 2026-11-03: 16 lines of
+# two untouched local relations).
+#
+# Excused here only when the coverage provably stays: the lost line carries no
+# --pve-guests of its own, and a set of proposed lines that DO carry one are,
+# with that flag removed, identical to it except (a) the "(...)" dataset note
+# at the end of the job label and (b) at most one other quoted argument, whose
+# comma-list in each proposed line is a SUBSET of the lost one's and whose
+# union covers it. A line that loses a dataset, or differs in anything else
+# (schedule, prefix, thresholds, target), is still refused.
+line_guest_split_absorbed() {   # <lost line> ; proposed lines on stdin -> 0 absorbed
+    case "$1" in *--pve-guests=*) return 1 ;; esac
+    LOST_LINE="$1" awk '
+        function shred(s, sk, vals,   out, n, i, ch, inq, cur) {
+            out=""; n=0; inq=0; cur=""
+            for (i=1; i<=length(s); i++) {
+                ch=substr(s,i,1)
+                if (ch=="\"") {
+                    if (inq) { n++; vals[n]=cur; cur=""; out=out "\001"; inq=0 }
+                    else inq=1
+                    continue
+                }
+                if (inq) cur=cur ch; else out=out ch
+            }
+            sk[0]=out
+            return n
+        }
+        function subset(a, b,   na, nb, i, j, av, bv, hit) {
+            na=split(a, av, ","); nb=split(b, bv, ",")
+            for (i=1; i<=na; i++) {
+                hit=0
+                for (j=1; j<=nb; j++) if (av[i]==bv[j]) { hit=1; break }
+                if (!hit) return 0
+            }
+            return 1
+        }
+        function label(v) { sub(/ \([^()]*\)$/, " ()", v); return v }
+        BEGIN { nl=shred(ENVIRON["LOST_LINE"], lsk, lv); at=0 }
+        {
+            if ($0 !~ / --pve-guests=[^ ]+/) next
+            p=$0; gsub(/ --pve-guests=[^ ]+/, "", p)
+            np=shred(p, psk, pv)
+            if (np != nl || psk[0] != lsk[0] || nl < 1) next
+            if (label(pv[1]) != label(lv[1])) next
+            diff=0; idx=0
+            for (i=2; i<=nl; i++) if (lv[i] != pv[i]) { diff++; idx=i }
+            if (diff == 0) { print "ABSORBED"; exit }
+            if (diff != 1 || !subset(pv[idx], lv[idx])) next
+            if (at && at != idx) next
+            at=idx
+            n=split(pv[idx], part, ",")
+            for (i=1; i<=n; i++) got[part[i]]=1
+        }
+        END {
+            if (!at) exit
+            n=split(lv[at], part, ",")
+            for (i=1; i<=n; i++) if (!(part[i] in got)) exit
+            print "ABSORBED"
+        }
+    ' | grep -q ABSORBED
+}
+
 # THE ONE NARROWING THIS GUARD EXCUSES, and it says so out loud.
 #
 # Migrating a relationship off the peer-root ladder (2026-09-08) genuinely
@@ -4020,6 +4088,13 @@ assert_target_block_not_clobbered() {   # <config whose render is about to be in
                && printf '%s\n' "$line" | grep -qF -- " -L $EDIT_RELATION_NAME " \
                && printf '%s\n' "$proposed" | grep -qF -- " -L $EDIT_RELATION_NAME "; then
                 warn "  edited relationship '$EDIT_RELATION_NAME': this job is replaced by its regenerated set:"
+                warn "    $line"
+                continue
+            fi
+            # Ninth exemption: the same job, re-rendered by the PVE guest guard
+            # (--pve-guests, one line per guest). See line_guest_split_absorbed.
+            if printf '%s\n' "$proposed" | line_guest_split_absorbed "$line"; then
+                warn "  the PVE guest guard now checks this job (--pve-guests, one line per guest), the job itself stays:"
                 warn "    $line"
                 continue
             fi
@@ -7153,7 +7228,7 @@ relblock_render() {   # <name> <has target 0|1> <has source 0|1> -> the block fr
             for b in target source; do [ "${RB[$t.$b]:-}" = no ] && printf '\t%s.%s = no\n' "$t" "$b"; done
             # every base field this tier mentions, canonical order first
             local -a bases=() ; local seen=" "
-            for b in send_schedule prefix notify_word tier_label prune_schedule pattern retain keep gfs quiesce monitor monitor_warn monitor_crit monitor_schedule; do bases+=("$b"); done
+            for b in send_schedule prefix notify_word tier_label prune_schedule pattern retain keep gfs quiesce monitor monitor_warn monitor_crit monitor_schedule monitor_since; do bases+=("$b"); done
             for f in "${RB_KEYS[@]}"; do
                 case "$f" in "$t".*) ;; *) continue ;; esac
                 b="${f#"$t".}"; b="${b#target_}"; b="${b#source_}"
@@ -7198,6 +7273,9 @@ relblock_engine_keep() {   # <config> <name> -> RB_ENGINE_KEEP: "key<TAB>value" 
     RB_ENGINE_KEEP=""
     while IFS=$'\t' read -r k v; do
         case "$k" in history|compression|cipher|autotune|raw) RB_ENGINE_KEEP+="$k"$'\t'"$v"$'\n' ;; esac
+        # A tier's start (U137 C2) survives a rebuild too: it is written once and never moved,
+        # or a profile change would make every tier "waiting" again and hide a stopped one.
+        case "$k" in *.monitor_since) RB_ENGINE_KEEP+="$k"$'\t'"$v"$'\n' ;; esac
     done < <(relblock_dump "$cfg" "$name")
     # raw is NOT taken from a section: a local relationship keeps it there on purpose
     # (local-backup writes it per [dataset:] and local_relation_argv reads it back).
@@ -7253,6 +7331,12 @@ relblock_from_profile() {   # <name> <has target 0|1> <has source 0|1> [remote] 
             done <<<"$frag"
         done
     done < <(profile_prune_ref_ids "$PROFILE_DS_FILE")
+    # U137 C2: each tier's start, for its monitor (-S). Kept when the block is rebuilt
+    # (RB_ENGINE_KEEP above), now for a tier the relationship did not have.
+    local _now; _now=$(date +%s)
+    for t in "${RB_TIERS[@]}"; do
+        [ -n "${RB[$t.monitor_since]:-}" ] || rb_set "$t" "" monitor_since "$_now"
+    done
     relblock_render "$name" "$hasT" "$hasS"
 }
 
@@ -7519,6 +7603,8 @@ tiers_apply_ops() {   # <config working copy> <name> <ops...> -> TIERS_CHANGES; 
                 [ "$mech" = gfs ] && [ -z "${RB[gfs]:-}" ] && rb_set "$v" "" gfs yes
                 [ -n "$q" ] && rb_set "$v" "" quiesce "$q"
                 rb_set "$v" "" monitor "$warn $crit"
+                # its start (U137 C2): no snapshot is taken now, so the monitor waits for its first run
+                rb_set "$v" "" monitor_since "$(date +%s)"
                 # in cadence order (finest first), as gen-cron and the GUI table expect
                 local -a nt=(); local done_=0 rk; rk=$(tiers_cadence_rank "$v")
                 for t in "${RB_TIERS[@]}"; do
@@ -7628,17 +7714,10 @@ cmd_set_tiers() {
     fi
     EDIT_RELATION_NAME="$name"
     atomic_replace_and_install "$cronfile" "$workfile"
-    # A tier ADDED here gets its first snapshot now, as at creation and as set-datasets
-    # gives a new dataset (pve10, 2026-10-29: weekly added to pve9b, F7 ran the hourly
-    # lines, and the monitor read "no automated_weekly -- age from dataset creation" =
-    # CRITICAL, "stare", until Sunday). Only the added tier's lines run.
-    local _op _t
-    for _op in "${ops[@]}"; do
-        case "$_op" in --add-tier=*|--add-src-tier=*) ;; *) continue ;; esac
-        _t="${_op#*=}"
-        case "$_t" in hourly|daily|weekly|monthly|yearly) ;; *) continue ;; esac
-        FIRST_RUN_ANY=1 SNAPONLY_FIRST_TIER="$_t" snaponly_first_snapshots "$name"
-    done
+    # A tier ADDED here takes NO snapshot now (variant C, owner 2026-11-01 (U137)): changing a
+    # relationship freezes nothing and creates nothing; the tier's first snapshot is its
+    # first cron run. (The monitor reading such a tier as waiting, not stale, is U137 C2.)
+    log "set-tiers: an added tier takes its first snapshot at its own cron time -- nothing was taken now"
 }
 
 
@@ -9589,18 +9668,22 @@ Taking over older jobs (a v4 config written manually): remove their sections fir
         fi
     fi
 
-    # A PASSIVE seed adopts the newest snapshot of the whole family, the way the old
-    # hand-written pickup did (-m automated_ -e), not the first tier's newest: in the
-    # takeover rehearsal (pve9, 2026-10-24) the copy already held a newer daily/monthly
-    # than the newest hourly, and `send -I <newer> <older>` failed the seed. With the
-    # family root the engine finds that snapshot on the target and skips (rc 0).
+    # NO FIRST RUN HERE (variant C, owner 2026-11-01, U137): creating a relationship takes no
+    # snapshot and sends no copy -- each tier's first snapshot, and the first (full) copy,
+    # come from the cron line at its own time; the engine receives into a missing target
+    # and creates it ("Target does not exist yet -- the receive will create it",
+    # snapsend/snapget, the leaf-by-receive path). Until this change a seed ran here, and a
+    # snapshot-only relationship snapshotted the finest tier at once.
+    #
+    # What the seed also PROVED stays: a COPY is rehearsed with the engine's dry-run (-n:
+    # no snapshot, nothing sent), the same flags as its cron line, before anything is
+    # installed -- a grant or a target the engine refuses stops the install here instead of
+    # failing in the night. A snapshot-only relationship has nothing to rehearse beyond the
+    # zfs allow above.
+    # A PASSIVE copy adopts the newest snapshot of the whole family (-e with the family
+    # root), the way its line does (takeover rehearsal, pve9, 2026-10-24).
     [ "$lb_passive" -eq 1 ] && seed_prefix="$(profile_family_root)"
-    log "seed: first send of each source, prefix '$seed_prefix' (this may take a while)..."
     local seed_failed=0 sr
-    # The seed makes the FIRST snapshot the same way the installed line will,
-    # so --recursive reaches it too: without this the seed on pve9
-    # (2026-09-25) stamped only the four roots and warned "neither -r nor -R
-    # was given", and the children waited for the first cron run.
     local -a seed_rec=()
     case "$lb_recursion" in
         flat)   seed_rec=(-R) ;;
@@ -9608,53 +9691,28 @@ Taking over older jobs (a v4 config written manually): remove their sections fir
     esac
     local -a seed_x=(); local _sx
     for _sx in ${lb_excl[@]+"${lb_excl[@]}"}; do seed_x+=(-X "$_sx"); done
-    for sr in "${roots[@]}"; do
-        # ONE ARGUMENT when nothing is copied, which is the same shape the
-        # installed cron line has: snapsend with a single dataset creates the
-        # snapshot and transfers nothing. Passing an empty second argument
-        # happened to work, but it made the seed and the job it is seeding
-        # differ in the one place they must not.
-        if [ "$no_copy" -eq 1 ] && [ "${#seed_x[@]}" -gt 0 ] && [ "$lb_recursion" = flat ]; then
-            # EXCLUSIONS, NOTHING COPIED (lab campaign 2026-10-26, pve10): -X shapes a
-            # transfer, it does not keep snapsend -R from snapshotting -- the unticked
-            # child got the seed snapshot, and no prune line ever takes it away. So each
-            # dataset under the root that no exclusion matches is seeded on its own.
-            local _sd _sok=1
-            while IFS= read -r _sd; do
-                [ -n "$_sd" ] || continue
-                printf '%s\n' "$_sd" | grep -qE -- "$(IFS='|'; printf '%s' "${lb_excl[*]}")" && continue
-                bash "$SNAPSEND" -m "$seed_prefix" -v 3 "$_sd" || _sok=0
-            done < <(zfs list -H -o name -r -- "$sr" 2>/dev/null)
-            if [ "$_sok" -eq 1 ]; then
-                log "  OK: $sr (snapshot only, the excluded datasets left out)"
+    if [ "$no_copy" -eq 0 ]; then
+        log "rehearsal: dry-run of each copy (snapget.sh -n, nothing is snapshotted or sent)..."
+        for sr in "${roots[@]}"; do
+            if [ "$lb_replace" -eq 1 ] && zfs list -H -o name "$target/$sr" >/dev/null 2>&1; then
+                log "  already copied: $sr -> $target/$sr"
+            # A PASSIVE copy whose family has no snapshot on the source yet (U138: forced in the
+            # wizard before the snapshot relationship's first run, e.g. a pvesr replica that has
+            # not received one): there is nothing to pick up, so the engine's dry-run can only
+            # refuse. Nothing to rehearse yet -- the first cron run after the family appears copies it.
+            elif [ "$lb_passive" -eq 1 ] && [ -z "$(local_newest_snapshot "$sr" "$seed_prefix" r)" ]; then
+                log "  passive, no '${seed_prefix}*' snapshot under $sr yet -- nothing to rehearse; the first cron run after the family appears copies it"
+            elif bash "$SNAPGET" -n -m "$seed_prefix" -v 3 ${lb_name:+-L "$lb_name"} $([ "$lb_raw" -eq 1 ] && printf -- '-w') $([ "$lb_passive" -eq 1 ] && printf -- '-e') ${seed_rec[@]+"${seed_rec[@]}"} ${seed_x[@]+"${seed_x[@]}"} "$sr" "$target"; then
+                log "  OK: $sr -> $target (first copy at its cron time)"
             else
-                warn "  FAILED: $sr (snapshot only)"
+                warn "  FAILED: $sr -> $target (dry-run)"
                 seed_failed=$((seed_failed + 1))
             fi
-        elif [ "$no_copy" -eq 1 ]; then
-            if bash "$SNAPSEND" -m "$seed_prefix" -v 3 ${seed_rec[@]+"${seed_rec[@]}"} "$sr"; then
-                log "  OK: $sr (snapshot only -- nothing is copied)"
-            else
-                warn "  FAILED: $sr (snapshot only)"
-                seed_failed=$((seed_failed + 1))
-            fi
-        elif [ "$lb_replace" -eq 1 ] && zfs list -H -o name "$target/$sr" >/dev/null 2>&1; then
-            log "  already copied: $sr -> $target/$sr (no new seed)"
-        # -L: the relationship's name, as on its cron line -- without it the first copy
-        # stood on F4 as "(bez rel.)" (owner campaign 2026-10-09, K10).
-        # The copy seeds on snapget.sh, like the cron line it establishes
-        # (gen-cron.sh emit_send, 2026-10-20); the snapshot-only seed above stays
-        # on snapsend.sh, as its line does.
-        elif bash "$SNAPGET" -m "$seed_prefix" -v 3 ${lb_name:+-L "$lb_name"} $([ "$lb_raw" -eq 1 ] && printf -- '-w') $([ "$lb_passive" -eq 1 ] && printf -- '-e') ${seed_rec[@]+"${seed_rec[@]}"} ${seed_x[@]+"${seed_x[@]}"} "$sr" "$target"; then
-            log "  OK: $sr -> $target"
-        else
-            warn "  FAILED: $sr -> $target"
-            seed_failed=$((seed_failed + 1))
-        fi
-    done
+        done
+    fi
     if [ "$seed_failed" -ne 0 ]; then
         rm -f "$cand"
-        die "$seed_failed source(s) failed the seed -- NOTHING installed, $config untouched. Fix the cause and repeat the same command."
+        die "$seed_failed source(s) failed the dry-run -- NOTHING installed, $config untouched. Fix the cause and repeat the same command."
     fi
 
     # Same pre-install assertions as activate-client, in the same order: a config
@@ -9719,10 +9777,10 @@ Taking over older jobs (a v4 config written manually): remove their sections fir
     # Named separately rather than folded into the line above: this run neither
     # seeded nor re-rendered them, and reporting them as though it had would be
     # the report claiming work it did not do.
-    [ "${#have_roots[@]}" -gt 0 ] && echo "  Already:  ${have_roots[*]} (no change -- neither a seed nor a new section)"
+    [ "${#have_roots[@]}" -gt 0 ] && echo "  Already:  ${have_roots[*]} (no change -- no new section)"
     echo "  Target:  ${target:-(none -- snapshots stay on the source, nothing is copied)}"
     echo "  Config:  $config"
-    echo "  Seed:    OK (${#roots[@]} source(s) sent)"
+    echo "  First:   at each tier's cron time -- nothing was snapshotted or sent now"
     echo "  Cron:    installed and read back"
 }
 
@@ -9740,7 +9798,7 @@ cmd_add_client() {
     local requested=""
     # See the note in the one-command form: 'atomic' was unreachable, which made
     # the engines' -r a mode the product could describe but never install.
-    local recursion="" passive=0 own_snaps=0 exclude_family="" raw_send=0 snaponly=0 target_given=0 landing="" family_born=""
+    local recursion="" passive=0 own_snaps=0 stamp_family=0 exclude_family="" raw_send=0 snaponly=0 target_given=0 landing="" family_born=""
     # Same disease, same cure. -X lived only in a hand-edited `flags`, and the
     # anti-deletion guard then refused every future activation of that client:
     # the regenerated job has no -X, so the installed one reads as a job about
@@ -9775,6 +9833,7 @@ cmd_add_client() {
             --recursive=*) recursion="${a#*=}" ;;
             --passive)     passive=1 ;;
             --own-snapshots) own_snaps=1 ;;
+            --stamp-family) stamp_family=1 ;;
             --raw)         raw_send=1 ;;
             --exclude-family=*) exclude_family="${exclude_family:+$exclude_family,}${a#*=}" ;;
             --exclude-child=*) excludes+=("${a#*=}") ;;
@@ -9800,8 +9859,16 @@ cmd_add_client() {
     # relationship stamps and prunes its OWN. The opposite of --passive, never both.
     [ "$passive" -eq 1 ] && [ "$own_snaps" -eq 1 ] \
         && die "add-client: --passive and --own-snapshots are opposite answers (adopt what is there / make our own) -- pick one. Nothing was changed."
-    [ "$snaponly" -eq 1 ] && [ "$own_snaps" -eq 1 ] \
-        && die "add-client --snaponly: --own-snapshots is a copy relationship's answer; snaponly families are always this collector's own. Nothing was changed."
+    # FAMILY STAMP (U141, owner 2026-11-03, variant B): a snaponly family is the plain
+    # tier prefix (automated_hourly_ ...) unless --stamp-family asks for the collector's
+    # label in front (<label>_automated_hourly_ ...). The stamp is the answer for a
+    # second creator of the same family on one source; --own-snapshots is the other
+    # answer to "the source already has snapshots of this family" (they are leftovers,
+    # this relationship takes them into its retention). Opposite answers, never both.
+    [ "$stamp_family" -eq 1 ] && [ "$snaponly" -eq 0 ] \
+        && die "add-client: --stamp-family names the family of a snaponly relationship (--snaponly); a copy relationship has no such stamp. Nothing was changed."
+    [ "$stamp_family" -eq 1 ] && [ "$own_snaps" -eq 1 ] \
+        && die "add-client --snaponly: --own-snapshots (take the family on the source over) and --stamp-family (a family of our own beside it) are opposite answers -- pick one. Nothing was changed."
     if [ "$snaponly" -eq 1 ]; then
         [ "$target_given" -eq 0 ] || die "add-client --snaponly copies nothing, so it takes no --target (not even an empty one). Nothing was changed."
         [ -z "$mode" ] || die "add-client --snaponly and --mode=$mode are different relationship kinds -- pick one. Nothing was changed."
@@ -10318,6 +10385,7 @@ cmd_add_client() {
         # neither the seed nor the sync emit probe turns this relationship into a
         # consumer. Written only when given: an old record has no field and means "ask".
         [ "$own_snaps" -eq 1 ] && write_client_field OWN_SNAPSHOTS 1
+        [ "$stamp_family" -eq 1 ] && write_client_field FAMILY_STAMP 1
         [ -n "${family_born:-}" ] && write_client_field FAMILY_BORN_AT "$family_born"
         # W17: an encrypted source sent encrypted (-w). A CREATE-time decision:
         # the first copy decides whether the target is raw, and the engines refuse
@@ -12242,10 +12310,103 @@ snaponly_assert_source_free() {   # <name> <peer label> <dataset...>
 #   [snaponly:<account@host:ds>]             per source dataset
 #   [prune:<account@host:ds>]                its source retention, ssh-pinned like every remote prune
 # Needs: record + connection loaded (PEER_SAVED_DATASETS, LOAD_*), PROFILE.
+# FAMILY STAMP (U141, owner 2026-11-03, variant B). Until 1.0.5 every snaponly
+# family carried the collector's label (pve0_automated_hourly_ ...), so that two
+# collectors on one source could never prune each other's snapshots. It also made
+# one host carry two naming conventions, and every later step -- a passive copy of
+# the pvesr replica, its template, its monitors -- had to know the stamp and none
+# did (U140, Dabrowska 2026-11-01). Now the family is the plain tier prefix, and
+# the stamp is an explicit choice (--stamp-family -> FAMILY_STAMP=1) for a second
+# creator of the same family on one source.
+#
+# snaponly_stamp_decide <config> <name> -> "1" stamped, "0" plain.
+# The record decides when it says (FAMILY_STAMP=0|1). A relationship installed
+# before the field keeps WHAT IT HAS: its installed tier sections are read, and a
+# prefix starting with this collector's label means stamped -- a re-render must
+# never move an existing family (the old snapshots would be left unpruned and the
+# monitors would watch an empty family).
+snaponly_stamp_decide() {   # <config> <name>
+    case "${FAMILY_STAMP:-}" in 1) echo 1; return 0 ;; 0) echo 0; return 0 ;; esac
+    [ -f "$1" ] || { echo 0; return 0; }
+    local tag; tag="$(snaponly_collector_tag)"
+    awk -v h="[template:snaponly__${2}__" -v t="${tag}_" '
+        /^[ \t]*\[/ { insec = (index($0, h) == 1); next }
+        insec && $1 == "prefix" { v = $0; sub(/^[^=]*=[ \t]*/, "", v); if (index(v, t) == 1) st = 1; else pl = 1 }
+        END { print ((st && !pl) ? 1 : 0) }' "$1"
+}
+
+# snaponly_assert_plain_family_free <workfile> <name> <new 0|1> <account> <host> <port> <keyfile> <alias> <alias_kh> <source-dataset>...
+# A PLAIN family has no label to keep it apart, so the two ways a second creator
+# shows up are refused, and the message names the answer:
+#   1. another collector's peer account can DELETE snapshots on these datasets
+#      (the same zfs allow reading as assert_no_foreign_source_pruner) -- its
+#      retention would count this relationship's snapshots and the other way round;
+#   2. a NEW relationship whose family already has snapshots on the source: a cron
+#      there, or a relationship made elsewhere, or leftovers. Who makes them the
+#      collector cannot see, so the admin says: --own-snapshots (leftovers, taken
+#      into this retention) or --stamp-family (a family of our own beside them).
+# Not knowing is a refusal too: a failed zfs allow / zfs list stops the activation.
+snaponly_assert_plain_family_free() {
+    local wf="$1" name="$2" new="$3" account="$4" host="$5" port="$6" keyfile="$7" alias="$8" alias_kh="$9"; shift 9
+    local -a opts; load_ssh_opts "$keyfile" "$alias" "$alias_kh" "$port"; opts=("${LOAD_SSH_OPTS[@]}")
+    local ds out rc others="" o
+    for ds in "$@"; do
+        out=$(ssh -n "${opts[@]}" "${account}@${host}" "zfs allow -- '$ds'" 2>&1); rc=$?
+        [ "$rc" -eq 0 ] || die "foreign-pruner check: 'zfs allow $ds' on $host as $account failed (ssh/zfs exit $rc) -- refusing to install a source prune without knowing who else prunes there. Output: $(printf '%s' "$out" | tail -2)"
+        o=$(printf '%s\n' "$out" | foreign_pruners_from_allow "$account" | tr '\n' ' ')
+        [ -n "$o" ] && others="$others
+  $ds: ${o% }"
+    done
+    [ -z "$others" ] || die "snaponly: another collector can already DELETE snapshots on these source datasets on $host:$others
+
+This relationship's family is plain (automated_<tier>_), so the other collector's retention would count its snapshots and this one would count the other's. Choose one:
+  * --stamp-family: this relationship keeps a family of its own, '$(snaponly_collector_tag)_<tier prefix>' (the GUI: 'Robi je inny kolektor albo cron -- osobna rodzina z etykietą');
+  * or remove the other collector's relationship first.
+Nothing was installed."
+    [ "$new" -eq 1 ] || return 0
+    [ "${OWN_SNAPSHOTS:-0}" = 1 ] && return 0
+    local prefs; prefs=$(awk -v h="[template:snaponly__${name}__" '
+        /^[ \t]*\[/ { insec = (index($0, h) == 1); next }
+        insec && $1 == "prefix" { v = $0; sub(/^[^=]*=[ \t]*/, "", v); print v }' "$wf" | sort -u)
+    [ -n "$prefs" ] || return 0
+    # Through the one remote probe (source_family_newest, test 67c): the same depth
+    # contract as every other family question, the newest match per tier prefix.
+    local found="" newest pf
+    for ds in "$@"; do
+        o=""
+        for pf in $prefs; do
+            newest=$(source_family_newest "$ds" "$pf"); rc=$?
+            [ "$rc" -eq 0 ] || die "family check: listing the snapshots of $ds on $host as $account failed (ssh/zfs) -- refusing to start a family there without knowing what is already in it."
+            [ -n "$newest" ] && o="$o
+    ${pf}*  (newest: $newest)"
+        done
+        [ -n "$o" ] && found="$found
+  $ds:$o"
+    done
+    [ -z "$found" ] && return 0
+    die "snaponly: the source $host already has snapshots of this relationship's family:$found
+
+Who makes them? This collector cannot see it, so say it with one flag (the GUI asks the same):
+  --own-snapshots   nobody now -- they are leftovers; this relationship takes them into its retention and prunes them with its own;
+  --stamp-family    another collector or a cron on $host makes them -- this relationship keeps a family of its own beside them, '$(snaponly_collector_tag)_<tier prefix>'.
+Nothing was installed."
+}
+
 emit_snaponly_sections() {   # <workfile> <name>
     local wf="$1" name="$2"
     local marker="# managed-by: zfs-backup.sh client=$name"
-    local tag; tag="$(snaponly_collector_tag)"
+    # Decided BEFORE the strip below, while the installed sections still say what
+    # the family is (U141). Left in SNAPONLY_STAMP for the caller's guards and record.
+    SNAPONLY_STAMP="$(snaponly_stamp_decide "$wf" "$name")"
+    # U137 C2: each tier's start, read BEFORE the strip -- written once, never moved.
+    local -A SO_SINCE=()
+    local _sk _sv
+    while IFS=$'\t' read -r _sk _sv; do [ -n "$_sk" ] && SO_SINCE[$_sk]="$_sv"; done < <(awk -v h="[template:snaponly__${name}__" '
+        /^[ \t]*\[/ { t = $0; sub(/^[ \t]*/, "", t); insec = (index(t, h) == 1); if (insec) { tier = substr(t, length(h) + 1); sub(/\][ \t]*$/, "", tier) } next }
+        insec && $1 == "monitor_since" { v = $0; sub(/^[^=]*=[ \t]*/, "", v); print tier "\t" v }' "$wf")
+    local _so_now; _so_now=$(date +%s)
+    local tag=""
+    [ "$SNAPONLY_STAMP" = 1 ] && tag="$(snaponly_collector_tag)"
     local pf; pf="$(profile_file "${PROFILE:-$PROFILE_DEFAULT_NAME}")"
     [ -r "$pf" ] || die "snaponly: profile '${PROFILE:-$PROFILE_DEFAULT_NAME}' not found ($pf)"
     local spf="$pf"
@@ -12277,7 +12438,7 @@ emit_snaponly_sections() {   # <workfile> <name>
         # here until gen-cron read a tier's gfs in [prune:] (2026-10-18).
         local sgfs=0
         case "$(printf '%s' "${SRC_GFS[$t]:-no}" | tr '[:upper:]' '[:lower:]')" in yes) sgfs=1 ;; esac
-        fam="${tag}_${prefix}"
+        if [ -n "$tag" ]; then fam="${tag}_${prefix}"; else fam="$prefix"; fi
         sched="$(snaponly_retime "$sched" "$base")" \
             || die "snaponly: tier '$t' has send_schedule '${PROF_F[template:$t|send_schedule]}' -- its minute must be a single number to be moved off the multiples of five"
         q="${PROF_F[template:$t|quiesce]:-}"
@@ -12295,6 +12456,7 @@ emit_snaponly_sections() {   # <workfile> <name>
             if [ -n "$mw" ] && [ -n "$mc" ]; then
                 echo "	monitor_warn  = $mw"
                 echo "	monitor_crit  = $mc"
+                echo "	monitor_since = ${SO_SINCE[$t]:-$_so_now}"
             fi
         } >> "$wf"
         send_ids+=("snaponly__${name}__$t")
@@ -12578,7 +12740,13 @@ activate_snaponly() {   # <name> <yes> <plan_only> <verbose> [rerender 0|1]
         write_fresh_config_defaults "$workfile" || { rm -f "$workfile"; die "could not create working copy $workfile"; }
     fi
     chmod 0644 "$workfile" || { rm -f "$workfile"; die "could not set the mode on $workfile"; }
+    local _so_new=1
+    [ -n "$(snaponly_installed_scopes "$workfile" "$name")" ] && _so_new=0
+    SNAPONLY_STAMP=""
     snaponly_prepare_workfile "$workfile" "$name" "$rerender"
+    # An unchanged relationship is reused without a re-render (SNAPONLY_REUSED): its
+    # installed sections still say what the family is.
+    [ -n "$SNAPONLY_STAMP" ] || SNAPONLY_STAMP="$(snaponly_stamp_decide "$workfile" "$name")"
 
     log "dry-run of each source dataset (snapget.sh -n -s, read-only)..."
     if ! snaponly_probe; then
@@ -12594,9 +12762,15 @@ $PROBE_DETAIL"
     ( assert_source_prune_grant "$LOAD_ACCOUNT" "$LOAD_HOST" "$LOAD_PORT" \
           "$LOAD_KEYFILE" "$LOAD_ALIAS" "$LOAD_ALIAS_KH" "${SOURCE_PRUNE_EMITTED_DS[@]}" ) \
         || { rm -f "$workfile"; die "source-prune grant check failed -- $cronfile was NOT touched, nothing installed."; }
-    ( snaponly_note_foreign_pruners "$LOAD_ACCOUNT" "$LOAD_HOST" "$LOAD_PORT" \
-          "$LOAD_KEYFILE" "$LOAD_ALIAS" "$LOAD_ALIAS_KH" "${SOURCE_PRUNE_EMITTED_DS[@]}" ) \
-        || { rm -f "$workfile"; die "could not find out who else prunes these source datasets -- $cronfile was NOT touched, nothing installed."; }
+    if [ "$SNAPONLY_STAMP" = 1 ]; then
+        ( snaponly_note_foreign_pruners "$LOAD_ACCOUNT" "$LOAD_HOST" "$LOAD_PORT" \
+              "$LOAD_KEYFILE" "$LOAD_ALIAS" "$LOAD_ALIAS_KH" "${SOURCE_PRUNE_EMITTED_DS[@]}" ) \
+            || { rm -f "$workfile"; die "could not find out who else prunes these source datasets -- $cronfile was NOT touched, nothing installed."; }
+    else
+        ( snaponly_assert_plain_family_free "$workfile" "$name" "$_so_new" "$LOAD_ACCOUNT" "$LOAD_HOST" "$LOAD_PORT" \
+              "$LOAD_KEYFILE" "$LOAD_ALIAS" "$LOAD_ALIAS_KH" "${SOURCE_PRUNE_EMITTED_DS[@]}" ) \
+            || { rm -f "$workfile"; die "the snapshot family is not free on $LOAD_HOST (above) -- $cronfile was NOT touched, nothing installed."; }
+    fi
 
     echo
     echo "Client:              $name"
@@ -12604,7 +12778,11 @@ $PROBE_DETAIL"
     echo "Peer:                $PEER_HOST"
     echo "Active endpoint:     $(endpoint_display)"
     echo "Sources:             $PEER_SAVED_DATASETS"
-    echo "Family:              $(snaponly_collector_tag)_<tier prefix> -- only this collector creates and prunes it"
+    if [ "$SNAPONLY_STAMP" = 1 ]; then
+        echo "Family:              $(snaponly_collector_tag)_<tier prefix> -- stamped: only this collector creates and prunes it"
+    else
+        echo "Family:              <tier prefix> (e.g. automated_hourly_) -- plain; a second creator of it on the source is refused"
+    fi
     echo "Profile:             ${PROFILE:-${PROFILE_ACTIVE:-?}}${SOURCE_PROFILE:+, source retention: $SOURCE_PROFILE}"
     echo "Warning:             when this collector is down, no snapshots are created on the source"
     echo "                     or pruned; the age monitor alarms from this host."
@@ -12631,6 +12809,7 @@ $PROBE_DETAIL"
         write_client_field MANAGED_DATASETS   ""
         write_client_field MANAGED_PRUNE_SCOPE ""
         write_client_field MANAGED_SOURCES    "$srcs"
+        write_client_field FAMILY_STAMP       "$SNAPONLY_STAMP"
         if [ "$rerender" -eq 1 ]; then
             write_client_field PROFILE        "${PROFILE:-}"
             write_client_field SOURCE_PROFILE "${SOURCE_PROFILE:-}"
@@ -12641,54 +12820,12 @@ $PROBE_DETAIL"
     } > "${cpath}.new" && mv -f "${cpath}.new" "$cpath"
     chmod 0600 "$cpath"
     log "client '$name' active (snaponly: snapshots on $LOAD_HOST, nothing copied)."
-    snaponly_first_snapshots "$name"
-}
-
-# The first snapshot of EVERY tier, once, at activation. activate_first_copies
-# runs only the finest job per dataset, which is enough when the coarser tiers
-# share a seeded base; here each tier is its own family on the source, and an
-# old dataset with no daily snapshot yet reads CRITICAL ("no snapshot -- age
-# from dataset creation") until the first daily tick (measured pve9 -> pve10,
-# 2026-10-17). The engine's rc is the job's END line, as in add_source_first_copy.
-snaponly_first_snapshots() {   # <name>
-    local name="$1" tab line cmd label logf rc ok=0 failed=0
-    tab=$(crontab_for_target 2>/dev/null) || tab=""
-    while IFS= read -r line; do
-        [ -n "$line" ] || continue
-        cmd=$(printf '%s' "$line" | sed -E 's/^([^ ]+ ){5}//')
-        # A line that groups several datasets in one quoted list ("a,b,c" -- local snapshots)
-        # runs for the new dataset alone: the same engine and flags, the list narrowed to it,
-        # so its siblings get no extra snapshot (set-datasets, 2026-10-25).
-        if [ -n "${SNAPONLY_FIRST_ONLY:-}" ] && [ "${FIRST_RUN_ANY:-0}" = 1 ]; then
-            cmd=$(printf '%s' "$cmd" | awk -v d="$SNAPONLY_FIRST_ONLY" '{
-                n = split($0, p, "\""); out = p[1]
-                for (i = 2; i <= n; i++) {
-                    s = p[i]
-                    if (i % 2 == 0) { m = split(s, q, ","); if (m > 1) for (j = 1; j <= m; j++) if (q[j] == d) { s = d; break } }
-                    out = out "\"" s
-                }
-                print out }')
-        fi
-        label=$(printf '%s' "$cmd" | sed -nE 's/.*zfs-job\.sh "([^"]+)".*/\1/p')
-        logf=$(printf '%s' "$cmd" | sed -nE 's/.* --log=([^ ]+).*/\1/p')
-        if [ "$(cron_target_user)" = root ]; then bash -c "$cmd" </dev/null
-        else su -s /bin/bash "$(cron_target_user)" -c "$cmd" </dev/null; fi
-        rc=""
-        [ -n "$label" ] && [ -n "$logf" ] && rc=$(grep -aF -- "ZFS-JOB END $label rc=" "$logf" 2>/dev/null | tail -1 | sed -E 's/.* rc=//')
-        case "$rc" in
-            0) ok=$((ok + 1)) ;;
-            # rc 8: quiesce degraded -- the snapshot EXISTS, crash-consistent
-            # (named <prefix>crash_..., inside the tier's family). Done, said so.
-            8) ok=$((ok + 1)); warn "activate-client: first snapshot '$label' taken crash-consistent (quiesce degraded, rc=8)" ;;
-            *) failed=$((failed + 1)); warn "activate-client: first snapshot '$label' did not finish (rc=${rc:-?}) -- cron runs it again at its next tick" ;;
-        esac
-    done < <(printf '%s\n' "$tab" | sed -n '/^# BEGIN zfs-backup-managed/,/^# END zfs-backup-managed/p' \
-                 | grep -F -- " -L $name " \
-                 | { if [ -n "${SNAPONLY_FIRST_TIER:-}" ]; then grep -E "zfs-job[.]sh \"[^\"]*[_ ]${SNAPONLY_FIRST_TIER} (snapshot|backup|copy) "; else cat; fi; } \
-                 | { if [ "${FIRST_RUN_ANY:-0}" = 1 ]; then grep -E 'snap(get|send)\.sh '; else grep -F 'snapget.sh -s '; fi; } \
-                 | { if [ -n "${SNAPONLY_FIRST_ONLY:-}" ]; then grep -F -e ":$SNAPONLY_FIRST_ONLY\"" -e "\"$SNAPONLY_FIRST_ONLY\"" \
-                       -e ",$SNAPONLY_FIRST_ONLY\"" -e "\"$SNAPONLY_FIRST_ONLY," -e ",$SNAPONLY_FIRST_ONLY,"; else cat; fi; })
-    log "activate-client: first snapshot of each tier: $ok done, $failed not done"
+    # NO first snapshots here (variant C, owner 2026-11-01 (U137)): creating or editing a
+    # relationship takes nothing and freezes nothing -- each tier's first snapshot is its
+    # first cron run. Until 1.0.5 every tier was snapshotted here, one after another and
+    # each with the guests' freeze: an edit of five tiers took over four minutes and froze
+    # a database VM on a customer host again and again (Dabrowska 2026-11-01).
+    log "activate-client: each tier takes its first snapshot at its own cron time -- nothing was taken now"
 }
 
 activation_is_new_relationship() {   # <state> <installed-endpoint>
@@ -14520,7 +14657,7 @@ cmd_monitor() {
     fi
     local mi=0
     local -a M_ACCT=() M_SCHED=() M_LABEL=() M_DS=() M_PAT=() M_WARN=() M_CRIT=() M_REC=() \
-        M_EXCL=() M_ENGN=() M_ENGR=() M_PARSED=() M_GATE=()
+        M_EXCL=() M_ENGN=() M_ENGR=() M_PARSED=() M_GATE=() M_SINCE=()
 
     local acct blk line
     while IFS= read -r acct; do
@@ -14543,7 +14680,7 @@ cmd_monitor() {
                 engine_named=$(monitor_engine_path "$line")
             fi
             schedule=$(printf '%s' "$line" | awk '{print $1, $2, $3, $4, $5}')
-            local rec=no label="" excl="" ds="" pat="" warn="" crit=""
+            local rec=no label="" excl="" since="" ds="" pat="" warn="" crit=""
             local parsed=true reason=""
             if [ "$is_gate" = yes ]; then
                 local _g
@@ -14568,6 +14705,10 @@ cmd_monitor() {
                         -v|--verbose)   : ;;
                         -L) j=$((j + 1)); label="${argv[$j]:-}" ;;
                         -x) j=$((j + 1)); excl="$excl${excl:+,}${argv[$j]:-}" ;;
+                        # -S <epoch> (check-snap-age.sh v2.6, U137 C2): the tier's start.
+                        # The re-run must carry it, or a tier waiting for its first run
+                        # reads as stale here while the cron line calls it fine.
+                        -S) j=$((j + 1)); since="${argv[$j]:-}" ;;
                         # The REMOTE monitor's ssh options (check-snap-age.sh
                         # v2.4, REV-20261017-152 F4): each takes a value, and the
                         # re-run below must carry them, or it reads nothing on
@@ -14599,7 +14740,7 @@ cmd_monitor() {
             mi=$((mi + 1))
             M_ACCT[$mi]="$acct"; M_SCHED[$mi]="$schedule"; M_LABEL[$mi]="$label"; M_DS[$mi]="$ds"
             M_PAT[$mi]="$pat"; M_WARN[$mi]="$warn"; M_CRIT[$mi]="$crit"; M_REC[$mi]="$rec"
-            M_EXCL[$mi]="$excl"; M_ENGN[$mi]="$engine_named"; M_ENGR[$mi]="$engine_run"
+            M_EXCL[$mi]="$excl"; M_ENGN[$mi]="$engine_named"; M_ENGR[$mi]="$engine_run"; M_SINCE[$mi]="${since:-}"
             M_PARSED[$mi]="$parsed"; M_GATE[$mi]="$is_gate"
             if [ "$parsed" = true ] && [ "$is_gate" = yes ]; then
                 { bash "$engine_run" age "$ds" "$label" --warn "$warn" --crit "$crit" >"$mtmp/$mi.out" 2>&1
@@ -14610,6 +14751,8 @@ cmd_monitor() {
                 [ -n "$label" ] && runargs+=(-L "$label")
                 local _x
                 for _x in ${excl//,/ }; do [ -n "$_x" ] && runargs+=(-x "$_x"); done
+                # -W: the GUI wants the WAITING lines (a tier before its first run); cron does not.
+                [ -n "${since:-}" ] && runargs+=(-S "$since" -W)
                 runargs+=(${sshargs[@]+"${sshargs[@]}"})
                 [ -n "$mux" ] && [ "${#sshargs[@]}" -gt 0 ]                     && runargs+=(-O ControlMaster=auto -O "ControlPath=$mux/%C" -O ControlPersist=60)
                 runargs+=("$ds" "$pat" "$warn" "$crit")
@@ -15935,11 +16078,9 @@ cmd_set_datasets() {
         || die "set-datasets: could not update the record of '$name' ($cpath); the config is already installed"
     chmod 0600 "$cpath" 2>/dev/null || :
 
-    # The first run of a dataset that was not covered: every installed snapshot / copy line of
-    # this relationship that names it, now -- the same for every kind (no first-copy variant).
-    for ds in ${added[@]+"${added[@]}"}; do
-        FIRST_RUN_ANY=1 SNAPONLY_FIRST_ONLY="$ds" snaponly_first_snapshots "$name"
-    done
+    # An added dataset takes no snapshot and no copy now (variant C, owner 2026-11-01 (U137)):
+    # its first run is the relationship's next cron run, as for every other dataset.
+    [ "${#added[@]}" -gt 0 ] && log "set-datasets: the added dataset(s) get their first snapshot / copy at the next cron run -- nothing was taken now"
     log "set-datasets: '$name' now covers: $(awk -F'\t' '{ printf "%s%s ", $1, ($2 == "flat" ? "[x]" : "[-]") }' "$entf")"
 }
 
@@ -16094,36 +16235,15 @@ cmd_add_source() {
             log "add-source: '$ds' recorded in RUX_SOURCE of '$name'"
         fi
     fi
-    # Which of this relationship's sources already have a copy job, BEFORE the
-    # re-activation: everything that has one only after it is new here and
-    # gets its first copy below -- not just "$ds". Measured on pve10,
-    # 2026-10-08: adding hdd/lab/ct-201/p0cli re-expanded the root hdd/lab/
-    # ct-201 and brought in its sibling p0gui too; only p0cli was copied, and
-    # until the next cron tick the relationship's monitor reported p0gui
-    # "does not exist" and queued a "monitor BROKEN" alert every 15 minutes.
-    local seeded_before
-    seeded_before=$(relation_copy_sources "$name")
     # A child process: activation dies on any refusal, and its plan, dry-run
     # and guards are exactly the ones an ordinary re-activation shows.
-    # SNAPONLY_FIRST_ONLY: a snaponly re-activation takes the first snapshot of every tier
-    # for the NEW dataset only. Without it each add-source stamped every tier on every
-    # dataset of the relationship again (Site-A pve2 -> pve1, 2026-10-25: seven
-    # add-sources left 5 monthly snapshots of the same evening on each disk, 93 removed).
-    if ! SNAPONLY_FIRST_ONLY="$ds" bash "$SCRIPT_DIR/zfs-backup.sh" activate-client "$name" --yes; then
+    # No first snapshot or copy of the new source here (variant C, owner 2026-11-01 (U137)): its
+    # first run is the relationship's next cron run.
+    if ! bash "$SCRIPT_DIR/zfs-backup.sh" activate-client "$name" --yes; then
         die "add-source: the source already grants '$ds', but the re-activation here stopped (see above) -- this host's config and cron are unchanged. Fix what it said and run: zfs-backup.sh activate-client $name"
     fi
 
-    record_load client "$cpath"
-    # "$ds" first, then every other source that got its copy job only now.
-    local seed s
-    seed=$( { printf '%s\n' "$ds"; relation_copy_sources "$name" | grep -vxF -f <(printf '%s\n' "$seeded_before" "$ds"); } )
-    while IFS= read -r s; do
-        [ -n "$s" ] || continue
-        [ "$s" = "$ds" ] || log "add-source: '$s' came into '$name' with it (a child of a root the relationship already had)"
-        log "add-source: 4/4 the first copy of '$s'"
-        add_source_first_copy "$name" "$s"
-    done <<< "$seed"
-    log "add-source: '$ds' is now part of '$name'."
+    log "add-source: '$ds' is now part of '$name'; its first copy / snapshot is the next cron run -- nothing was sent now."
 }
 
 # relation_copy_sources <name> -> one source dataset per line: what the copy
@@ -16765,7 +16885,7 @@ cmd_edit_config() {
     while IFS=$'\t' read -r rel ds s; do
         [ -n "$rel" ] || continue
         record_note_dataset "$rel" add "$ds" "$s"
-        ( record_load client "$(client_conf_path "$rel")"; add_source_first_copy "$rel" "$ds" )
+        # No first copy here (variant C, owner 2026-11-01 (U137)): the next cron run is the first.
     done <<< "$adds"
     while IFS=$'\t' read -r rel ds s; do
         [ -n "$rel" ] || continue
@@ -17609,7 +17729,11 @@ jobs_field_v() {   # <var> <kind> <section> <tier> <field>
     local v="${JOB_F["$k:$s|${f}_$t"]:-}"; [ -n "$v" ] && { printf -v "$_jv_var" '%s' "$v"; return 0; }
     # A relation block's tier is `profile__<rel>__<tier>`; its dataset section staggers
     # the schedule under the short name (`send_schedule_hourly`), and that is what cron runs.
-    case "$t" in *__*) v="${JOB_F["$k:$s|${f}_${t##*__}"]:-}"; [ -n "$v" ] && { printf -v "$_jv_var" '%s' "$v"; return 0; } ;; esac
+    # The block's tier carries gen-cron's side stem (`__lsrc_hourly`, `__src_hourly`), the
+    # override never does (gen-cron.sh, relation expansion: `${ovf}_${one}`) -- F2 showed
+    # every local relation at the block's :01 instead of its staggered minute (pve11, 2026-11-03).
+    local _one="${t##*__}"; _one="${_one#lsrc_}"; _one="${_one#src_}"
+    case "$t" in *__*) v="${JOB_F["$k:$s|${f}_${_one}"]:-}"; [ -n "$v" ] && { printf -v "$_jv_var" '%s' "$v"; return 0; } ;; esac
     v="${JOB_F["$k:$s|$f"]:-}";          [ -n "$v" ] && { printf -v "$_jv_var" '%s' "$v"; return 0; }
     v="${JOB_F["template:$t|$f"]:-}";      [ -n "$v" ] && { printf -v "$_jv_var" '%s' "$v"; return 0; }
     printf -v "$_jv_var" '%s' "${JOB_F["defaults:|$f"]:-}"
@@ -18377,7 +18501,8 @@ EXPORT_RELATION_LIST_FIELD="REQUESTED_DATASETS"
 # Declarations that are true and have no create flag. PASSIVE is here for a
 # different reason than the endpoints: it HAS a flag (--passive) but it is a
 # bare switch, so it is emitted by the composer below rather than as key=value.
-# OWN_SNAPSHOTS (--own-snapshots) is the same kind of switch and rides the same way.
+# OWN_SNAPSHOTS (--own-snapshots) is the same kind of switch and rides the same way,
+# and so is FAMILY_STAMP (--stamp-family, U141).
 EXPORT_RELATION_UNREPLAYABLE="ENDPOINT_LAN_HOST ENDPOINT_LAN_PORT ENDPOINT_VPN_HOST ENDPOINT_VPN_PORT ENDPOINT_KNOWN ACTIVE_ENDPOINT"
 # Derived, historical or host-local. Never exported: carrying them would carry
 # claims that stop being true the moment the file moves.
@@ -18655,8 +18780,17 @@ import_restore_relblock() {   # <name> <export document> [--check: rc 1 = differ
       want=$(json_flat_object "$rel") \
           || die "import-relation: the relation block of '$name' in the file is not a flat object of strings this build can restore exactly (an escape other than \\\" \\\\ \\/, a tab or newline in a value, or a non-string value) -- nothing was installed; set the values with set-tiers / set-transfer"
       [ -n "$want" ] || exit 0
-      [ "$(relblock_dump "$cronfile" "$name")" = "$want" ] && { [ -n "$check" ] || log "import-relation: [relation:$name] already as in the file"; exit 0; }
+      # A tier's start (monitor_since, U137 C2) is THIS host's history, not the file's: the
+      # imported relationship started here, at its activation. The file's values are dropped,
+      # this host's kept, and the comparison ignores them both.
+      local _nos='^[^'$'\t'']*[.]monitor_since'$'\t'
+      want=$(printf '%s\n' "$want" | grep -v "$_nos" || :)
+      local _cur _since
+      _cur=$(relblock_dump "$cronfile" "$name")
+      _since=$(printf '%s\n' "$_cur" | grep "$_nos" || :)
+      [ "$(printf '%s\n' "$_cur" | grep -v "$_nos" || :)" = "$want" ] && { [ -n "$check" ] || log "import-relation: [relation:$name] already as in the file"; exit 0; }
       [ -z "$check" ] || exit 1
+      [ -n "$_since" ] && want="$want"$'\n'"$_since"
       workfile=$(mktemp "$(dirname "$cronfile")/.zfsbackup-work.XXXXXX") || die "mktemp failed next to $cronfile"
       workfile_track "$workfile"
       cp -p "$cronfile" "$workfile" && chmod 0644 "$workfile" 2>/dev/null
@@ -19004,7 +19138,7 @@ SCOPE
             --mode=*) _has_mode=1 ;;
             # Only flags the one-command form takes; anything else (e.g. --bandwidth)
             # keeps the ordinary replay, which says what to do by hand.
-            --host=*|--target=*|--landing=*|--recursive=*|--passive|--own-snapshots|--raw|--exclude-family=*|--exclude-child=*|--profile=*|--source-profile=*|--local-user=*|--family-born=*) ;;
+            --host=*|--target=*|--landing=*|--recursive=*|--passive|--own-snapshots|--stamp-family|--raw|--exclude-family=*|--exclude-child=*|--profile=*|--source-profile=*|--local-user=*|--family-born=*) ;;
             *) _rux_ok=0 ;;
         esac
     done
@@ -19200,6 +19334,15 @@ cmd_export_relation() {
         first=0
         decl_json="$decl_json\"OWN_SNAPSHOTS\":\"1\""
         argv+=(--own-snapshots)
+    fi
+    # FAMILY_STAMP (U141): the same bare switch. A relationship from before the field
+    # has none and exports as unstamped -- its family is read back from the config at
+    # activation (snaponly_stamp_decide), not from this declaration.
+    if [ "${FAMILY_STAMP:-0}" = "1" ]; then
+        [ "$first" -eq 1 ] || decl_json="$decl_json,"
+        first=0
+        decl_json="$decl_json\"FAMILY_STAMP\":\"1\""
+        argv+=(--stamp-family)
     fi
     # RAW: add-client --raw writes RAW_SEND=1, but set-transfer --raw writes only the config
     # line (raw = yes) of the relation's [dataset:] sections. Either way the copy is raw and
@@ -20878,8 +21021,11 @@ remove_managed_sections() {   # <file> <client name> <target-path>...
 # move_guid_proof needs is the collector's own copy, on this machine. So this is
 # a second probe -- named, in one place, rather than inlined, so the assertion
 # that pins "one probe implementation per side" keeps biting if a third appears.
-local_newest_snapshot() {   # <dataset> -> newest snapshot name, or nothing
-    zfs list -H -t snapshot -o name -s creation -d 1 "$1" 2>/dev/null | tail -1
+local_newest_snapshot() {   # <dataset> [family prefix] [r] -> newest snapshot name (of that family when a prefix is given), or nothing
+    # r: the dataset and everything below it (U138: a passive copy's root before its first run).
+    local depth='-d 1'; [ "${3:-}" = r ] && depth='-r'
+    zfs list -H -t snapshot -o name -s creation $depth "$1" 2>/dev/null \
+        | { if [ -n "${2:-}" ]; then grep -F "@$2" || :; else cat; fi; } | tail -1
 }
 
 move_guid_proof() {   # <copy dataset> <destination path> <account@host>
@@ -22364,6 +22510,7 @@ rux_remote_install() {
         [ -n "$recursion" ] && add_args+=(--recursive="$recursion")
         [ "$passive" -eq 1 ] && add_args+=(--passive)
         [ "${rux_own:-0}" -eq 1 ] && add_args+=(--own-snapshots)
+        [ "${rux_stamp:-0}" -eq 1 ] && add_args+=(--stamp-family)
         [ "${rux_raw:-0}" -eq 1 ] && add_args+=(--raw)
         [ -n "$exclude_family" ] && add_args+=(--exclude-family="$exclude_family")
         for _x in ${excludes[@]+"${excludes[@]}"}; do add_args+=(--exclude-child="$_x"); done
@@ -22388,6 +22535,22 @@ rux_remote_install() {
     else
         log "rux: resuming '$name' from state '$state'"
         rux_check_conflict "$cpath" "$host" "$dataset" "$target" "$mode"
+        # The family question (U141) is asked by a REFUSAL during activation, after the
+        # record exists -- and it said "answer with one flag". Re-running with that flag
+        # used to drop it (add-client is not called on a resume) and refuse again for
+        # ever (pve11, 2026-11-03). Taken onto the record here, only before activation,
+        # and only when the record holds no answer yet.
+        if [ "${rux_own:-0}" -eq 1 ] || [ "${rux_stamp:-0}" -eq 1 ]; then
+            [ "${rux_own:-0}" -eq 1 ] && [ "${rux_stamp:-0}" -eq 1 ] \
+                && die "rux: --own-snapshots and --stamp-family are opposite answers -- pick one. Nothing was changed."
+            [ "$state" = active ] \
+                && die "rux: '$name' is active already -- who makes the source's snapshots is decided at creation. Nothing was changed."
+            [ -n "$(record_get "$cpath" OWN_SNAPSHOTS)$(record_get "$cpath" FAMILY_STAMP)" ] \
+                && die "rux: '$name' already holds an answer to who makes the source's snapshots. Nothing was changed."
+            if [ "${rux_own:-0}" -eq 1 ]; then write_client_field OWN_SNAPSHOTS 1 >> "$cpath"
+            else write_client_field FAMILY_STAMP 1 >> "$cpath"; fi
+            log "rux: '$name' -- answer recorded: $([ "${rux_own:-0}" -eq 1 ] && echo '--own-snapshots (leftovers)' || echo '--stamp-family')"
+        fi
     fi
 
     # The grant step runs BEFORE the verification and never replaces it: what
@@ -22470,7 +22633,7 @@ rux_entry() {
     # config grammar but no command could produce it -- reaching it meant hand
     # editing a generated config, and the first re-activation wrote the edit
     # back out. A mode the product cannot install is a mode nobody can operate.
-    local recursion="" passive=0 rux_own=0 exclude_family="" rux_raw=0
+    local recursion="" passive=0 rux_own=0 rux_stamp=0 exclude_family="" rux_raw=0
     # THE SOURCE PRESET REACHES THIS ENTRY POINT TOO, and it is a pure
     # passthrough: cmd_add_client already parses, validates and records it
     # (--profile's own treatment here is the same shape). Its absence was not a
@@ -22494,6 +22657,7 @@ rux_entry() {
             --recursive=*) recursion="${a#*=}" ;;
             --passive)     passive=1 ;;
             --own-snapshots) rux_own=1 ;;   # passed to add-client: the family on the source is leftovers
+            --stamp-family) rux_stamp=1 ;;  # passed to add-client: snaponly family stamped with this collector's label (U141)
             --raw)         rux_raw=1 ;;
             --exclude-family=*) exclude_family="${exclude_family:+$exclude_family,}${a#*=}" ;;
             --exclude-child=*) excludes+=("${a#*=}") ;;
