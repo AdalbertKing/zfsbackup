@@ -1308,6 +1308,11 @@ def mark_pending(rows, data):
 
 
 def worst(verdicts):
+    # W2 (kampania 2026-11-03): szczebel, ktory juz chodzi, i szczeble czekajace na pierwszy
+    # termin -- relacja jest "aktualna"; samo czekanie nie jest gorsze od pracy. "Czeka" tylko,
+    # gdy nic jeszcze nie ruszylo.
+    if "OK" in verdicts and "CZEKA" in verdicts and not set(verdicts) - {"OK", "CZEKA"}:
+        return "OK"
     for v in VERDICT_ORDER:
         if v in verdicts:
             return v
@@ -1742,6 +1747,26 @@ def prefix_cell(j):
     return fam if fam and fam != "-" else "-"
 
 
+def own_inline_prunes(j):
+    """Linie delsnaps WLASNE zadania [dataset:] (szablon plaski: pobranie i porzadki w jednej
+    sekcji). cron_lines niesie linie calego BLOKU, wiec wlasna = ten sam szczebel i ten sam
+    znacznik "(...)" co linia transferu TEGO zadania; brak dopasowania = brak linii. Jedno
+    zrodlo dla F2 (wiersz "lokalny prune") i licznika "porzadki" na F3 (W1, 2026-11-04)."""
+    if j.get("section_kind", "") != "dataset" or not (j.get("retain") or j.get("keep")):
+        return []
+    own_tag = ""
+    raw_tier = j.get("tier") or ""
+    for cl in j.get("cron_lines") or []:
+        if "delsnaps.sh" not in cl and raw_tier and raw_tier in cl and (j.get("scope") or "\0") in cl:
+            m = re.search(r'\(([^)]*)\)"', cl)
+            own_tag = m.group(1) if m else ""
+            break
+    if not own_tag:
+        return []
+    return [cl for cl in j.get("cron_lines") or []
+            if "delsnaps.sh" in cl and raw_tier in cl and ("(%s)" % own_tag) in cl]
+
+
 def build_jobs(data, now):
     """Wiersze ekranu ZADANIA: jedno zadanie z crona (sekcja wysylki albo
     porzadkow), z relacja i kierunkiem. To jest to, co host naprawde robi."""
@@ -1831,17 +1856,8 @@ def build_jobs(data, now):
         # linie sekcji [prune:]) -- pierwsza z brzegu linia delsnaps liczyla cudze
         # porzadki drugi raz. Wlasna = ten sam szczebel i ten sam znacznik "(...)"
         # co linia transferu TEGO zadania. Brak dopasowania = brak wiersza.
-        own_tag = ""
-        raw_tier = j.get("tier") or ""
-        for cl in j.get("cron_lines") or []:
-            if "delsnaps.sh" not in cl and raw_tier and raw_tier in cl and (j.get("scope") or "\0") in cl:
-                m = re.search(r'\(([^)]*)\)"', cl)
-                own_tag = m.group(1) if m else ""
-                break
-        if kind == "dataset" and ret and own_tag:
-            for cl in j.get("cron_lines") or []:
-                if "delsnaps.sh" not in cl or raw_tier not in cl or ("(%s)" % own_tag) not in cl:
-                    continue
+        if kind == "dataset" and ret:
+            for cl in own_inline_prunes(j):
                 psched = " ".join(cl.split()[:5])
                 if (j.get("label") or "", psched, ret) in prune_sections:
                     break
@@ -2980,8 +2996,14 @@ def rel_panel_pairs(row, data, now, ch):
     if rel.get("bandwidth"):
         pairs.append((_(u"Łącze"), rel["bandwidth"]))
     prunes = [j for j in row["jobs"] if j.get("section_kind") == "prune"]
-    if sends or prunes:
-        pairs.append((_(u"Zadania"), _(u"%d: kopie lub migawki %d, porządki %d") % (len(sends) + len(prunes), len(sends), len(prunes))))
+    # W1 (kampania 2026-11-03): porzadki zaszyte w sekcji [dataset:] (szablon plaski, relacja
+    # lokalna) F2 pokazuje jako "lokalny prune", a licznik ich nie widzial -- "porządki 0".
+    # Te same co na F2: bez linii, ktora ma juz wlasna sekcje [prune:] (relacja, harmonogram, retencja).
+    _ps = set((p.get("label") or "", p.get("schedule") or "", p.get("retain") or p.get("keep") or "") for p in prunes)
+    n_prune = len(prunes) + sum(1 for j in sends for cl in own_inline_prunes(j)
+                                if (j.get("label") or "", " ".join(cl.split()[:5]), j.get("retain") or j.get("keep") or "") not in _ps)
+    if sends or n_prune:
+        pairs.append((_(u"Zadania"), _(u"%d: kopie lub migawki %d, porządki %d") % (len(sends) + n_prune, len(sends), n_prune)))
     if rel.get("created_at"):
         pairs.append((_(u"Powstała"), dshow(rel["created_at"])))
     for key, fld in ((_(u"Pełna kopia"), "seed_completed_at"), (_(u"Aktywna od"), "activated_at"), (_(u"Usunięta"), "removed_at")):
@@ -3472,7 +3494,11 @@ def rel_pairs(row, data, now, ch):
             else:
                 czas = times_cell(srow.get("last_s"), srow.get("avg_s"), srow.get("max_s")) if srow else "-"
                 gb = hbytes_short(vol) if vol is not None else "-"
-            out.append({"src": src, "dst": dst, "job": j, "v": v, "vword": _(VERDICTS.get(v, (v, 0))[0]),
+            # U136 (fastprune, 2026-11-04): szczebel BEZ progow monitora w configu nie ma monitora
+            # z zalozenia (wieku rzadszych szczebli pilnuje archiwum) -- nie przeslania werdyktu
+            # szczebli pilnowanych tego samego datasetu.
+            nomon = v == "BEZ MONITORA" and not j.get("monitor_warn") and not j.get("monitor_crit")
+            out.append({"src": src, "dst": dst, "job": j, "v": v, "vword": _(VERDICTS.get(v, (v, 0))[0]), "nomon": nomon,
                          "czas": czas, "gb": gb, "vol": vol, "tiers": 1, "jobs": [j],
                          "czas_words": "?" if data.failed("stats") else (times_words(srow.get("last_s"), srow.get("avg_s"), srow.get("max_s")) if srow else "-")})
         # JEDEN WIERSZ = JEDEN DATASET, nie jedna linia crona (2026-09-21).
@@ -3497,7 +3523,12 @@ def rel_pairs(row, data, now, ch):
             # NAJGORSZY liczony przez worst(), nie przez druga kolumne VERDICTS --
             # ta jest numerem KOLORU (OK=2, CRITICAL=1), wiec porownanie jej dalo
             # by "najgorszy = najjasniejszy". Zlapane przy czytaniu wlasnego diffu.
-            g["v"] = worst([g["v"], r["v"]])
+            if r.get("nomon"):
+                pass
+            elif g.get("nomon"):
+                g["v"], g["nomon"] = r["v"], False
+            else:
+                g["v"] = worst([g["v"], r["v"]])
             g["vword"] = _(VERDICTS.get(g["v"], (g["v"], 0))[0])
             if g.get("vol") is not None and r.get("vol") is not None:
                 g["vol"] = g["vol"] + r["vol"]

@@ -77,6 +77,7 @@
 !/tui/browse.sh
 !/tui/delete-relation.sh
 !/tui/edit-relation.sh
+!/tui/fastprune-lib.sh
 !/tui/grid.py
 !/tui/hand-edits.py
 !/tui/lang/en.json
