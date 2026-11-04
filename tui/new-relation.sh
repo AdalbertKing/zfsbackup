@@ -313,69 +313,61 @@ for r in d.get("relations", []):
 }
 step_target() {
     [ "$MODE" = sync ] && return 0
-    local items=() t n cnt first="" seen="" p _st
+    local t rc
     [ -e "$TMPD/targets.tsv" ] || info "$(title 5 "$(T 'Dokąd?')")" "$(T 'Sprawdzam, dokąd trafiają kopie na tym hoście...')"
     status_tsv
-    while IFS=$'\t' read -r n p t _st; do      # 4. pole (stan) MUSI mieć własną zmienną: inaczej wpada do $t
-        case "$t" in ''|-) continue ;; esac    # puste (relacja synchro) = "-", nie cel
-        case " $seen " in *" $t "*) continue ;; esac
-        seen="$seen $t"; cnt=$(awk -F'\t' -v t="$t" '$3==t' "$TMPD/rel.tsv" | grep -c .)
-        items+=("$t" "$(Tv '$t   -- używają go już relacje na tym hoście: $cnt' '$cnt' "$cnt" '$t' "$t")")
-        [ -n "$first" ] || first="$t"
-    done <"$TMPD/rel.tsv"
     [ -e "$TMPD/targets.tsv" ] || "$ZB" list-datasets --json 2>/dev/null | "$PY" -c '
 import sys, json
 try: d = json.load(sys.stdin)
 except Exception: sys.exit(0)
-# "Przegladaj..." (uwaga 1, 2026-10-08): wszystkie SYSTEMY PLIKOW tego hosta, do osobnego
-# pliku -- zvol nie moze byc celem.
+# Systemy plików tego hosta (cel -- zvol nie może nim być) do fs.all, ich USED/AVAIL do .info;
+# WSZYSTKIE datasety z typem i rozmiarem do .any -- źródła kopii lokalnej to często zvole
+# (vm-*-disk-*), a panel „Dokąd” liczy, gdzie wylądują (U147).
 fs = open(sys.argv[1], "w", encoding="utf-8", newline="\n")
-info = {}
+info, anyd = {}, {}
 for x in d.get("datasets", []):
     n = x.get("name", "")
-    if n and x.get("type", "filesystem") == "filesystem":
+    if not n:
+        continue
+    anyd[n] = [x.get("type", "filesystem"), x.get("used")]
+    if x.get("type", "filesystem") == "filesystem":
         fs.write(n + "\n"); info[n] = [x.get("used"), x.get("avail")]
     if n.count("/") == 1 and n.rsplit("/", 1)[1].lower() in ("backups", "backup", "kopie"): print(n)
-# USED/AVAIL dla okna „Dokąd -- przeglądaj” (właściciel 2026-10-29, wariant A)
-json.dump(info, open(sys.argv[1] + ".info", "w", encoding="utf-8"))' "$TMPD/fs.all" | tr -d '\r' >"$TMPD/targets.tsv"
-    while IFS= read -r t; do
-        [ -n "$t" ] || continue
-        case " $seen " in *" $t "*) continue ;; esac
-        items+=("$t" "$(Tv '$t   -- istnieje na tym hoście, jeszcze nieużywany' '$t' "$t")"); seen="$seen $t"
-        [ -n "$first" ] || first="$t"
-    done <"$TMPD/targets.tsv"
-    # Czysty host (kampania 2026-10-19): żadnego celu do wyboru, a okno mówiło "np. hdd/backups"
-    # i kazało go wpisać. Podpowiedź <pula>/backups na każdą pulę -- powstanie przy instalacji.
-    if [ -z "$first" ] && [ "$MODE" != local ]; then
-        while IFS= read -r t; do
-            case "$t" in ''|*/*) continue ;; esac
-            t="$t/backups"
-            case " $seen " in *" $t "*) continue ;; esac
-            items+=("$t" "$(Tv '$t   -- jeszcze nie ma, powstanie przy instalacji' '$t' "$t")"); seen="$seen $t"
-            [ -n "$first" ] || first="$t"
-        done <"$TMPD/fs.all" 2>/dev/null
-    fi
-    items+=(__browse__ "$(T 'Przeglądaj…     (wszystkie datasety tego hosta)')")
-    items+=(__other__ "$(T 'Wpisz ścieżkę…  (dataset na tym hoście, może jeszcze nie istnieć)')")
-    if [ -n "$TARGET" ]; then in_list "$TARGET" "${items[@]}" && first="$TARGET" || first=__other__; fi
-    # Kopia lokalna nie ma poziomu hosta: ląduje pod <cel>/<pełna ścieżka źródła>.
-    local lv="/$(landing)"; [ "$MODE" = local ] && lv=""
+json.dump(info, open(sys.argv[1] + ".info", "w", encoding="utf-8"))
+json.dump(anyd, open(sys.argv[1] + ".any", "w", encoding="utf-8"))' "$TMPD/fs.all" | tr -d '\r' >"$TMPD/targets.tsv"
+    # U155 (Dąbrowska 2026-11-04: „mamy manager dysku, chcę nawigować po dysku, a nie pisać
+    # ścieżki z palca”): krok otwiera od razu drzewo datasetów tego hosta. Kursor na celu, pod
+    # którym są już kopie tych danych (U147), albo na celu relacji / <pula>/backups. Nowy cel:
+    # Ins w drzewie, potem sama nazwa. Bez listy datasetów (list-datasets nie odpowiedział) --
+    # ścieżka z palca, jak dotąd.
     while :; do
-        geom
-        wt --title "$(title 5 "$(T 'Dokąd na tym hoście?')")" --ok-button "$(T Dalej)" --cancel-button "$(T Wstecz)" --notags --default-item "${first:-__other__}" \
-           --menu "$(Tv 'Kopie wylądują pod:  <wybrane>$lv/<dataset źródła>\nnp.  ${first:-hdd/backups}$lv/${B_ROOT[0]}' '$lv' "$lv" '${first:-hdd/backups}' "${first:-hdd/backups}" '${B_ROOT[0]}' "${B_ROOT[0]}")" "$(fit $((${#items[@]} / 2 + 4)))" "$W" "$((${#items[@]} / 2))" \
-           "${items[@]}" || return 1
-        if [ "$WT_OUT" = __browse__ ]; then
-            browse_target && target_ok && return 0
-            continue
+        if [ -s "$TMPD/fs.all" ]; then
+            browse_target; rc=$?
+            case "$rc" in
+                0) target_ok && return 0; continue ;;
+                2) new_target_name "$NEW_UNDER" || continue; target_ok && return 0; continue ;;
+                *) return 1 ;;
+            esac
         fi
-        if [ "$WT_OUT" != __other__ ]; then TARGET="$WT_OUT"; target_ok && return 0; continue; fi
+        local lv="/$(landing)"; [ "$MODE" = local ] && lv=""
+        geom
         wt --title "$(title 5 "$(T 'Dokąd -- wpisz ścieżkę')")" --ok-button "$(T Dalej)" --cancel-button "$(T Wstecz)" \
-           --inputbox "$(Tv 'Dataset na TYM hoście, pod którym mają lądować kopie (np. hdd/backups).\nKopie trafią pod:  <to>$lv/<dataset źródła>' '$lv' "$lv")" 11 "$W" "$TARGET" || continue
+           --inputbox "$(Tv 'Dataset na TYM hoście, pod którym mają lądować kopie (np. hdd/backups).\nKopie trafią pod:  <to>$lv/<dataset źródła>' '$lv' "$lv")" 11 "$W" "$TARGET" || return 1
         t="${WT_OUT// /}"
         case "$t" in ''|/*|*/|*[!A-Za-z0-9._:/-]*) wt --title "$(T 'Zła ścieżka')" --msgbox "$(Tv ''\''$WT_OUT'\'' nie wygląda na nazwę datasetu (pula/nazwa, bez / na początku i końcu).' '$WT_OUT' "$WT_OUT")" 9 "$W"; continue ;; esac
         TARGET="$t"; target_ok && return 0
     done
+}
+# Ins w drzewie „Dokąd”: nowy dataset pod podświetlonym (powstanie przy instalacji). 0 = TARGET.
+new_target_name() {   # <rodzic>
+    local t
+    geom
+    wt --title "$(title 5 "$(T 'Dokąd -- nowy dataset')")" --ok-button "$(T Dalej)" --cancel-button "$(T Wstecz)" \
+       --inputbox "$(Tv 'Nazwa nowego datasetu pod $NEW_UNDER (powstanie przy instalacji relacji):' '$NEW_UNDER' "$1")" 10 "$W" "" || return 1
+    t="${WT_OUT// /}"; t="${t#/}"; t="${t%/}"
+    case "$t" in ''|*[!A-Za-z0-9._:/-]*) wt --title "$(T 'Zła nazwa')" --msgbox "$(Tv ''\''$WT_OUT'\'' nie wygląda na nazwę datasetu.' '$WT_OUT' "$WT_OUT")" 8 "$W"; return 1 ;; esac
+    TARGET="$1/$t"
+    return 0
 }
 # Kampania 2026-10-22 (pve10): kopia lokalna hdd/archive -> hdd/archive/kopie przeszła cały
 # kreator i odmówił dopiero plan czasownika ("overlaps source"). Ta sama reguła tutaj: cel
@@ -395,9 +387,8 @@ target_ok() {   # 0 = cel pasuje; 1 = okno z powodem, TARGET bez zmian dla nast�
 # (wczesniej plaska lista z wcieciami, nazwy obciete). Ukryte sa wnetrza ladowisk innych relacji
 # (<cel>/<peer>/...): wybor tam i tak odrzucilby straznik pokrycia kilka krokow dalej.
 # 0 = TARGET ustawiony, 1 = wstecz do listy.
-browse_target() {
-    local n t p hid=0 skip _rn _st
-    [ -s "$TMPD/fs.all" ] || { wt --title "$(T 'Brak listy')" --msgbox "$(T 'Nie udało się odczytać datasetów tego hosta (list-datasets).')" 8 "$W"; return 1; }
+browse_target() {   # 0 = TARGET ustawiony, 1 = wstecz, 2 = Ins: nowy dataset pod $NEW_UNDER
+    local n t p hid=0 skip _rn _st act
     : >"$TMPD/fs.pick"
     while IFS= read -r n; do
         [ -n "$n" ] || continue
@@ -411,33 +402,163 @@ browse_target() {
     done <"$TMPD/fs.all"
     [ -s "$TMPD/fs.pick" ] || { wt --title "$(T 'Brak datasetów')" --msgbox "$(T 'Na tym hoście nie ma datasetu, pod którym mogłyby lądować kopie.')" 8 "$W"; return 1; }
     local lv="/$(landing)"; [ "$MODE" = local ] && lv=""
-    local legend="$(Tv ' Kopie trafią pod:  <wybrany>$lv/<dataset źródła>' '$lv' "$lv")"
-    [ "$hid" -gt 0 ] && legend="$legend   $(Tv '(ukryto $hid kopii innych relacji)' '$hid' "$hid")"
-    # Dolna linia: PRAWDZIWA ścieżka dla wiersza pod kursorem (wariant A, 2026-10-29).
     local curl="$(Tv 'Kopie trafią pod:  {cur}$lv/<dataset źródła>' '$lv' "$lv")"
     [ "$hid" -gt 0 ] && curl="$curl   $(Tv '(ukryto $hid kopii innych relacji)' '$hid' "$hid")"
-    "$PY" - "$TMPD/fs.pick" "$TMPD/tree-spec.json" "$(title 5 "$(T 'Dokąd -- przeglądaj')")" "$legend" "$TARGET" "$curl" "$TMPD/fs.all.info" <<'PYEOF' || return 1
+    # Migawki z hosta raz (jedno zfs list): liczba na dataset, wspólna migawka źródła i celu.
+    # Tylko kopia lokalna ma źródła na tym hoście; przy backupie panel mówi, gdzie wylądują.
+    [ -e "$TMPD/snaps.all" ] || { zfs list -H -p -t snapshot -o name -s createtxg 2>/dev/null | tr -d '\r' >"$TMPD/snaps.all" || :; }
+    printf '%s\n' "${B_ROOT[@]}" >"$TMPD/srcs.list"
+    "$PY" - "$TMPD" "$(title 5 "$(T 'Dokąd kopiować?')")" "$TARGET" "$curl" "$MODE" "$lv" <<'PYEOF' || return 1
 import sys, json, os
-names = [l.rstrip("\n") for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+D, title, cur_target, curl, mode, lv = sys.argv[1:7]
+def load(name, default):
+    try:
+        with open(os.path.join(D, name), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+def lines(name):
+    try:
+        with open(os.path.join(D, name), encoding="utf-8") as f:
+            return [l.rstrip("\n") for l in f if l.strip()]
+    except OSError:
+        return []
 try:
-    info = json.load(open(sys.argv[7], encoding="utf-8")) if os.path.exists(sys.argv[7]) else {}
-except ValueError:
-    info = {}
-ds = []
-for n in names:
-    if n in info:
-        ds.append({"name": n, "type": "filesystem", "used": info[n][0], "avail": info[n][1]})
+    T = json.load(open(os.environ["ZFS_TUI_CAT"], encoding="utf-8")) if os.environ.get("ZFS_TUI_CAT") else {}
+except (OSError, ValueError):
+    T = {}
+def _(s):
+    return T.get(s, s)
+names = lines("fs.pick")
+info = load("fs.all.info", {})
+anyd = load("fs.all.any", {})
+roots = lines("srcs.list")
+rels = [l.split("\t") for l in lines("rel.tsv")]
+snaps = {}
+for s in lines("snaps.all"):
+    ds, _sep, sn = s.partition("@")
+    snaps.setdefault(ds, []).append(sn)
+def human(n):
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return "?"
+    for u in ("B", "K", "M", "G", "T", "P"):
+        if n < 1024 or u == "P":
+            return ("%.1f%s" % (n, u)) if n < 100 and u != "B" else ("%d%s" % (n, u))
+        n /= 1024.0
+def under(n, r):
+    return n == r or n.startswith(r + "/")
+# Źródła: wybrane korzenie z potomkami (kopia lokalna jest rekurencyjna po wybranych korzeniach).
+srcs = [n for n in sorted(anyd) if any(under(n, r) for r in roots)] if mode == "local" else list(roots)
+def plan(t):
+    """[(źródło, lądowisko, tryb, wspólna)] dla celu t."""
+    out = []
+    for sname in srcs:
+        land = t + lv + "/" + sname
+        if mode != "local":
+            out.append((sname, land, "?", ""))
+            continue
+        if land in anyd:
+            mine = set(snaps.get(sname, []))
+            common = [x for x in snaps.get(land, []) if x in mine]
+            out.append((sname, land, "inc" if common else "nobase", common[-1] if common else ""))
+        else:
+            out.append((sname, land, "full", ""))
+    return out
+def size(sname):
+    return (anyd.get(sname) or [None, None])[1]
+plans = dict((t, plan(t)) for t in names)
+inc_count = dict((t, sum(1 for x in plans[t] if x[2] == "inc")) for t in names)
+best = max(names, key=lambda t: (inc_count[t], t.count("/"))) if names else ""
+if best and inc_count.get(best, 0) == 0:
+    best = ""
+copiers = {}
+for r in rels:
+    if len(r) > 2 and r[2] not in ("", "-"):
+        copiers.setdefault(r[2], []).append(r[0])
+ds, facts, tabrows = [], {}, {}
+for t in names:
+    i = info.get(t) or [None, None]
+    nsn = sum(len(v) for k, v in snaps.items() if under(k, t))
+    note = ""
+    if any(under(t, r) or under(r, t) for r in roots) and mode == "local":
+        note = _("źródło")
+    elif inc_count[t]:
+        note = _("te dane tu")
+    elif t in copiers:
+        note = copiers[t][0]
+    ds.append({"name": t, "type": "filesystem", "used": i[0], "avail": i[1], "snaps": nsn if snaps else "", "note": note})
+    pl = plans[t]
+    f = []
+    if note == _("źródło"):
+        f += [["h", _("Źródło")], ["w", _("Ten dataset jest kopiowany albo leży nad źródłem -- nie może być celem.")]]
     else:
-        ds.append({"name": n, "type": "filesystem", "used": None})
-json.dump({"title": sys.argv[3], "single": True, "selectable": names, "legend": sys.argv[4],
-           "fit": True, "cursor_line": sys.argv[6],
-           "roots": [sys.argv[5]] if sys.argv[5] in names else [],
-           "datasets": ds},
-          open(sys.argv[2], "w", encoding="utf-8"), ensure_ascii=False)
+        f.append(["h", _("Kopie trafią pod")])
+        for x in pl[:4]:
+            f.append(["", x[1]])
+        if len(pl) > 4:
+            f.append(["", _("... i jeszcze %d") % (len(pl) - 4)])
+        if not pl:
+            f.append(["", t + lv + "/<" + _("dataset źródła") + ">"])
+        if mode == "local" and pl:
+            f.append(["", ""])
+            have = [x for x in pl if x[2] != "full"]
+            if have:
+                f.append(["h", _("Co już tu jest")])
+                f.append(["", _("Użyte     %s") % human(i[0])])
+                f.append(["", _("Dysków    %d z %d już tu jest") % (len(have), len(pl))])
+                f.append(["", _("Migawki   %d") % nsn])
+                f.append(["", ""])
+            f.append(["h", _("Pierwsza kopia")])
+            inc = [x for x in pl if x[2] == "inc"]
+            full = [x for x in pl if x[2] != "inc"]
+            if inc and not full:
+                f.append(["g", _("Tryb      PRZYROSTOWO, wszystkie %d") % len(pl)])
+            elif inc:
+                f.append(["g", _("Tryb      PRZYROSTOWO, %d z %d") % (len(inc), len(pl))])
+            else:
+                tot = sum(float(size(x[0]) or 0) for x in full)
+                f.append(["w", _("Tryb      PEŁNA, ok. %s") % human(tot)])
+            if inc:
+                f.append(["", _("Wspólna   %s") % inc[0][3]])
+            for x in [y for y in full if y[2] == "nobase"][:2]:
+                f.append(["w", _("Uwaga     %s jest tu bez wspólnej migawki") % x[1]])
+            if best and best != t and not inc:
+                f += [["", ""], ["h", _("Uwaga")],
+                      ["w", _("Pod %s leżą już kopie tych danych ze wspólną migawką -- tam pójdzie przyrostowo.") % best]]
+        if t in copiers:
+            f += [["", ""], ["h", _("Kto tu kopiuje")]] + [["", _("Relacja   %s") % r] for r in copiers[t]]
+    facts[t] = f
+    rows = []
+    for x in pl:
+        if x[2] == "inc":
+            rows.append(["g", [x[0], x[1], _("przyrostowo od %s") % x[3]]])
+        elif x[2] == "nobase":
+            rows.append(["w", [x[0], x[1], _("cel istnieje, brak wspólnej migawki")]])
+        elif x[2] == "full":
+            rows.append(["", [x[0], x[1], _("pełna, %s") % human(size(x[0]))]])
+        else:
+            rows.append(["", [x[0], x[1], ""]])
+    tabrows[t] = rows
+# Kursor na starcie: wybrany wcześniej cel, cel z kopiami tych danych (U147), cel relacji,
+# <pula>/backups, pierwszy wiersz.
+start = cur_target if cur_target in names else best
+if not start:
+    start = next((t for t in names if t in copiers), "") or \
+            next((t for t in names if t.count("/") == 1 and t.rsplit("/", 1)[1].lower() in ("backups", "backup", "kopie")), "") or \
+            (names[0] if names else "")
+spec = {"title": title, "single": True, "selectable": names, "fit": True, "cursor_line": curl,
+        "roots": [start] if start else [], "expand_to": [start] if start else [], "datasets": ds,
+        "facts": facts, "tab": {"title": _("Źródło → cel"), "heads": [_("Źródło"), _("Cel"), _("Pierwsza kopia")], "rows": tabrows},
+        "allow_new": True, "legend": _(" Kopie trafią pod:  <wybrany>%s/<dataset źródła>") % lv}
+json.dump(spec, open(os.path.join(D, "tree-spec.json"), "w", encoding="utf-8"), ensure_ascii=False)
 PYEOF
     ${ZFS_TREE:-$PY $HERE/tui/tree.py} --spec "$TMPD/tree-spec.json" --out "$TMPD/tree-out.json" || return 1
-    n="$("$PY" -c 'import json,sys; r=json.load(open(sys.argv[1], encoding="utf-8")).get("roots") or [""]; print(r[0])' "$TMPD/tree-out.json" | tr -d '\r')"
+    act="$("$PY" -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); r=d.get("roots") or [""]; print(d.get("action","") + "\t" + r[0])' "$TMPD/tree-out.json" | tr -d '\r')"
+    n="${act#*$'\t'}"; act="${act%%$'\t'*}"
     [ -n "$n" ] || return 1
+    if [ "$act" = new ]; then NEW_UNDER="$n"; return 2; fi
     TARGET="$n"
     return 0
 }
@@ -673,10 +794,12 @@ step_chain() {   # 0 = odpowiedź zapisana, 1 = wstecz
         CHAIN_ANS="$WT_OUT"; CHAIN_FOR="${B_ROOT[*]}"
         return 0
     fi
+    # U153 (właściciel 2026-11-04, Dąbrowska: „strasznie zagmatwany”, „nie wspominasz o pvesr”):
+    # najczęstsze źródło tych migawek -- replika pvesr -- nazwane wprost, odpowiedzi bez żargonu.
     wt --title "$(title 5 "$(T 'Migawki naszej rodziny już są na źródle')")" --ok-button "$(T Dalej)" --cancel-button "$(T Wstecz)" --notags --default-item "$def" \
-       --menu "$(Tv 'Na $HOST są już migawki naszej rodziny:\n$facts\n\nKto je dziś robi? Najnowsza sprzed godziny-dwóch zwykle znaczy, że ktoś je robi.\nŁańcuch: ta relacja je PRZYJMUJE i sama niczego tam nie tworzy ani nie kasuje.\nResztki: ta relacja robi WŁASNE; stare wejdą do jej retencji i z czasem znikną.' '$HOST' "$(T 'źródle') $( [ -n "$HOST" ] && hostw || hostname -s)" '$facts' "$facts")" "$H" "$W" 2 \
-       chain "$(T 'Tworzy je inny kolektor, lub inna relacja albo stary cron -- łańcuch, przyjmuję')" \
-       own "$(T 'Nikt -- to resztki starej relacji, robię własne')" || return 1
+       --menu "$(Tv 'Na $HOST są już migawki naszej rodziny:\n$facts\n\nSkąd się tu wzięły? Najczęściej przynosi je replikacja Proxmox (pvesr)\nz drugiego węzła, rzadziej robi je inna relacja. Świeże (sprzed 1-2 godz.)\nznaczą, że ktoś je wciąż robi.\n\nPrzyjmuję: kopia bierze te migawki; na źródle nic nie tworzy ani nie kasuje.\nResztki: nikt ich już nie robi -- kopia robi własne; stare z czasem znikną.' '$HOST' "$(T 'źródle') $( [ -n "$HOST" ] && hostw || hostname -s)" '$facts' "$facts")" "$H" "$W" 2 \
+       chain "$(T 'Przynosi je pvesr albo robi inna relacja -- przyjmuję je')" \
+       own "$(T 'Nikt ich już nie robi (resztki) -- robię własne')" || return 1
     CHAIN_ANS="$WT_OUT"; CHAIN_FOR="${B_ROOT[*]}"
     # "Resztki" z wybranym wcześniej passive-flat nie robiłyby niczego -- szablon do wyboru od nowa.
     [ "$CHAIN_ANS" = own ] && [ "$PROFILE" = "$REC_PROFILE" ] && { PROFILE=""; SRCPROF=""; VIS="${VIS/ profile / }"; }
@@ -1145,7 +1268,7 @@ summary_text() {
     # W6 (kampania 2026-11-03): kopia pasywna niczego nie zamraża -- opis szablonu bez "zamraża".
     echo "$(T 'Szablon:') $( [ -n "$MANUAL_P" ] && [ "$PROFILE" = "$MANUAL_P" ] && echo "$(Tv 'Ręcznie -- $PROFILE' '$PROFILE' "$PROFILE")" || echo "$PROFILE")$( [ -s "$TMPD/prof.tsv" ] && awk -F'\t' -v n="$PROFILE" -v pas="$( { is_passive_copy || passive_forced; } && echo 1)" -v fp="$([ "$MODE" = snaponly ] && [ -n "$FASTPRUNE" ] && echo 1)" '$1==n{print "  (" $3 (fp ? "" : "; " $2) (pas ? "" : "; " $4) ")"}' "$TMPD/prof.tsv")$( [ -n "$SRCPROF" ] && echo "$(Tv '; u źródła: $SRCPROF' '$SRCPROF' "$SRCPROF")")"
     if [ "$MODE" = snaponly ] && [ -n "$FASTPRUNE" ]; then
-        echo "$(Tv 'Źródło: fastprune $FASTPRUNE h -- każda migawka żyje tyle godzin, czyszczenie co godzinę; bez monitorów szczebli rzadszych niż $FASTPRUNE h -- ich wiek pilnuje archiwum. Bez kopii pasywnej na kolektorze starszych migawek nie będzie nigdzie.' '$FASTPRUNE' "$FASTPRUNE")"
+        echo "$(Tv 'Źródło: krótka retencja $FASTPRUNE h -- każda migawka żyje tyle godzin, czyszczenie co godzinę; bez monitorów szczebli rzadszych niż $FASTPRUNE h -- ich wiek pilnuje archiwum. Bez kopii pasywnej na kolektorze starszych migawek nie będzie nigdzie.' '$FASTPRUNE' "$FASTPRUNE")"
         # Warunek uczciwości (projekt fastprune): archiwum = kopia pasywna NA TYM HOŚCIE, której
         # źródło obejmuje te datasety (replika pvesr ląduje pod tą samą nazwą).
         local _arc; _arc="$(fp_archives)"
@@ -1276,7 +1399,7 @@ step_summary() {    # 0 = wykonano (RC_RUN), 1 = wstecz, 2 = do datasetów, 3 = 
           if [ "$NOCOPY" -eq 1 ]; then echo "$(Tv 'Cel: brak (same migawki).  Szablon: $PROFILE.' '$PROFILE' "$PROFILE")"
           # Kampania 2026-10-22: migawki zdalne dostawały zdanie lustra ("ta sama ścieżka").
           elif [ "$MODE" = snaponly ]; then echo "$(Tv 'Bez kopii: migawki na $HOST, jego datasety.  Szablon: $PROFILE.' '$HOST' "$(hostw)" '$PROFILE' "$PROFILE")"
-               [ -n "$FP_P" ] && echo "$(Tv 'Fastprune $FASTPRUNE h: szablon relacji $FP_P (kopia $PROFILE).' '$FASTPRUNE' "$FASTPRUNE" '$FP_P' "$FP_P" '$PROFILE' "$PROFILE")"
+               [ -n "$FP_P" ] && echo "$(Tv 'Krótka retencja $FASTPRUNE h: szablon relacji $FP_P (kopia $PROFILE).' '$FASTPRUNE' "$FASTPRUNE" '$FP_P' "$FP_P" '$PROFILE' "$PROFILE")"
           else echo "$(T 'Cel:') ${TARGET:-$(T '(lustro: ta sama ścieżka)')}.  $(Tv 'Trzyma tutaj: $PROFILE.  U źródła:' '$PROFILE' "$PROFILE") $(if is_passive_copy; then T 'nic (pasywnie)'; else printf '%s' "${SRCPROF:-$(T 'jak tutaj')}"; fi)."; fi
           if [ "$MODE" = snaponly ] || [ "$NOCOPY" -eq 1 ]; then :
           elif [ -n "$EXFAM" ]; then echo "$(T 'Pomijane migawki z prefiksami:') ${EXFAM//,/, }."
@@ -1405,7 +1528,7 @@ field_value() {   # <pole> -> wartość na karcie ("" = jeszcze nie ustawione)
             if [ -n "$MANUAL_P" ] && [ "$PROFILE" = "$MANUAL_P" ]; then echo "$(T 'własne (tabela szczebli)')"; return; fi
             a="$(awk -F'\t' -v n="$PROFILE" '$1==n{print $2; exit}' "$TMPD/prof.tsv" 2>/dev/null)"
             # U136: z fastprune szablon daje szczeble, nie czas życia -- "trzyma 24 h, 7 dni" byłoby nieprawdą
-            [ "$MODE" = snaponly ] && [ -n "$FASTPRUNE" ] && a="$(Tv 'fastprune $FASTPRUNE h' '$FASTPRUNE' "$FASTPRUNE")"
+            [ "$MODE" = snaponly ] && [ -n "$FASTPRUNE" ] && a="$(Tv 'krótka retencja $FASTPRUNE h' '$FASTPRUNE' "$FASTPRUNE")"
             echo "$PROFILE${a:+ -- $a}" ;;
         srcret) case "$VIS" in *" srcret "*) src_words ;; esac ;;
         chain)  case "$(chain_ans)" in
@@ -1480,7 +1603,7 @@ CARD_NAMES_OF() {
         mode) echo "$(T 'Rodzaj')" ;; host) echo "$(T 'Źródło')" ;; ds) echo "$(T 'Datasety')" ;; target) echo "$(T 'Cel')" ;;
         profile) echo "$(T 'Harmonogram')" ;; srcret) echo "$(T 'Retencja źródła')" ;; silnik) echo "$(T 'Silnik')" ;;
         chain) echo "$(T 'Migawki na źródle')" ;;
-        name) echo "$(T 'Nazwa')" ;; acct) echo "$(T 'Konto')" ;; passive) echo "$(T 'Pasywnie')" ;; fastprune) echo "$(T 'Fastprune')" ;; extra) echo "$(T 'Dodatkowe')" ;;
+        name) echo "$(T 'Nazwa')" ;; acct) echo "$(T 'Konto')" ;; passive) echo "$(T 'Pasywnie')" ;; fastprune) echo "$(T 'Krótka retencja źródła')" ;; extra) echo "$(T 'Dodatkowe')" ;;
     esac
 }
 
@@ -1524,12 +1647,14 @@ wz_adv() {   # Zaawansowane: dodatki i pasywnie; wraca do podsumowania
         WZ_SN=""
         CARD_TAGS=(); CARD_NAMES=(); CARD_VALUES=(); CARD_FIXED=()
         field_applies passive && { CARD_TAGS+=(passive); CARD_NAMES+=("$(T 'Pasywnie')"); CARD_VALUES+=("$(field_value passive)"); CARD_FIXED+=(0); }
-        field_applies fastprune && { CARD_TAGS+=(fastprune); CARD_NAMES+=("$(T 'Fastprune')"); CARD_VALUES+=("$(field_value fastprune)"); CARD_FIXED+=(0); }
+        field_applies fastprune && { CARD_TAGS+=(fastprune); CARD_NAMES+=("$(T 'Krótka retencja źródła')"); CARD_VALUES+=("$(field_value fastprune)"); CARD_FIXED+=(0); }
         field_applies extra && { CARD_TAGS+=(extra); CARD_NAMES+=("$(T 'Dodatkowe')"); CARD_VALUES+=("$(field_value extra)"); CARD_FIXED+=(0); }
         [ "${#CARD_TAGS[@]}" -gt 0 ] || return 0
         [ -n "$pick" ] || pick="${CARD_TAGS[0]}"
         CARD_ACT_TAGS=(); CARD_ACT_LABELS=()
-        card_menu "$(T 'Nowa relacja: zaawansowane')" "$(T 'Rzeczy, których zwykle się nie zmienia.')" "$pick" "$(T Wstecz)" || return 0
+        # U145 (właściciel 2026-11-04: „ekran nieintuicyjny”): wyjście z tego okna NIE cofa zmian --
+        # przycisk mówi „Gotowe”, a opis mówi, co tu jest.
+        card_menu "$(T 'Nowa relacja: zaawansowane')" "$(T 'Prawa i zamrażanie na źródle, tryb pasywny, krótka retencja źródła -- zwykle bez zmian.')" "$pick" "$(T Gotowe)" || return 0
         pick="$WT_OUT"
         case "$pick" in passive|fastprune|extra) run_field "$pick" ;; *) return 0 ;; esac
     done
@@ -1550,7 +1675,7 @@ while :; do
     done
     CARD_TAGS+=(adv); CARD_NAMES+=("$(T 'Zaawansowane')")
     a=""; field_applies passive && a="$(T 'pasywnie:') $(field_value passive)"
-    field_applies fastprune && [ -n "$FASTPRUNE" ] && a="$(Tv 'fastprune $FASTPRUNE h' '$FASTPRUNE' "$FASTPRUNE")"
+    field_applies fastprune && [ -n "$FASTPRUNE" ] && a="$(Tv 'krótka retencja $FASTPRUNE h' '$FASTPRUNE' "$FASTPRUNE")"
     [ "$NOCOPY" -eq 0 ] && a="${a:+$a; }$(field_value extra)"
     CARD_VALUES+=("$a"); CARD_FIXED+=(0)
     miss="$(missing_fields)"
