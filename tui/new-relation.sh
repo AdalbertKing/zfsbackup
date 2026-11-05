@@ -35,10 +35,12 @@ TMPD="$(mktemp -d)" || exit 1
 # Szkic ukrytego szablonu relacji ("Ręcznie" w kroku 6) znika, gdy relacja nie powstała.
 MANUAL_P=""; NR_DONE=0
 drop_manual_draft() {
-    [ -n "$MANUAL_P" ] && [ "$NR_DONE" -ne 1 ] && "$ZB" delete-profile "$MANUAL_P" --yes >/dev/null 2>&1
+    # --if-unused (pierwsza instalacja 2026-11-04): gdy czasownik zdążył założyć relację
+    # (pending), ona wskazuje ten szablon -- bez niego ponowny bieg padał "profile not found".
+    [ -n "$MANUAL_P" ] && [ "$NR_DONE" -ne 1 ] && "$ZB" delete-profile "$MANUAL_P" --yes --if-unused >/dev/null 2>&1
     MANUAL_P=""
     # U136: szablon fastprune powstaje przy planie -- bez założonej relacji nie zostaje.
-    [ -n "${FP_P:-}" ] && [ "$NR_DONE" -ne 1 ] && "$ZB" delete-profile "$FP_P" --yes >/dev/null 2>&1
+    [ -n "${FP_P:-}" ] && [ "$NR_DONE" -ne 1 ] && "$ZB" delete-profile "$FP_P" --yes --if-unused >/dev/null 2>&1
     FP_P=""
 }
 trap 'drop_manual_draft; rm -rf "$TMPD"' EXIT
@@ -140,7 +142,7 @@ $(T 'pozycja „Datasety”.\n\nWskaż host, z którym nie ma jeszcze relacji.')
 
 # --- krok 3: diagnoza -------------------------------------------------------
 probe() {   # check-source -> zmienne C_*
-    C_SSH=0; C_ERR=""; C_NAME=""; C_ZFS=0; C_POOLS=""; C_PKG=0; C_REV=""; C_DIR=""
+    C_SSH=0; C_ERR=""; C_NAME=""; C_ZFS=0; C_POOLS=""; C_PKG=0; C_REV=""; C_DIR=""; C_GIT=1; C_BLK=""; C_SUDO=1
     # U55 (kampania 2026-10-21): 15 s czarnego okna to sufit ConnectTimeout dla crona
     # (martwy host, nazwa na obcy adres -- U56). Żywy host w sieci odpowiada w 0,2-0,4 s
     # (pve10 -> pve9, zmierzone 2026-10-23); w oknie konsoli wystarczy 5 s, jak przy
@@ -162,12 +164,17 @@ ssh = d.get("ssh") or {}; z = d.get("zfs") or {}; p = d.get("package") or {}
 for v in (1 if ssh.get("ok") else 0, one(ssh.get("error")), one(d.get("hostname")),
           1 if z.get("ok") else 0,
           one(", ".join(_(u"%s (%s, wolne %s)") % (x.get("name"), x.get("size"), x.get("free")) for x in z.get("pools") or [])),
-          1 if p.get("ok") else 0, one(p.get("rev")), one(p.get("path") or d.get("repo_dir"))):
+          1 if p.get("ok") else 0, one(p.get("rev")), one(p.get("path") or d.get("repo_dir")),
+          0 if d.get("git") is False else 1, one(d.get("repo_dir_blocked")),
+          0 if d.get("sudo") is False else 1):
     print(v)
 PYEOF
     { IFS= read -r C_SSH; IFS= read -r C_ERR; IFS= read -r C_NAME; IFS= read -r C_ZFS
-      IFS= read -r C_POOLS; IFS= read -r C_PKG; IFS= read -r C_REV; IFS= read -r C_DIR; } <"$TMPD/check.vals"
+      IFS= read -r C_POOLS; IFS= read -r C_PKG; IFS= read -r C_REV; IFS= read -r C_DIR
+      IFS= read -r C_GIT; IFS= read -r C_BLK; IFS= read -r C_SUDO; } <"$TMPD/check.vals"
     case "$C_SSH" in 0|1) ;; *) C_SSH=0 ;; esac
+    case "$C_GIT" in 0|1) ;; *) C_GIT=1 ;; esac
+    case "$C_SUDO" in 0|1) ;; *) C_SUDO=1 ;; esac
     case "$C_ZFS" in 0|1) ;; *) C_ZFS=0 ;; esac
     case "$C_PKG" in 0|1) ;; *) C_PKG=0 ;; esac
     [ "$C_SSH" -eq 1 ] || [ -n "$C_ERR" ] || C_ERR="$(tail -1 "$TMPD/check.err" 2>/dev/null)"
@@ -216,8 +223,15 @@ step_diag() {   # 0 = dalej, 1 = wróć do hosta
             DIAG_OK_FOR="$(hostport)"
             return 0
         fi
+        # Pierwsza instalacja 2026-11-04: stare skrypty bez .git w katalogu pakietu. prepare-source
+        # odmawia przed jakąkolwiek zmianą; okno mówi to od razu, bez przycisku Zainstaluj.
+        if [ -n "$C_BLK" ]; then
+            wt --title "$(title 3 "$(T 'Katalog pakietu zajęty')")" --msgbox "${facts}$(Tv '  [-] Pakiet  $C_DIR istnieje, ale to nie pakiet (stare skrypty?)\n\ngit clone tam nie wejdzie. Na $HOST, jako root: sprawdź w crontabie\nroota, czy coś stamtąd chodzi, potem odsuń katalog, np.:\n\n  mv $C_DIR $C_DIR.old-RRRRMMDD\n\nPo naprawie wróć tutaj.' '$C_DIR' "$C_DIR" '$HOST' "$HOST")" 17 "$W"
+            return 1
+        fi
+        [ "$C_GIT" -eq 1 ] || facts="${facts}$(T '  [-] git     brak; Zainstaluj doinstaluje go przed klonem (apt-get install git)')\n"
         wt --title "$(title 3 "$(T 'Brak pakietu na źródle')")" --yes-button "$(T Zainstaluj)" --no-button "$(T Wstecz)" \
-           --yesno "${facts}$(Tv '  [-] Pakiet  nie ma go w $C_DIR\n\nBez pakietu źródło nie dołączy do relacji.\n\n'\''Zainstaluj'\'' = prepare-source: git clone pakietu jako root.\nNie rusza crona, nie zakłada relacji ani kluczy.' '$C_DIR' "$C_DIR")" 16 "$W" || return 1
+           --yesno "${facts}$(Tv '  [-] Pakiet  nie ma go w $C_DIR\n\nBez pakietu źródło nie dołączy do relacji.\n\n'\''Zainstaluj'\'' = prepare-source: git clone pakietu jako root.\nNie rusza crona, nie zakłada relacji ani kluczy.' '$C_DIR' "$C_DIR")" 17 "$W" || return 1
         info "$(Tv 'Instaluję pakiet na $HOST' '$HOST' "$HOST")" "$(Tv 'prepare-source $(hostport) ... (do minuty)' '$(hostport)' "$(hostport)")"
         if "$ZB" prepare-source "$(hostport)" --yes >"$TMPD/prep.log" 2>&1; then
             continue    # sprawdź jeszcze raz i pokaż wynik
@@ -758,12 +772,21 @@ chain_ans() {   # -> chain | own | "" (brak odpowiedzi dla obecnego koszyka)
     [ -n "$CHAIN_ANS" ] && [ "$CHAIN_FOR" = "${B_ROOT[*]}" ] && echo "$CHAIN_ANS"
 }
 chain_facts() {   # -> wiersze "  dataset: N migawek automated_*, najnowsza ... (... temu)"
-    local r n c f e now ago
+    local r n c f e now ago i x skip
     now=$(date +%s)
-    for r in ${B_ROOT[@]+"${B_ROOT[@]}"}; do
+    for i in ${B_ROOT[@]+"${!B_ROOT[@]}"}; do
+        r=${B_ROOT[$i]}
         while IFS=$'\t' read -r n c f e; do
             if [ "$MODE" = sync ]; then [ "$n" = "$r" ] || continue
             else case "$n" in "$r"|"$r"/*) ;; *) continue ;; esac; fi
+            # wykluczony przez admina (i jego dzieci): relacja go nie weźmie, więc ani
+            # „bierzemy”, ani „zestarzeją się” go nie dotyczy (test od zera 2, D4)
+            skip=""
+            while IFS= read -r x; do
+                [ -n "$x" ] || continue
+                case "$n" in "$x"|"$x"/*) skip=1; break ;; esac
+            done <<<"${B_EXCL[$i]}"
+            [ -z "$skip" ] || continue
             case "$f" in ''|*[!0-9]*) f=0 ;; esac
             [ "$f" -gt 0 ] || continue
             case "$e" in ''|*[!0-9]*) e=0 ;; esac
@@ -940,7 +963,7 @@ step_name() {
         # droga Wstecz się nie zmieniają)
         wt --title "$(title 7 "$(T 'Nazwa relacji')")" --msgbox "$(Tv 'Relacja nazywa się jak host po drugiej stronie: $n.
 
-Relacja to para hostów -- jedna nazwa na F3, w cronie i w mailach.' '$n' "$n")" 10 "$W"
+Relacja to para hostów -- jedna nazwa na F3, w cronie i w mailach.' '$n' "$n")" 10 "$W" || return 1   # Esc = Wstecz, nie Dalej (test od zera 2026-11-05)
         return 0
     fi
     if [ -z "$RNAME" ] && [ "$MODE" = local ]; then
@@ -1326,18 +1349,19 @@ summary_text() {
         echo
         echo "$(T 'Komenda (to samo wpisałbyś z palca):')"
         cmd_oneline; echo
-        case " ${ARGV[*]} " in *" --exclude-child="*) echo "(^nazwa${D:-\$} $(T '= dokładnie ten dataset, nie łapie np. ...disk-01)')" ;; esac
+        case " ${ARGV[*]} " in *" --exclude-child="*) echo "(^$(T nazwa)\$ $(T '= dokładnie ten dataset, nie łapie np. ...disk-01)')" ;; esac
         return 0
     fi
     if [ "$FREEZE" -eq 1 ]; then
         if [ "$GRANT" -eq 1 ] && [ "$GQUIESCE" -eq 1 ]; then echo "$(T 'Zamrażanie: źródło dostanie zgodę stąd (--grant-quiesce).')"
+            [ "${C_SUDO:-1}" -eq 1 ] || echo "$(T '  (na źródle nie ma sudo: przed pierwszą zmianą zostanie doinstalowane, apt-get install sudo)')"
         else echo "$(T 'Zamrażanie: BEZ zgody źródła migawki wyjdą jako '\''_crash_'\'' (niezamrożone).')"; fi
     fi
     echo "$(T 'Prawa na źródle:') $( [ "$GRANT" -eq 1 ] && echo "$(T 'nadane stąd, od razu')" || echo "$(T 'zatwierdzisz SAM -- instalacja zatrzyma się i poda komendę')" )$( [ "$MANUAL" -eq 1 ] && echo "$(T '; parowanie ręczne')")"
     echo
     echo "$(T 'Komenda (to samo wpisałbyś z palca):')"
     cmd_oneline; echo
-    case " ${ARGV[*]} " in *" --exclude-child="*) echo "(^nazwa${D:-\$} $(T '= dokładnie ten dataset, nie łapie np. ...disk-01)')" ;; esac
+    case " ${ARGV[*]} " in *" --exclude-child="*) echo "(^$(T nazwa)\$ $(T '= dokładnie ten dataset, nie łapie np. ...disk-01)')" ;; esac
     return 0
 }
 # INNY KOLEKTOR JUŻ PRZYCINA TE DATASETY (uwaga 4, 2026-10-08). Aktywacja odmawia,
@@ -1369,7 +1393,7 @@ check_pruners() {
     return 1
 }
 
-step_summary() {    # 0 = wykonano (RC_RUN), 1 = wstecz, 2 = do datasetów, 3 = do szablonu
+step_summary() {    # 0 = wykonano (RC_RUN), 1 = wstecz, 2 = do datasetów, 3 = do szablonu, 4 = nie wyszło, nic nie zmieniono (z powrotem na podsumowanie)
     local rc
     while :; do
         geom
@@ -1410,7 +1434,10 @@ step_summary() {    # 0 = wykonano (RC_RUN), 1 = wstecz, 2 = do datasetów, 3 = 
           grep -v -- '--grant-remotely is noted' "$TMPD/plan.txt" | plan_only_this "$RNAME"; } >"$TMPD/plan2.txt"
         if [ "$rc" -ne 0 ]; then
             wt --title "$(title 10 "$(T 'Plan ODRZUCONY przez czasownik')")" --scrolltext --msgbox "$(cat "$TMPD/plan2.txt")" "$H" "$W"
-            continue
+            # T8 (lab 2026-11-05): `continue` pytał czasownik o TEN SAM plan i pokazywał tę samą
+            # odmowę bez końca -- OK i Esc wracały do niej. Z powrotem na podsumowanie: odpowiedzi
+            # zostają, a poprawia się tam, gdzie odmowa wskazuje (np. nazwa, datasety).
+            return 4
         fi
         local planf="$TMPD/plan2.txt"
         if [ -n "${ZFS_TUI_LOG:-}" ]; then planf="${ZFS_TUI_LOG%.log}-plan.txt"; cp -f "$TMPD/plan2.txt" "$planf" 2>/dev/null || planf="$TMPD/plan2.txt"; fi
@@ -1429,49 +1456,85 @@ step_summary() {    # 0 = wykonano (RC_RUN), 1 = wstecz, 2 = do datasetów, 3 = 
         yesno_text "$TMPD/plan-short.txt" "$(title 10 "$(T 'Plan')")" "$(T WYKONAJ)" "$(T Wstecz)" || return 1
         build_argv install
         # U66 część 2: okno postępu zamiast czarnego ekranu (wtl run_progress), potem okno wyniku.
-        : >"$TMPD/run.log"
-        RC_RUN=0; run_progress "$(Tv 'Nowa relacja '\''$RNAME'\'': zakładam' '$RNAME' "$RNAME")" "$TMPD/run.log" "${ARGV[@]}" || RC_RUN=$?
-        # JEDNA REGUŁA DRZEWA TAKŻE PRZY TWORZENIU (relacja = config, 2026-10-26): przy jakimkolwiek
-        # [-] zakres zapisany od razu jako pozycje relacji -- to samo set-datasets co w oknie zmiany,
-        # w każdym rodzaju relacji. Seed powyżej szanował wyjątki, więc nic zbędnego nie przyszło.
-        # Migawki zdalne zakłada się już z pozycjami drzewa (basket_entries w --source), więc
-        # drugi krok nic by nie zmienił -- tylko kosztował ~30 s (kampania 2026-10-26).
-        if [ "$RC_RUN" -eq 0 ] && [ "$MODE" != snaponly ] && any_excl; then
-            _da=(); mapfile -t _da < <(basket_entries "$BASKET_DS_JSON" | awk -F'\t' 'NF { printf "--dataset=%s:%s\n", $1, $2 }')
-            : >"$TMPD/run2.log"
-            run_progress "$(Tv 'Nowa relacja '\''$RNAME'\'': zakres wg drzewa' '$RNAME' "$RNAME")" "$TMPD/run2.log" "$ZB" set-datasets "$RNAME" "${_da[@]}" --yes || RC_RUN=$?
-            cat "$TMPD/run2.log" >>"$TMPD/run.log"
-        fi
-        # DZIENNIK DLA F3 Ins (owner note 5): TUI ustawia ZFS_TUI_LOG na
-        # sciezke ~/.zfs-tui/new-relation-<stamp>.log; dopisujemy do niego, zeby wynik biegu
-        # nie zniknal w $TMPD.
-        if [ -n "${ZFS_TUI_LOG:-}" ] && [ -f "$TMPD/run.log" ]; then
-            cat "$TMPD/run.log" >>"$ZFS_TUI_LOG" 2>/dev/null
-            echo "rc=$RC_RUN" >>"$ZFS_TUI_LOG" 2>/dev/null
-        fi
-        [ "$RC_RUN" -eq 0 ] && NR_DONE=1
-        if [ "$RC_RUN" -eq 0 ]; then
-            # Sukces jednym zdaniem = linia komunikatu GUI, bez okna z <Ok>; dziennik dopisuje GUI
-            # (kampania pve10, 2026-10-29: linia "Dziennik:" robila z sukcesu okno).
-            result_box "$(T 'Nowa relacja: GOTOWE')" 0 "$TMPD/run.log" "$(Tv 'Relacja '\''$RNAME'\'' założona (rc=0).' '$RNAME' "$RNAME")"
-        elif [ "$GRANT" -eq 0 ] && grep -q -- '--commit-scope=' "$TMPD/run.log"; then
-            # To nie awaria: wybrano "zatwierdzę sam", więc instalacja MA stanąć w tym miejscu.
-            cmd_oneline >"$HOME/new-relation-$RNAME.cmd" 2>/dev/null; echo >>"$HOME/new-relation-$RNAME.cmd"
-            { echo "$(Tv 'ZATRZYMANE ZGODNIE Z WYBOREM -- relacja '\''$RNAME'\'' czeka na zgodę źródła.' '$RNAME' "$RNAME")"
-              echo
-              echo "$(Tv '1. Na $HOST, jako root:' '$HOST' "$HOST")"
-              echo "   cd $C_DIR && ./$(grep -o 'deploy.sh --commit-scope=[^ ]*' "$TMPD/run.log" | tail -1)$( [ "$FREEZE" -eq 1 ] && echo ' --allow-quiesce')"
-              [ "$FREEZE" -eq 1 ] && echo "$(T '   (--allow-quiesce: bez tego szablon zamrażający da migawki '\''_crash_'\'')')"
-              echo
-              echo "$(Tv '2. Potem TUTAJ ponów tę samą komendę (zapisana w $HOME/new-relation-$RNAME.cmd):' '$HOME' "$HOME" '$RNAME' "$RNAME")"
-              echo "   $(cmd_oneline)"
-            } >"$TMPD/stop.txt"
-            textbox_read "$(T 'Nowa relacja: zatrzymane zgodnie z wyborem')" "$TMPD/stop.txt" "$(T 'Zamknij')"
-        else
-            result_box "$(T 'Nowa relacja: NIE UDAŁO SIĘ')" "$RC_RUN" "$TMPD/run.log" "" "$(Tv 'Relacja '\''$RNAME'\'' nie została założona.' '$RNAME' "$RNAME")"
-        fi
-        return 0
+        # Ponów (stan pośredni, niżej) wraca tutaj: ta sama komenda, bez nowego planu.
+        while :; do
+            : >"$TMPD/run.log"
+            RC_RUN=0; run_progress "$(Tv 'Nowa relacja '\''$RNAME'\'': zakładam' '$RNAME' "$RNAME")" "$TMPD/run.log" "${ARGV[@]}" || RC_RUN=$?
+            # JEDNA REGUŁA DRZEWA TAKŻE PRZY TWORZENIU (relacja = config, 2026-10-26): przy jakimkolwiek
+            # [-] zakres zapisany od razu jako pozycje relacji -- to samo set-datasets co w oknie zmiany,
+            # w każdym rodzaju relacji. Seed powyżej szanował wyjątki, więc nic zbędnego nie przyszło.
+            # Migawki zdalne zakłada się już z pozycjami drzewa (basket_entries w --source), więc
+            # drugi krok nic by nie zmienił -- tylko kosztował ~30 s (kampania 2026-10-26).
+            if [ "$RC_RUN" -eq 0 ] && [ "$MODE" != snaponly ] && any_excl; then
+                _da=(); mapfile -t _da < <(basket_entries "$BASKET_DS_JSON" | awk -F'\t' 'NF { printf "--dataset=%s:%s\n", $1, $2 }')
+                : >"$TMPD/run2.log"
+                run_progress "$(Tv 'Nowa relacja '\''$RNAME'\'': zakres wg drzewa' '$RNAME' "$RNAME")" "$TMPD/run2.log" "$ZB" set-datasets "$RNAME" "${_da[@]}" --yes || RC_RUN=$?
+                cat "$TMPD/run2.log" >>"$TMPD/run.log"
+            fi
+            # DZIENNIK DLA F3 Ins (owner note 5): TUI ustawia ZFS_TUI_LOG na
+            # sciezke ~/.zfs-tui/new-relation-<stamp>.log; dopisujemy do niego, zeby wynik biegu
+            # nie zniknal w $TMPD.
+            if [ -n "${ZFS_TUI_LOG:-}" ] && [ -f "$TMPD/run.log" ]; then
+                cat "$TMPD/run.log" >>"$ZFS_TUI_LOG" 2>/dev/null
+                echo "rc=$RC_RUN" >>"$ZFS_TUI_LOG" 2>/dev/null
+            fi
+            [ "$RC_RUN" -eq 0 ] && NR_DONE=1
+            if [ "$RC_RUN" -eq 0 ]; then
+                # Sukces jednym zdaniem = linia komunikatu GUI, bez okna z <Ok>; dziennik dopisuje GUI
+                # (kampania pve10, 2026-10-29: linia "Dziennik:" robila z sukcesu okno).
+                result_box "$(T 'Nowa relacja: GOTOWE')" 0 "$TMPD/run.log" "$(Tv 'Relacja '\''$RNAME'\'' założona (rc=0).' '$RNAME' "$RNAME")"
+            elif [ "$GRANT" -eq 0 ] && grep -q -- '--commit-scope=' "$TMPD/run.log"; then
+                # To nie awaria: wybrano "zatwierdzę sam", więc instalacja MA stanąć w tym miejscu.
+                cmd_oneline >"$HOME/new-relation-$RNAME.cmd" 2>/dev/null; echo >>"$HOME/new-relation-$RNAME.cmd"
+                { echo "$(Tv 'ZATRZYMANE ZGODNIE Z WYBOREM -- relacja '\''$RNAME'\'' czeka na zgodę źródła.' '$RNAME' "$RNAME")"
+                  echo
+                  echo "$(Tv '1. Na $HOST, jako root:' '$HOST' "$HOST")"
+                  echo "   cd $C_DIR && ./$(grep -o 'deploy.sh --commit-scope=[^ ]*' "$TMPD/run.log" | tail -1)$( [ "$FREEZE" -eq 1 ] && echo ' --allow-quiesce')"
+                  [ "$FREEZE" -eq 1 ] && echo "$(T '   (--allow-quiesce: bez tego szablon zamrażający da migawki '\''_crash_'\'')')"
+                  echo
+                  echo "$(Tv '2. Potem TUTAJ ponów tę samą komendę (zapisana w $HOME/new-relation-$RNAME.cmd):' '$HOME' "$HOME" '$RNAME' "$RNAME")"
+                  echo "   $(cmd_oneline)"
+                } >"$TMPD/stop.txt"
+                textbox_read "$(T 'Nowa relacja: zatrzymane zgodnie z wyborem')" "$TMPD/stop.txt" "$(T 'Zamknij')"
+            else
+                # SKUCHA 11 (pierwsza instalacja 2026-11-04): porażka po zapisie rekordu zostawiała relację wpół
+                # założoną na dwóch hostach (rekord pending, konto i zgody na źródle), a okno mówiło
+                # "nie została założona". Teraz okno mówi prawdę i daje wyjście: wycofać (delete-relation
+                # -- kolektor i źródło) albo ponowić (ta sama komenda wznawia od miejsca porażki).
+                local _st; _st=$(relation_state "$RNAME")
+                if [ -z "$_st" ]; then
+                    result_box "$(T 'Nowa relacja: NIE UDAŁO SIĘ')" "$RC_RUN" "$TMPD/run.log" "" "$(Tv 'Relacja '\''$RNAME'\'' nie została założona.' '$RNAME' "$RNAME")"
+                    # Nic nie zmieniono, więc odpowiedzi zostają: z powrotem na podsumowanie,
+                    # nie wyjście z kreatora i wszystko od nowa (test od zera 2026-11-05, T8).
+                    return 4
+                fi
+                result_box "$(T 'Nowa relacja: NIE UDAŁO SIĘ')" "$RC_RUN" "$TMPD/run.log" "" "$(Tv 'Relacja '\''$RNAME'\'' założona do połowy (stan: $ST).' '$RNAME' "$RNAME" '$ST' "$_st")"
+                cmd_oneline >"$HOME/new-relation-$RNAME.cmd" 2>/dev/null; echo >>"$HOME/new-relation-$RNAME.cmd"
+                wt --title "$(Tv 'Relacja $RNAME: stan pośredni' '$RNAME' "$RNAME")" --ok-button "$(T Dalej)" --cancel-button "$(T Zostaw)" --notags --default-item wycofaj \
+                   --menu "$(Tv 'Na tym hoście jest rekord relacji (stan: $ST), na źródle mogły zostać konto i zgody.\nKomenda zapisana w $HOME/new-relation-$RNAME.cmd.' '$ST' "$_st" '$HOME' "$HOME" '$RNAME' "$RNAME")" 12 "$W" 2 \
+                   wycofaj "$(T 'Wycofaj -- usuń relację tu i na źródle (delete-relation)')" \
+                   ponow "$(T 'Ponów -- ta sama komenda wznawia od miejsca porażki')" || return 0
+                case "$WT_OUT" in
+                    wycofaj)
+                        : >"$TMPD/undo.log"; local _rc=0
+                        run_progress "$(Tv 'Relacja $RNAME: wycofuję' '$RNAME' "$RNAME")" "$TMPD/undo.log" "$ZB" delete-relation "$RNAME" --yes || _rc=$?
+                        [ -n "${ZFS_TUI_LOG:-}" ] && { cat "$TMPD/undo.log"; echo "rc=$_rc"; } >>"$ZFS_TUI_LOG" 2>/dev/null
+                        [ "$_rc" -eq 0 ] && rm -f "$HOME/new-relation-$RNAME.cmd"
+                        result_box "$(T 'Wycofanie relacji')" "$_rc" "$TMPD/undo.log" "$(Tv 'Relacja '\''$RNAME'\'' wycofana (rc=0).' '$RNAME' "$RNAME")" "$(Tv 'Relacja '\''$RNAME'\'' NIE wycofana do końca -- co zostało, mówi dziennik.' '$RNAME' "$RNAME")" ;;
+                    ponow) continue ;;
+                esac
+            fi
+            return 0
+        done
     done
+}
+
+relation_state() {   # <nazwa> -> stan relacji z rekordu kolektora (puste: brak albo usunięta)
+    "$ZB" status --json 2>/dev/null | "$PY" -c '
+import json, sys
+for r in json.load(sys.stdin).get("relations", []):
+    if r.get("name") == sys.argv[1] and r.get("state") != "removed":
+        print(r.get("state") or "?"); break' "$1" 2>/dev/null
 }
 
 # --- KARTA RELACJI (U25) -------------------------------------------------------

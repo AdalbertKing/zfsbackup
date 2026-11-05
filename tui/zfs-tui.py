@@ -132,12 +132,27 @@ VERDICTS = {
 VERDICT_ORDER = ["BLAD", "CRITICAL", "WARNING", "UNKNOWN", "SPRAWDZAM", "BEZ MONITORA", "CZEKA", "OK"]
 
 
+def ds_bare(name):
+    """Dataset bez przedrostka "konto@host:" -- migawki zdalne maja go w zakresie crona,
+    w liscie datasetow monitora i w liniach check-snap-age; porownuje sie same nazwy."""
+    return (name or "").split(":", 1)[-1]
+
+
 def mark_waiting(doc):
     """U137 C3: monitor z rc 0, ktorego wynik ma linie WAITING (szczebel przed pierwszym
-    biegiem), to CZEKA, nie OK. Zmienia doc monitor --json w miejscu."""
+    biegiem), to CZEKA, nie OK. Zmienia doc monitor --json w miejscu.
+    T10 (test od zera, 2026-11-05): dataset dodany do chodzacej relacji ma WAITING, a jego
+    sasiedzi z tego samego monitora maja migawki -- szczebel chodzi, wiec CZEKA tylko wtedy,
+    gdy KAZDY dataset monitora (albo cos pod nim, przy -R) ma linie WAITING."""
     for m in (doc or {}).get("monitors", []) or []:
-        if m.get("verdict") == "OK" and any(ln.strip().startswith("WAITING dataset=")
-                                             for ln in (m.get("reason") or "").splitlines()):
+        if m.get("verdict") != "OK":
+            continue
+        waiting = [ds_bare(mm.group(2)) for mm in (_DS_LINE.match(ln.strip())
+                   for ln in (m.get("reason") or "").splitlines()) if mm and mm.group(1) == "WAITING"]
+        if not waiting:
+            continue
+        dss = [ds_bare(d) for d in m.get("datasets") or []]
+        if all(any(w == d or w.startswith(d + "/") for w in waiting) for d in dss):
             m["verdict"] = "CZEKA"
     return doc
 
@@ -1339,9 +1354,11 @@ def dataset_verdict(m, names):
         if not mm:
             continue
         any_line = True
-        ds = mm.group(2).split(":", 1)[-1]
+        ds = ds_bare(mm.group(2))
         w = "CZEKA" if mm.group(1) == "WAITING" else mm.group(1)
-        if any(n and (ds == n or ds.startswith(n + "/")) for n in names):
+        # T10: zakres migawek zdalnych to "konto@host:dataset" -- bez zdjecia przedrostka
+        # zaden wiersz nie pasowal i kazdy dataset takiej relacji byl "aktualne".
+        if any(n and (ds == ds_bare(n) or ds.startswith(ds_bare(n) + "/")) for n in names):
             if best is None or order.get(w, 99) < order.get(best[0], 99):
                 best = (w, ln.strip())
     if best is None and any_line:
@@ -1447,7 +1464,11 @@ def next_step(rel):
     co operator wpisze. Maszyna stanow z `zfs-backup.sh` (usage):
     pending_enroll -> seeding -> seed_complete -> endpoint_verified -> active."""
     s = rel.get("state", "")
-    return {"pending_enroll": "activate NAME", "seeding": "seed NAME",
+    # pending_enroll: activate odmawia ("not seeded yet. Run: seed"), seed go przyjmuje; tylko
+    # migawki zdalne nie maja seeda -- tam activate (zfs-backup.sh cmd_activate, cmd_seed).
+    if s == "pending_enroll" and rel.get("mode") == "snaponly":
+        return "activate NAME"
+    return {"pending_enroll": "seed NAME", "seeding": "seed NAME",
             "seed_complete": "activate NAME", "endpoint_verified": "activate-client NAME",
             "removed": "--"}.get(s, "")
 
@@ -2208,7 +2229,7 @@ def render_tabbed(data, width, height, now, ch, screen, title, heads, cells, cur
             cbody.append("")
         many = len(child["tabs"]) > 1
         snaps = any(it.get("relname") and it.get("pair") is not None for it in child.get("items") or [])
-        cfoot = (child.get("foot") or ((_(u"m migawki   ") if snaps else u"") + u"Enter okno   " + (_(u"←→ zakładki   ") if many else u"")
+        cfoot = (child.get("foot") or ((_(u"m migawki   ") if snaps else u"") + _(u"Enter okno   ") + (_(u"←→ zakładki   ") if many else u"")
                  + _(u"Esc wraca   Tab do linii poleceń"))) if in_child else ""
         bottom = box(ch, tab_title(child.get("name"), child["tabs"], child.get("ti", 0)), cbody, width, footer=cfoot)
         if pcur is not None:
@@ -2918,8 +2939,20 @@ def rel_panel_pairs(row, data, now, ch):
     # U144 (wlasciciel 2026-11-01): KAZDY szczebel osobno -- jego stan, wiek albo pierwszy
     # termin, i jego prog. Dawniej wiek pierwszego powodu stal obok progu pierwszego monitora
     # ("najnowsza sprzed 49092h, alarm po 150m": roczny wiek, godzinowy prog).
-    for m in tier_monitors(row["monitors"]):
-        pairs.append(("  " + tier_word(m), tier_line(m, rel, data, now)))
+    # Test od zera 2 (2026-11-05, O9): relacja z dwiema grupami monitorow (np. data,docs,mail
+    # bez -R i fz0a z -R) miala kazdy szczebel dwa razy bez slowa, ktory jest ktory.
+    # Szczebel powtorzony dostaje grupe: pierwszy dataset (ostatni czlon) i "+N".
+    _mons = tier_monitors(row["monitors"])
+    _per_tier = {}
+    for m in _mons:
+        _per_tier[tier_word(m)] = _per_tier.get(tier_word(m), 0) + 1
+    for m in _mons:
+        _w = tier_word(m)
+        if _per_tier[_w] > 1:
+            _dss = [ds_bare(d) for d in m.get("datasets") or []]
+            if _dss:
+                _w += u" " + _dss[0].rsplit(u"/", 1)[-1] + (u"+%d" % (len(_dss) - 1) if len(_dss) > 1 else u"")
+        pairs.append(("  " + _w, tier_line(m, rel, data, now)))
     last = row["last"]
     # U61: "Ostatni bieg OK" (historia transferow) stal obok "błąd biegu" (job-stats).
     # Nieudany ostatni bieg ktoregos zadania wygrywa i panel mowi, KTORY dataset i dlaczego.
@@ -5988,7 +6021,7 @@ class UI(object):
             # UROCHOM TERAZ, jak F7 na F2 i F6: bez okna potwierdzenia (kopia niczego nie
             # niszczy), wynik w oknie wyjscia. Czasownik bierze z zainstalowanego crona
             # najdrobniejsze zadanie kazdego datasetu relacji; wstrzymanej odmawia.
-            self.run_detached(_(u"Relacja %s -- kopia teraz: wymuszenie kopii wszystkich datasetów (np. przed przeniesieniem kolektora)") % n, [self.zb(), "run-relation", n], logname="relacja")
+            self.run_detached(_(u"Relacja %s -- bieg teraz: każdy dataset relacji raz, poza harmonogramem (np. przed przeniesieniem kolektora)") % n, [self.zb(), "run-relation", n], logname="relacja")
         elif k == "F8":
             if rel.get("disabled"):
                 self.confirm(_(u"Włącz relację %s") % n, [self.zb(), "enable-client", n], [_(x) for x in ENABLE_NOTE])

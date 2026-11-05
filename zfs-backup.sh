@@ -218,6 +218,11 @@ PVE_NODES_DIR="/etc/pve/nodes"
 # relocation" is still true. --allow-stale-catchup overrides it, loudly.
 CATCHUP_MAX_AGE="${CATCHUP_MAX_AGE:-$(settings_get catchup_max_age 1800)}"
 
+# grep_q: grep -q that reads ALL of its input (U149, 2026-11-05). Under pipefail
+# `writer | grep -q` is 141 when grep leaves at the first match and the writer
+# is still writing (SIGPIPE) -- a found match reported as a failure. -c reads
+# to the end; its status is grep -q's (0 match, 1 none, 2 error).
+grep_q() { grep -c "$@" >/dev/null; }
 log()  { echo ">>> $*"; }
 # warn/die live in lib-backup-common.sh since the restore split.
 
@@ -458,7 +463,8 @@ front end never edits the config file:
   zfs-backup.sh show-tiers NAME [--json]
                                     The tiers of one relationship, read from its CONFIG.
   zfs-backup.sh set-tiers NAME [--tier=T|--src-tier=T --keep=N|--retain=-XN|--quiesce=V|
-                                --send-schedule=..|--prune-schedule=..] [--drop-tier=T]
+                                --send-schedule=..|--prune-schedule=..|--monitor-warn=AGE|
+                                --monitor-crit=AGE (snaponly)] [--drop-tier=T]
                                 [--add-tier=T] [--method=gfs|flat|age] [--plan|--yes]
                                     Change them IN the config, in one atomic replace.
                                     Move the config's relationships, once, from template
@@ -875,6 +881,22 @@ client_conf_path() { echo "$CLIENTS_DIR/$1.conf"; }
 RELATIONSHIPS_DIR="${RELATIONSHIPS_DIR:-/var/lib/zfs-snapshot-all/relationships}"
 pause_marker_path() { echo "$RELATIONSHIPS_DIR/$1/paused"; }
 client_paused() { [ -f "$(pause_marker_path "$1")" ]; }
+# ONE NAME, TWO RELATIONSHIPS -- the half clean-relationships.sh (src_keep) could
+# not reach. $RELATIONSHIPS_DIR/<name> is ALSO the pair gate's state directory for
+# a collector of the same name that joined this host (zfs-pair-gate.sh reads
+# $RELATIONSHIPS_DIR/<label>). A collector record "pve11" on pve10 and pve11's own
+# pull from pve10 share it: removing the record rmdir'ed the (empty) gate dir and
+# pve11's jobs got PAIR_UNKNOWN, exit 92 (lab, 2026-11-05, reproduced twice).
+# The purge's own guard tests that directory, so it was already gone when the
+# purge looked. Same test as there: a join manifest of this name is alive.
+relationship_dir_rmdir() {   # <name> -- rmdir the client's state dir unless a joined collector's gate lives there
+    if [ -f "${PEER_STATE_DIR:-/etc/zfs-snapshot-all/peers}/$1.conf" ] \
+       && grep -q '^PEER_JOIN_' "${PEER_STATE_DIR:-/etc/zfs-snapshot-all/peers}/$1.conf" 2>/dev/null; then
+        log "kept $RELATIONSHIPS_DIR/$1 -- it is also the pair gate's state of the collector '$1' this host is the source of"
+        return 0
+    fi
+    rmdir "$RELATIONSHIPS_DIR/$1" 2>/dev/null || :
+}
 # peer_scope_path / peer_scope_granted_hash_path (REV-20260802-033 slices
 # 4/T3) and local_keyfile_path / local_knownhosts_path: lib-pairing.sh. This
 # reads what --draft-scope/--commit-scope already wrote on the PEER and where
@@ -1105,7 +1127,7 @@ check_inherited_grants() {
             echo "    zfs allow $path :"
             printf '%s\n' "$out" | sed 's/^/      /'
         fi
-        if printf '%s' "$out" | grep -qF "$account"; then
+        if printf '%s' "$out" | grep_q -F "$account"; then
             if [ "$path" = "$ds" ]; then
                 found_exact=1
             else
@@ -1140,7 +1162,7 @@ assert_source_prune_grant() {   # <account> <host> <port> <keyfile> <alias> <ali
         [ "$rc" -eq 0 ] || die "source-prune grant check: 'zfs allow $ds' on $host as $account failed (ssh/zfs exit $rc) -- refusing to install a remote source prune whose authorization cannot be confirmed. Output: $(printf '%s' "$out" | tail -2)"
         # The account's own permission line carries a comma-list of perms; `destroy`
         # is bounded by commas/space so grep -w matches it inside snapshot,destroy,send.
-        if ! printf '%s\n' "$out" | grep -F -- "$account" | grep -qw destroy; then
+        if ! printf '%s\n' "$out" | grep -F -- "$account" | grep_q -w destroy; then
             die "source-prune grant check FAILED CLOSED: the delegated identity '$account' does not hold 'destroy' on the source '$ds' (needed by delsnaps.sh's zfs destroy). The pairing already grants destroy via deploy.sh --commit-scope; re-run --commit-scope on $host if it is missing. Refusing to install a source-prune job that would fail every run -- and NOT widening the grant here."
         fi
         # REV-20260812-111 A: the SECOND capability managed source retention
@@ -1158,7 +1180,7 @@ assert_source_prune_grant() {   # <account> <host> <port> <keyfile> <alias> <ali
         # Same discipline as `destroy` above: deploy.sh --commit-scope already
         # delegates `bookmark` (ZFS_PERMS / do_commit_scope), so this VERIFIES
         # and never widens.
-        if ! printf '%s\n' "$out" | grep -F -- "$account" | grep -qw bookmark; then
+        if ! printf '%s\n' "$out" | grep -F -- "$account" | grep_q -w bookmark; then
             die "source-prune grant check FAILED CLOSED: the delegated identity '$account' holds 'destroy' but NOT 'bookmark' on the source '$ds'. Managed source retention will eventually age out the ordinary common snapshot, and the bookmark that would still anchor the next incremental cannot be created -- the transfer keeps exiting 0 while carrying no continuity insurance, then refuses permanently once the common base is gone. deploy.sh --commit-scope already grants bookmark; re-run --commit-scope on $host if it is missing. Refusing to install source retention on a relationship whose continuity cannot be maintained -- and NOT widening the grant here."
         fi
     done
@@ -1927,7 +1949,7 @@ profile_declares_ladder() {   # -> 0 when the loaded profile carries a [prune] f
     # or directory" from profile_emit's redirection and made a shape question
     # look like a crash.
     [ -s "${PROFILE_PRUNE_FILE:-}" ] || return 1
-    profile_emit "$PROFILE_PRUNE_FILE" | grep -q '[^[:space:]]'
+    profile_emit "$PROFILE_PRUNE_FILE" | grep_q '[^[:space:]]'
 }
 
 # One rendered [template:NS] section, whole.
@@ -2325,7 +2347,7 @@ append_source_templates_if_missing() {   # <workfile> <rendered prune fragment>
             # fields (measured on pve9b, 2026-10-12: it outlived its relationship
             # and every later remote install with that profile died on it). It is
             # nobody's policy, so it is replaced, not inherited.
-            config_referenced_templates "$wf" | grep -qxF "$src" && continue
+            config_referenced_templates "$wf" | grep_q -xF "$src" && continue
             remove_template_section "$wf" "$src"
         fi
         sec="$(profile_template_section "$id" "${SRC_PROFILE_TPL_FILE:-$PROFILE_TPL_FILE}")"
@@ -2975,8 +2997,12 @@ cron_block_source() {   # <stdin: crontab or block text> -> the config path, or 
     #
     # sed does the bounding rather than the caller, because the caller that
     # forgets is exactly the failure this consolidation exists to prevent.
+    #
+    # awk, not `grep -m1`: an early reader leaves sed writing into a closed pipe
+    # (status 4 and "couldn't flush stdout" when SIGPIPE is ignored, 141 otherwise),
+    # and pipefail makes that the function's status. U165, the U149 family.
     sed -n '/^# BEGIN zfs-backup-managed/,/^# END zfs-backup-managed/p' \
-        | grep -m1 '^# Source: ' | sed -E 's/^# Source: (.*) -- .*/\1/'
+        | awk '!f && /^# Source: / { f = 1; print }' | sed -E 's/^# Source: (.*) -- .*/\1/'
 }
 
 
@@ -3645,19 +3671,19 @@ foreign_protections_kept() {   # <installed line> <proposed line> -> 0 when exac
                | grep -oE '\-P "[^"]*"' | sed -E 's/^-P "(.*)"$/\1/')
     while IFS= read -r tok; do
         [ -n "$tok" ] || continue
-        printf '%s\n' "$new" | grep -qxF -- "$tok" || return 1        # removed, or its count changed
+        printf '%s\n' "$new" | grep_q -xF -- "$tok" || return 1        # removed, or its count changed
     done <<< "$old"
     while IFS= read -r tok; do
         [ -n "$tok" ] || continue
-        printf '%s\n' "$old" | grep -qxF -- "$tok" && continue
+        printf '%s\n' "$old" | grep_q -xF -- "$tok" && continue
         # a new token for a prefix the installed line already protects is a changed floor
         printf '%s\n' "$old" | awk -v p="${tok%:*}" '{ q = $0; sub(/:[^:]*$/, "", q) } q == p { found = 1 } END { exit !found }' && return 1
         # ...and an added one must be what gen-cron reported adding for this scope
-        printf '%s\n' "$expected" | grep -qxF -- "$tok" || return 1
+        printf '%s\n' "$expected" | grep_q -xF -- "$tok" || return 1
     done <<< "$new"
     while IFS= read -r tok; do
         [ -n "$tok" ] || continue
-        printf '%s\n' "$new" | grep -qxF -- "$tok" || return 1
+        printf '%s\n' "$new" | grep_q -xF -- "$tok" || return 1
     done <<< "$expected"
     return 0
 }
@@ -3998,7 +4024,7 @@ assert_target_block_not_clobbered() {   # <config whose render is about to be in
         while IFS= read -r line; do
             [ -n "$line" ] || continue
             norm=$(printf '%s\n' "$line" | endpoint_normalized_identity)
-            if printf '%s\n' "$proposed_norm" | grep -qxF -- "$norm"; then
+            if printf '%s\n' "$proposed_norm" | grep_q -xF -- "$norm"; then
                 continue
             fi
             # Second exemption, same shape as the endpoint one: not "this line
@@ -4012,7 +4038,7 @@ assert_target_block_not_clobbered() {   # <config whose render is about to be in
             # changes the endpoint and the schedule together is still matched
             # by what it actually is -- one job, moved twice.
             if printf '%s\n' "$proposed_norm" \
-                 | schedule_normalized_identity | grep -qxF -- \
+                 | schedule_normalized_identity | grep_q -xF -- \
                      "$(printf '%s\n' "$norm" | schedule_normalized_identity)"; then
                 continue
             fi
@@ -4048,7 +4074,7 @@ assert_target_block_not_clobbered() {   # <config whose render is about to be in
             fi
             # Sixth exemption: sync became a mirror (see
             # mirror_normalized_identity). Like the two above it speaks.
-            if printf '%s\n' "$proposed_norm" | mirror_normalized_identity | grep -qxF -- "$norm"; then
+            if printf '%s\n' "$proposed_norm" | mirror_normalized_identity | grep_q -xF -- "$norm"; then
                 warn "  the pull now mirrors its source (-M), the job itself stays:"
                 warn "    $line"
                 continue
@@ -4086,7 +4112,7 @@ assert_target_block_not_clobbered() {   # <config whose render is about to be in
             # other line is held to the seven rules above. Speaks.
             if [ -n "${EDIT_RELATION_NAME:-}" ] \
                && printf '%s\n' "$line" | grep -qF -- " -L $EDIT_RELATION_NAME " \
-               && printf '%s\n' "$proposed" | grep -qF -- " -L $EDIT_RELATION_NAME "; then
+               && printf '%s\n' "$proposed" | grep_q -F -- " -L $EDIT_RELATION_NAME "; then
                 warn "  edited relationship '$EDIT_RELATION_NAME': this job is replaced by its regenerated set:"
                 warn "    $line"
                 continue
@@ -4875,7 +4901,7 @@ emit_client_sections() {   # <workfile> <client name> [is_new_relationship=0]
         # must survive its profile being renamed or removed).
         # The recorded -X stays in front of either pickup, as it was before.
         local _pick
-        _pick="$(client_exclude_flags)"
+        _pick="$(client_exclude_flags "$ds")"
         if sync_ds_is_passive "$ds"; then
             if [ -n "$(section_field "$workfile" "[dataset:$localpath]" prefix)" ]; then
                 _pick="$_pick -e"
@@ -5076,12 +5102,12 @@ emit_client_sections() {   # <workfile> <client name> [is_new_relationship=0]
                 # family including the excluded ones.
                 echo "	monitor_exclude = $(client_family_excludes)"
                 echo "	src          = ${LOAD_ACCOUNT}@${LOAD_HOST}:${ds}"
-                echo "	flags        = $LOAD_FLAGS$(client_exclude_flags)$(client_passive_flags)$(sync_mirror_flag "$ds")"
+                echo "	flags        = $LOAD_FLAGS$(client_exclude_flags "$ds")$(client_passive_flags)$(sync_mirror_flag "$ds")"
             else
                 [ -n "$stagger_send_expr" ] && echo "	send_schedule = $stagger_send_expr"
                 [ -n "$_tier_sched" ] && printf '%s' "$_tier_sched"
                 echo "	src          = ${LOAD_ACCOUNT}@${LOAD_HOST}:${ds}"
-                echo "	flags        = $LOAD_FLAGS$(client_exclude_flags)$(sync_mirror_flag "$ds")"
+                echo "	flags        = $LOAD_FLAGS$(client_exclude_flags "$ds")$(sync_mirror_flag "$ds")"
             fi
             # The LINK cap, as its own field rather than a -b hidden in the
             # string above: gen-cron.sh renders the identical token, and a
@@ -6331,6 +6357,95 @@ runuser_can() {   # <user> -> 0 this process can act as <user>
 # It is also the reason the per-line check reported rc=0: the generated cron
 # idiom ends in `rm -f "$e"`, so the LINE succeeds whatever the job did. Only
 # the monitors alerted, and only because they carry their own rc test.
+# quiesce_whitelist_gaps <account> <block file> -> prints "<id> <dataset>" per
+# guest a -q line of the block would freeze that the account's whitelist
+# (/etc/zfs-quiesce-allow/<account>) does not cover; nothing for root.
+#
+# U149-c (pve0, 2026-11-05): a LOCAL relationship of a delegated account froze
+# guests through the quiesce helper, and nothing on the local path writes or
+# reads that whitelist -- the remote path grants it on the source at commit
+# time. A guest outside it ran unfrozen every night (exit 8 under ,degrade).
+# Same rule as the helper's own id_is_allowed: a guest is covered when a disk
+# named vm-<id>-disk-* / subvol-<id>-disk-* lies under a whitelisted root.
+# Only lines that run HERE are read: snapsend.sh (its source is local) and
+# snapget.sh -s with a local scope. The block is generated text; its quoted
+# operands are, in order, -m's prefix and the dataset list.
+# REV-20261105-188: a listing that fails (before or after some rows) or a whitelist
+# that cannot be read is NOT an empty answer -- it prints "? <dataset> <reason>",
+# and the caller says the coverage is unknown. Partial rows from a failed listing
+# are dropped: they would read as a complete set.
+quiesce_whitelist_gaps() {
+    local acct="$1" blk="$2" allow="${QUIESCE_ALLOW_DIR:-/etc/zfs-quiesce-allow}/$1"
+    [ "$acct" = root ] && return 0
+    local line dss ds rec name leaf covered="" want="" root out rc ef
+    ef=$(mktemp) || { printf '? %s %s\n' "$blk" "mktemp failed"; return 0; }
+    while IFS= read -r line; do
+        case "$line" in *" -q "*) ;; *) continue ;; esac
+        case "$line" in *"/snapsend.sh "*|*"/snapget.sh -s "*) ;; *) continue ;; esac
+        dss=$(printf '%s\n' "$line" | awk -F'"' '{ n = 0; for (i = 2; i <= NF; i += 2) if (++n == 3) { print $i; exit } }')
+        # the 1st quoted string is the zfs-job label, the 2nd -m's prefix
+        [ -n "$dss" ] || continue
+        case "$dss" in *:*) continue ;; esac
+        rec=""; case "$line" in *" -R "*|*" -r "*) rec=-r ;; esac
+        local -a _ds=(); IFS=',' read -ra _ds <<< "$dss"
+        for ds in "${_ds[@]}"; do
+            out=$(zfs list $rec -H -o name -- "$ds" 2>"$ef"); rc=$?
+            if [ "$rc" -ne 0 ]; then
+                printf '? %s %s\n' "$ds" "zfs list rc=$rc: $(tail -1 "$ef")"; continue
+            fi
+            while IFS= read -r name; do
+                leaf=${name##*/}
+                case "$leaf" in vm-*-disk-*|subvol-*-disk-*)
+                    leaf=${leaf#vm-}; leaf=${leaf#subvol-}
+                    want="$want ${leaf%%-disk-*}:$name" ;;
+                esac
+            done <<< "$out"
+        done
+    done < "$blk"
+    [ -n "$want" ] || { rm -f "$ef"; return 0; }
+    if [ -e "$allow" ] && [ ! -r "$allow" ]; then
+        printf '? %s %s\n' "$allow" "the whitelist cannot be read"
+    elif [ -r "$allow" ]; then
+        while IFS= read -r root; do
+            root="${root%%#*}"; root="${root//[[:space:]]/}"
+            [ -n "$root" ] || continue
+            out=$(zfs list -r -H -o name -- "$root" 2>"$ef"); rc=$?
+            if [ "$rc" -ne 0 ]; then
+                printf '? %s %s\n' "$root" "zfs list rc=$rc: $(tail -1 "$ef")"; continue
+            fi
+            while IFS= read -r name; do
+                leaf=${name##*/}
+                case "$leaf" in vm-*-disk-*|subvol-*-disk-*)
+                    leaf=${leaf#vm-}; leaf=${leaf#subvol-}; covered="$covered ${leaf%%-disk-*} " ;;
+                esac
+            done <<< "$out"
+        done < "$allow"
+    fi
+    rm -f "$ef"
+    local w seen=" "
+    for w in $want; do
+        case "$covered" in *" ${w%%:*} "*) continue ;; esac
+        case "$seen" in *" $w "*) continue ;; esac
+        seen="$seen$w "
+        printf '%s %s\n' "${w%%:*}" "${w#*:}"
+    done
+}
+
+# quiesce_whitelist_warn <account> <block file> -- the install-time warnings from
+# quiesce_whitelist_gaps: guests the whitelist misses, and (REV-20261105-188) a
+# coverage that could not be established, named per dataset with its reason.
+quiesce_whitelist_warn() {
+    local _qa _qg _qu; _qa=$(quiesce_whitelist_gaps "$1" "$2")
+    _qg=$(printf '%s\n' "$_qa" | awk '$1 != "?" && NF')
+    _qu=$(printf '%s\n' "$_qa" | awk '$1 == "?"')
+    if [ -n "$_qu" ]; then
+        warn "the block freezes guests (-q) as '$1', and whether ${QUIESCE_ALLOW_DIR:-/etc/zfs-quiesce-allow}/$1 covers them is UNKNOWN -- $(printf '%s\n' "$_qu" | awk '{ d = $2; $1 = ""; $2 = ""; sub(/^  /, ""); printf "%s%s: %s", (NR > 1 ? "; " : ""), d, $0 }'). A guest it does not cover is snapshotted UNFROZEN under ,degrade; check the dataset and re-run the install. The list of uncovered guests below, if any, may be incomplete or name guests that are covered."
+    fi
+    if [ -n "$_qg" ]; then
+        warn "the block freezes guests (-q) as '$1', but ${QUIESCE_ALLOW_DIR:-/etc/zfs-quiesce-allow}/$1 does not cover: $(printf '%s' "$_qg" | awk '{ printf "%s%s (%s)", (NR > 1 ? ", " : ""), $1, $2 }') -- under ,degrade their snapshots are taken UNFROZEN (exit 8), under ,strict not at all (exit 3). Either take the guest out of the relationship, or add its dataset to the account's quiesce grant (deploy.sh --add-quiesce merges the --grant-datasets list into it)."
+    fi
+}
+
 assert_block_runnable_by() {   # <account> <block file>
     local acct="$1" blk="$2" p unreachable=""
     # A1 (2026-08-21): written after the 2026-08-01 site-a pve2 incident
@@ -6529,6 +6644,9 @@ atomic_replace_and_install() {
             rm -f "$_blk" "$workfile"
             die "refusing to install: the rendered block is not runnable by $(cron_target_user) (see above) -- neither $realfile nor the crontab was touched"
         fi
+        # A warning, not a refusal: the snapshots still happen, unfrozen. The
+        # operator decides between widening the grant and leaving the guest out.
+        quiesce_whitelist_warn "$(cron_target_user)" "$_blk"
     fi
     rm -f "$_blk"
     local backup="" crontab_backup
@@ -7469,6 +7587,223 @@ relblock_mech() {   # <tier> <side> -> gfs|age|flat|""
     case "$r" in -[hdwmy]*) printf age ;; *) printf flat ;; esac
 }
 
+# A SNAPONLY RELATIONSHIP'S TIERS ARE ITS CONFIG (REV-20261104-187). They live in
+#   [template:snaponly__<name>__<tier>]      schedule, family, quiesce, monitor
+#   [template:snaponly_src__<name>__<tier>]  its retention on the source
+# (emit_snaponly_sections writes them once, from the profile, at creation). show-tiers
+# reads them and set-tiers rewrites them in place: the profile -- the hidden
+# relacja-<name> one included -- is not read again after creation. Only an explicit
+# "use template" (edit-relation --profile=) renders the sections anew.
+snaponly_cfg_tiers() {   # <config> <name> -> its tiers, finest first (file order within a cadence)
+    local t
+    awk -v h="[template:snaponly__$2__" -v mk="# managed-by: zfs-backup.sh client=$2" '
+        /^\[/ { if (t != "" && mine) print t; t = ""; mine = 0
+                if (index($0, h) == 1) { t = substr($0, length(h) + 1); sub(/\][ \t]*$/, "", t) } next }
+        { l = $0; sub(/^[ \t]+/, "", l); if (t != "" && l == mk) mine = 1 }
+        END { if (t != "" && mine) print t }' "$1" \
+        | while IFS= read -r t; do printf '%s\t%s\n' "$(tiers_cadence_rank "$t")" "$t"; done | sort -s -n -k1,1 | cut -f2
+}
+# The [snaponly:*] / [prune:*] sections of one snaponly relationship (its marker inside).
+snaponly_scope_sections() {   # <config> <name> <snaponly|prune>
+    awk -v k="[$3:" -v mk="# managed-by: zfs-backup.sh client=$2" '
+        /^\[/ { if (h != "" && mine) print h; h = ""; mine = 0; if (index($0, k) == 1) { h = $0; sub(/[ \t]+$/, "", h) } next }
+        { l = $0; sub(/^[ \t]+/, "", l); if (h != "" && l == mk) mine = 1 }
+        END { if (h != "" && mine) print h }' "$1"
+}
+snaponly_section_remove() {   # <config> <exact header>: the section leaves the file; the gap before it stays
+    local tmp="$1.sec.$$"
+    awk -v h="$2" '
+        /^\[/ { skip = ($0 == h) }
+        skip { next }
+        /^[ \t]*$/ { nb++; next }
+        { while (nb > 0) { print ""; nb-- } print }
+        END { while (nb > 0) { print ""; nb-- } }' "$1" > "$tmp" && mv "$tmp" "$1"
+}
+# use_template of each [snaponly:]/[prune:] section of the relationship, edited IN PLACE
+# (REV-20261104-187 round 2): membership is per dataset -- a section that deliberately
+# leaves a tier out keeps it out, the order and any other entry stay as they are.
+#   add:  T goes into every section that lacks it, before the first entry of this
+#         relationship with a coarser cadence (appended if there is none);
+#   drop: T leaves every section that has it. A section whose only tier is T is refused
+#         (rc 2, header in SNAPONLY_UT_LAST): it would be left taking or pruning nothing.
+snaponly_use_template_edit() {   # <config> <name> <kind snaponly|prune> <add|drop> <tier>
+    local wf="$1" name="$2" kind="$3" op="$4" t="$5" h cur e out rk ek done_
+    local pre="snaponly__${name}__"; [ "$kind" = prune ] && pre="snaponly_src__${name}__"
+    rk=$(tiers_cadence_rank "$t")
+    SNAPONLY_UT_LAST=""
+    while IFS= read -r h; do
+        [ -n "$h" ] || continue
+        cur=$(tiers_sec_field "$wf" "$h" use_template)
+        local -a list=(); IFS=',' read -r -a list <<< "$cur"
+        out=""; done_=0
+        case "$op" in
+            drop)
+                local hit=0
+                for e in "${list[@]}"; do
+                    e="${e#"${e%%[![:space:]]*}"}"; e="${e%"${e##*[![:space:]]}"}"
+                    [ -n "$e" ] || continue
+                    if [ "$e" = "$pre$t" ]; then hit=1; else out="${out:+$out,}$e"; fi
+                done
+                [ "$hit" -eq 1 ] || continue
+                [ -n "$out" ] || { SNAPONLY_UT_LAST="$h"; return 2; } ;;
+            add)
+                case ",$(printf '%s' "$cur" | tr -d ' \t')," in *",$pre$t,"*) continue ;; esac
+                for e in "${list[@]}"; do
+                    e="${e#"${e%%[![:space:]]*}"}"; e="${e%"${e##*[![:space:]]}"}"
+                    [ -n "$e" ] || continue
+                    if [ "$done_" -eq 0 ] && [ "${e#"$pre"}" != "$e" ]; then
+                        ek=$(tiers_cadence_rank "${e#"$pre"}")
+                        [ "$ek" -gt "$rk" ] && { out="${out:+$out,}$pre$t"; done_=1; }
+                    fi
+                    out="${out:+$out,}$e"
+                done
+                [ "$done_" -eq 1 ] || out="${out:+$out,}$pre$t" ;;
+        esac
+        set_or_remove_section_field "$wf" "$h" use_template "$out" || return 1
+    done < <(snaponly_scope_sections "$wf" "$name" "$kind")
+}
+snaponly_show_tiers_json() {   # <config> <name> -> the "target":[...],"source":[] part of show-tiers --json
+    local cfg="$1" name="$2" t arr="" tf=1 hs hp r g mech keep retain
+    while IFS= read -r t; do
+        [ -n "$t" ] || continue
+        hs="[template:snaponly__${name}__$t]"; hp="[template:snaponly_src__${name}__$t]"
+        r=$(tiers_sec_field "$cfg" "$hp" retain); g=$(tiers_sec_field "$cfg" "$hp" gfs)
+        mech=""; keep=""; retain=""
+        if [ -n "$r" ]; then
+            case "$g" in yes|true|1) mech=gfs ;; *) case "$r" in -[hdwmy]*) mech=age ;; *) mech=flat ;; esac ;; esac
+            if [ "$mech" = age ]; then retain="$r"; else keep="${r#-?}"; fi
+        fi
+        [ "$tf" -eq 1 ] || arr="$arr,"; tf=0
+        arr="$arr{\"name\":\"$(json_escape "$t")\",\"template\":\"\",\"mechanism\":\"$mech\",\"pattern\":\"$(json_escape "$(tiers_sec_field "$cfg" "$hs" pattern)")\",\"prefix\":\"$(json_escape "$(tiers_sec_field "$cfg" "$hs" prefix)")\",\"keep\":\"$keep\",\"retain\":\"$(json_escape "$retain")\",\"gfs\":\"$(json_escape "$g")\",\"quiesce\":\"$(json_escape "$(tiers_sec_field "$cfg" "$hs" quiesce)")\",\"send_schedule\":\"$(json_escape "$(tiers_sec_field "$cfg" "$hs" send_schedule)")\",\"prune_schedule\":\"$(json_escape "$(tiers_sec_field "$cfg" "$hp" prune_schedule)")\",\"monitor_warn\":\"$(json_escape "$(tiers_sec_field "$cfg" "$hs" monitor_warn)")\",\"monitor_crit\":\"$(json_escape "$(tiers_sec_field "$cfg" "$hs" monitor_crit)")\"}"
+    done < <(snaponly_cfg_tiers "$cfg" "$name")
+    printf '"target":[%s],"source":[]' "$arr"
+}
+# set-tiers on a snaponly relationship: the ops applied to its sections in the working copy.
+# A tier's retention is the source's (there is no copy), so --tier and --src-tier name the
+# same tier. --method, --add-tier and --drop-tier work as on a copy relationship, in these
+# sections (REV-20261104-187 round 1): the config is the policy, no template is read.
+# Dies (working copy removed) on a refusal.
+snaponly_tiers_apply_ops() {   # <config working copy> <name> <ops...> -> TIERS_CHANGES
+    local wf="$1" name="$2"; shift 2
+    fail() { rm -f "$wf"; die "set-tiers: $* -- nothing was changed"; }
+    local marker="# managed-by: zfs-backup.sh client=$name"
+    local -a tiers=(); mapfile -t tiers < <(snaponly_cfg_tiers "$wf" "$name")
+    [ "${#tiers[@]}" -gt 0 ] || fail "'$name' has no snaponly tier section in its config"
+    TIERS_CHANGES=()
+    local op v key="" hs hp r field sec t
+    for op in "$@"; do
+        v="${op#*=}"
+        case "$op" in
+            --tier=*|--src-tier=*)
+                key="$v"
+                case " ${tiers[*]} " in *" $key "*) ;; *) fail "no tier '$key' (tiers: ${tiers[*]})" ;; esac
+                hs="[template:snaponly__${name}__$key]"; hp="[template:snaponly_src__${name}__$key]" ;;
+            --keep=*|--retain=*|--quiesce=*|--send-schedule=*|--prune-schedule=*|--monitor-warn=*|--monitor-crit=*)
+                [ -n "$key" ] || fail "'$op' names no tier -- put --tier=T before it"
+                case "$op" in
+                    --keep=*)
+                        # The family lives only on the source: 0 would delete every snapshot of the tier.
+                        case "$v" in ''|*[!0-9]*|0*) fail "--keep='$v' -- a whole number above 0 (a snaponly tier has no copy elsewhere)" ;; esac
+                        r=$(tiers_sec_field "$wf" "$hp" retain)
+                        [ -n "$r" ] || fail "tier '$key' has no retention line in $hp -- nothing to set a number on"
+                        sec="$hp"; field=retain; v="-${r:1:1}$v" ;;
+                    --retain=*)
+                        case "$v" in -[HDWMYhdwmy][0-9]*) ;; *) fail "--retain='$v' -- like -D7 (count) or -d14 (age)" ;; esac
+                        sec="$hp"; field=retain ;;
+                    --quiesce=*)        sec="$hs"; field=quiesce ;;
+                    --send-schedule=*)  [ -n "$v" ] || fail "--send-schedule='' -- a snaponly tier without a schedule takes no snapshot"
+                                        sec="$hs"; field=send_schedule ;;
+                    --prune-schedule=*) [ -n "$v" ] || fail "--prune-schedule='' -- a snaponly tier needs its source cleanup"
+                                        sec="$hp"; field=prune_schedule ;;
+                    # The monitor's age thresholds of the tier; empty takes the threshold away
+                    # (a tier without both thresholds is not watched).
+                    --monitor-warn=*|--monitor-crit=*)
+                        [[ -z "$v" || "$v" =~ ^[1-9][0-9]*[mhd]$ ]] || fail "${op%%=*}='$v' -- an age like 26h, 100m or 9d, or empty"
+                        sec="$hs"; field="${op%%=*}"; field="${field#--}"; field="${field//-/_}" ;;
+                esac
+                if [ "$(tiers_sec_field "$wf" "$sec" "$field")" != "$v" ]; then
+                    set_or_remove_section_field "$wf" "$sec" "$field" "$v" || fail "could not write $field in $sec"
+                    TIERS_CHANGES+=("$key: $field=${v:-(none)}")
+                fi ;;
+            --method=*)
+                case "$v" in gfs|flat|age) ;; *) fail "--method='$v' -- gfs, flat or age" ;; esac
+                # as on a copy relationship: the number stays, the letter's case says count or age
+                for t in "${tiers[@]}"; do
+                    hp="[template:snaponly_src__${name}__$t]"
+                    r=$(tiers_sec_field "$wf" "$hp" retain)
+                    if [ -n "$r" ]; then
+                        case "$v" in age) r="-$(printf '%s' "${r:1:1}" | tr 'A-Z' 'a-z')${r:2}" ;; *) r="-$(printf '%s' "${r:1:1}" | tr 'a-z' 'A-Z')${r:2}" ;; esac
+                        set_or_remove_section_field "$wf" "$hp" retain "$r" || fail "could not write retain in $hp"
+                    fi
+                    if [ "$v" = gfs ]; then set_or_remove_section_field "$wf" "$hp" gfs yes || fail "could not write gfs in $hp"
+                    else set_or_remove_section_field "$wf" "$hp" gfs "" || fail "could not clear gfs in $hp"; fi
+                done
+                TIERS_CHANGES+=("method: $v"); key="" ;;
+            --drop-tier=*|--drop-src-tier=*)
+                case " ${tiers[*]} " in *" $v "*) ;; *) fail "no tier '$v' to drop" ;; esac
+                [ "${#tiers[@]}" -gt 1 ] || fail "'$v' is the last tier -- delete the relationship instead"
+                local -a kt=(); for t in "${tiers[@]}"; do [ "$t" = "$v" ] || kt+=("$t"); done; tiers=("${kt[@]}")
+                snaponly_section_remove "$wf" "[template:snaponly__${name}__$v]" || fail "could not remove the $v section"
+                snaponly_section_remove "$wf" "[template:snaponly_src__${name}__$v]" || fail "could not remove the $v source section"
+                local _k _r
+                for _k in snaponly prune; do
+                    snaponly_use_template_edit "$wf" "$name" "$_k" drop "$v"; _r=$?
+                    [ $_r -eq 2 ] && fail "$SNAPONLY_UT_LAST takes only the '$v' tier -- dropping it would leave that dataset with none. Give it another tier first, or remove the dataset from the relationship"
+                    [ $_r -eq 0 ] || fail "could not update use_template"
+                done
+                TIERS_CHANGES+=("$v: dropped (its snapshots stay on the source, no longer taken nor pruned)"); key="" ;;
+            --add-tier=*|--add-src-tier=*)
+                case " ${tiers[*]} " in *" $v "*) fail "it already has the tier '$v'" ;; esac
+                local L; L=$(tiers_letter "$v"); [ -n "$L" ] || fail "'$v' is not a tier -- hourly daily weekly monthly yearly"
+                local sib="${tiers[0]}" send prune keepn warn crit q
+                case "$v" in
+                    hourly)  send="1 * * * *";  prune="21 * * * *"; keepn=24; warn=90m;  crit=150m; q="" ;;
+                    daily)   send="11 1 * * *"; prune="31 1 * * *"; keepn=7;  warn=30h;  crit=48h;  q=auto,degrade ;;
+                    weekly)  send="21 2 * * 0"; prune="41 2 * * 0"; keepn=4;  warn=8d;   crit=10d;  q=auto,degrade ;;
+                    monthly) send="31 3 1 * *"; prune="51 3 1 * *"; keepn=12; warn=35d;  crit=40d;  q=auto,degrade ;;
+                    yearly)  send="31 3 1 1 *"; prune="51 3 1 1 *"; keepn=5;  warn=400d; crit=430d; q=auto,degrade ;;
+                esac
+                # the family name of a sibling with its tier word replaced: tag and prefix stay
+                local sfam; sfam=$(tiers_sec_field "$wf" "[template:snaponly__${name}__$sib]" prefix)
+                case "$sfam" in *"$sib"*) ;; *) fail "the family '$sfam' of tier '$sib' does not name its tier -- the new family cannot be derived; use the template action" ;; esac
+                local fam="${sfam%"$sib"*}$v${sfam##*"$sib"}"
+                local base; base="$(schedule_pick_minute "$name")"
+                send="$(snaponly_retime "$send" "$base")" && prune="$(snaponly_retime "$prune" $(( base + 20 )))" || fail "could not time the tier '$v'"
+                local sr; sr=$(tiers_sec_field "$wf" "[template:snaponly_src__${name}__$sib]" retain)
+                local sg; sg=$(tiers_sec_field "$wf" "[template:snaponly_src__${name}__$sib]" gfs)
+                local lc="$L"; case "$sr" in -[hdwmy]*) case "$sg" in yes|true|1) ;; *) lc=$(printf '%s' "$L" | tr 'A-Z' 'a-z') ;; esac ;; esac
+                {
+                    echo
+                    echo "[template:snaponly__${name}__$v]"
+                    echo "	$marker"
+                    echo "	send_schedule = $send"
+                    echo "	prefix        = $fam"
+                    echo "	pattern       = $fam"
+                    echo "	tier_label    = $v"
+                    echo "	notify_word   = snapshot"
+                    [ -n "$q" ] && echo "	quiesce       = $q"
+                    echo "	monitor_warn  = $warn"
+                    echo "	monitor_crit  = $crit"
+                    echo "	monitor_since = $(date +%s)"
+                    echo
+                    echo "[template:snaponly_src__${name}__$v]"
+                    echo "	$marker"
+                    echo "	prune_schedule = $prune"
+                    echo "	pattern        = $fam"
+                    echo "	retain         = -$lc$keepn"
+                    case "$sg" in yes|true|1) echo "	gfs            = yes" ;; esac
+                } >> "$wf"
+                mapfile -t tiers < <(snaponly_cfg_tiers "$wf" "$name")
+                snaponly_use_template_edit "$wf" "$name" snaponly add "$v" || fail "could not update use_template"
+                snaponly_use_template_edit "$wf" "$name" prune add "$v" || fail "could not update use_template"
+                TIERS_CHANGES+=("$v: added (keeps $keepn, family $fam)")
+                key="$v"; hs="[template:snaponly__${name}__$v]"; hp="[template:snaponly_src__${name}__$v]" ;;
+            *) fail "unknown change '$op'" ;;
+        esac
+    done
+    [ "${#TIERS_CHANGES[@]}" -gt 0 ] || TIERS_CHANGES=("(no change -- the config already says this)")
+}
+
 # show-tiers NAME [--json] -- the tiers of ONE relationship, read from its block, in the
 # shape list-profiles gives a profile's tiers (so the GUI table reads both).
 cmd_show_tiers() {
@@ -7484,6 +7819,16 @@ cmd_show_tiers() {
     cron_context_resolve record "" "" "${CRON_CONFIG:-}" "${LOCAL_USER:-}"
     local cfg="$CRON_CTX_FILE"
     [ -r "$cfg" ] || die "show-tiers: no config $cfg for '$name'"
+    if snaponly_is; then
+        local so; so=$(snaponly_show_tiers_json "$cfg" "$name")
+        [ "$so" != '"target":[],"source":[]' ] || die "show-tiers: '$name' has no snaponly tier section in $cfg"
+        if [ "$json" -eq 1 ]; then
+            printf '{"name":"%s","mode":"snaponly","config":"%s",%s}\n' "$(json_escape "$name")" "$(json_escape "$cfg")" "$so"
+        else
+            printf '%s\n' "$so"
+        fi
+        return 0
+    fi
     relblock_require "$cfg" "$name" show-tiers
     local -a RB_TIERS=() RB_KEYS=(); local -A RB=()
     relblock_load "$cfg" "$name"
@@ -7516,6 +7861,7 @@ cmd_show_tiers() {
 # set-tiers NAME [ops...] [--plan|--yes]
 #   --tier=T | --src-tier=T            the tier the next fields change (target / source)
 #   --keep=N  --retain=-XN  --quiesce=V (empty = none)  --send-schedule='m h d M w'  --prune-schedule='...'
+#   --monitor-warn=AGE --monitor-crit=AGE   snaponly: the tier's monitor thresholds (empty = none)
 #   --drop-tier=T   the tier leaves the relationship (never the last)
 #   --add-tier=T    a tier it does not have, shaped like its others
 #   --drop-src-tier=T / --add-src-tier=T   the tier stops / starts running on the source side
@@ -7633,6 +7979,7 @@ tiers_apply_ops() {   # <config working copy> <name> <ops...> -> TIERS_CHANGES; 
                     [ "$v" = gfs ] && rb_set "$t" "" gfs yes
                 done
                 TIERS_CHANGES+=("method: $v") ;;
+            --monitor-warn=*|--monitor-crit=*) fail "${op%%=*} is a snaponly change; a copy relationship takes its monitor thresholds from its tiers' template" ;;
             *) fail "unknown change '$op'" ;;
         esac
     done
@@ -7659,13 +8006,12 @@ cmd_set_tiers() {
         case "$a" in
             --yes|-y) yes=1 ;;
             --plan)   plan=1 ;;
-            --tier=*|--src-tier=*|--keep=*|--retain=*|--quiesce=*|--send-schedule=*|--prune-schedule=*|--drop-tier=*|--drop-src-tier=*|--add-tier=*|--add-src-tier=*|--method=*) ops+=("$a") ;;
+            --tier=*|--src-tier=*|--keep=*|--retain=*|--quiesce=*|--send-schedule=*|--prune-schedule=*|--drop-tier=*|--drop-src-tier=*|--add-tier=*|--add-src-tier=*|--method=*|--monitor-warn=*|--monitor-crit=*) ops+=("$a") ;;
             --as=*|--from=*|--force|--hidden|--description=*) ;;   # profile words the table may still carry
             -*) die "set-tiers: unknown option '$a'" ;;
             *)  [ -z "$name" ] || die "set-tiers: takes exactly one NAME"; name="$a" ;;
         esac
     done
-    [ -n "$name" ] && snaponly_refuse set-tiers "$name"
     [ -n "$name" ] || die "usage: zfs-backup.sh set-tiers NAME [--tier=T --keep=N ...] [--plan|--yes]"
     [ "${#ops[@]}" -gt 0 ] || die "set-tiers: nothing to change"
     local cpath; cpath=$(client_conf_path "$name")
@@ -7676,7 +8022,7 @@ cmd_set_tiers() {
     local cronfile="$CRON_CTX_FILE"
     [ -f "$cronfile" ] || die "set-tiers: no config $cronfile for '$name'"
     assert_cron_config_matches_installed "$cronfile"
-    relblock_require "$cronfile" "$name" set-tiers
+    snaponly_is || relblock_require "$cronfile" "$name" set-tiers
     # MIGAWKI LOKALNE (a local relationship with a blank target): the source is its
     # only side, so a copy-side tier op means the source one. Left as it was, --tier
     # changed a target side no line is rendered from -- rc 0, "hourly: keep=12" in
@@ -7698,7 +8044,11 @@ cmd_set_tiers() {
     cp -p "$cronfile" "$workfile" || { rm -f "$workfile"; die "could not copy $cronfile"; }
     chmod 0644 "$workfile" 2>/dev/null || :
     local -a RB_TIERS=() RB_KEYS=(); local -A RB=()
-    tiers_apply_ops "$workfile" "$name" "${ops[@]}"
+    if snaponly_is; then
+        snaponly_tiers_apply_ops "$workfile" "$name" "${ops[@]}"
+    else
+        tiers_apply_ops "$workfile" "$name" "${ops[@]}"
+    fi
     log "validating the changed config (working copy only, nothing real touched yet)..."
     if ! gencron_as_target -c "$workfile" >/dev/null; then
         rm -f "$workfile"
@@ -8359,9 +8709,18 @@ cmd_list_replicas() {
             *)          die "list-replicas: takes no positional arguments" ;;
         esac
     done
-    local resolver_user; resolver_user="$(cron_target_user)"
+    local resolver_user given="$config"; resolver_user="$(cron_target_user)"
     cron_context_resolve adopt "$config" "$resolver_user" "" ""
     config="$CRON_CTX_FILE"
+    # T11 (test od zera, 2026-11-05): a host whose only relation runs on a delegated
+    # account has no root config at all. That is "no replicas", as `status` says "no
+    # relations" with no clients directory -- not a FATAL the GUI counted as a reader
+    # that did not answer ("! no response: 1" on a fresh host). A --config= that names a
+    # missing file is still refused: that is a typo, not an empty host.
+    if [ ! -r "$config" ] && [ -z "$given" ] && [ ! -e "$config" ]; then
+        if [ "$as_json" -eq 1 ]; then printf '{"replicas":[]}\n'; else echo "no config at $config -- no replicas"; fi
+        return 0
+    fi
     [ -r "$config" ] || die "list-replicas: no readable config at $config"
 
     # Parsed with awk rather than sourced: a config is data, never a program.
@@ -9828,7 +10187,7 @@ Taking over older jobs (a v4 config written manually): remove their sections fir
     # the block still is not there.
     local installed_block
     installed_block="$(crontab_for_target 2>/dev/null | sed -n '/^# BEGIN zfs-backup-managed/,/^# END zfs-backup-managed/p')"
-    printf '%s' "$installed_block" | grep -qF -- "$target" \
+    printf '%s' "$installed_block" | grep_q -F -- "$target" \
         || die "the install reported success, but the read-back did not find '$target' in the installed block -- check the crontab manually before you consider the backup working"
 
     if [ -n "$lb_name" ]; then
@@ -10253,7 +10612,24 @@ cmd_add_client() {
                 # -c safe.directory: root touching an account-owned repo
                 # trips git's dubious-ownership guard (measured: the refresh
                 # warned and the stale clone survived a full clean rerun).
-                git -c safe.directory="$_lu_home/zfs-snapshot-all" -C "$_lu_home/zfs-snapshot-all" fetch -q "$SCRIPT_DIR" HEAD 2>/dev/null                     && git -c safe.directory="$_lu_home/zfs-snapshot-all" -C "$_lu_home/zfs-snapshot-all" reset -q --hard FETCH_HEAD 2>/dev/null                     && chown -R "$local_user:$local_user" "$_lu_home/zfs-snapshot-all"                     || warn "add-client: could not refresh $_lu_home/zfs-snapshot-all -- the account may run an older tool than the lines generated for it"
+                # The same entry also goes into a throwaway GLOBAL config (HOME
+                # pointed at it). git 2.35.2 introduced the check and honoured
+                # safe.directory only in the system and global config, NOT from
+                # `-c`; Debian 11 carries that check as a backport since
+                # 1:2.30.2-1+deb11u1 (CVE-2022-24765, DSA-5332-1). A first
+                # install on 2.30.2-1+deb11u2 (2026-11-04) warned here while a
+                # pull as the account worked -- consistent with that, not
+                # reproduced on a host. git's own reason is now in the warning.
+                local _rf_home _rf_err=""
+                _rf_home=$(mktemp -d) && printf '[safe]\n\tdirectory = %s\n' "$_lu_home/zfs-snapshot-all" > "$_rf_home/.gitconfig"
+                if _rf_err=$( { HOME="${_rf_home:-$HOME}" git -c safe.directory="$_lu_home/zfs-snapshot-all" -C "$_lu_home/zfs-snapshot-all" fetch -q "$SCRIPT_DIR" HEAD \
+                        && HOME="${_rf_home:-$HOME}" git -c safe.directory="$_lu_home/zfs-snapshot-all" -C "$_lu_home/zfs-snapshot-all" reset -q --hard FETCH_HEAD; } 2>&1 ); then
+                    chown -R "$local_user:$local_user" "$_lu_home/zfs-snapshot-all" \
+                        || warn "add-client: refreshed $_lu_home/zfs-snapshot-all but could not hand it back to $local_user (chown)"
+                else
+                    warn "add-client: could not refresh $_lu_home/zfs-snapshot-all ($(printf '%s' "$_rf_err" | grep -v '^$' | tail -1)) -- the account may run an older tool than the lines generated for it"
+                fi
+                [ -n "$_rf_home" ] && rm -rf "$_rf_home"
             fi
             local _lu_s
             for _lu_s in notify-fail.sh notify-warn.sh; do
@@ -10341,6 +10717,10 @@ cmd_add_client() {
         pair_args+=(--peer-datasets="$datasets")
     fi
     [ -n "$target" ] && pair_args+=(--target="$target")
+    # The landing names the per-relationship root under --target; without it --pair made
+    # <target>/<peer address> and delegated it, beside the <target>/<landing> the jobs use
+    # (test from zero 2, 2026-11-05, D10: an empty hdd/backups/t2kopie/192.0.2.98).
+    [ -n "$target" ] && [ -n "$landing" ] && pair_args+=(--landing="$landing")
     [ "$lan_port" != "22" ] && pair_args+=(--port="$lan_port")
     # The cap travels to the PAIRING, because the link does. Passed through
     # rather than stored here, so there is one home for it and not two that can
@@ -10411,7 +10791,7 @@ cmd_add_client() {
     if client_paused "$name"; then
         warn "a stale PAUSED_LOCAL marker exists under $RELATIONSHIPS_DIR/$name (left by a previous relationship of this name) -- clearing it so the new client does not start paused"
         rm -f "$(pause_marker_path "$name")" || die "could not remove the stale pause marker $(pause_marker_path "$name")"
-        rmdir "$RELATIONSHIPS_DIR/$name" 2>/dev/null || :
+        relationship_dir_rmdir "$name"
     fi
 
     mkdir -p "$CLIENTS_DIR" || die "could not create $CLIENTS_DIR"
@@ -10725,7 +11105,13 @@ client_recursive_args() {   # <dataset> -> REC_ARGS
     done
 }
 
-client_exclude_flags() {   # -> " -X <re>" for each recorded exclusion
+client_exclude_flags() {   # [dataset] -> " -X <re>" for each recorded exclusion
+    # With a dataset: nothing unless that dataset rides -R (is_recursive_root). -X filters
+    # an -R expansion and the engines refuse it anywhere else ("-X needs -R"); a
+    # hand-narrowed root is enumerated into per-dataset sections that already leave the
+    # excluded ones out. Test from zero 2 (2026-11-05, D6): the wizard's first copy of
+    # hdd/data, docs and mail failed on exactly that line. The seeds gate it the same way.
+    [ -n "${1:-}" ] && ! is_recursive_root "$1" && return 0
     local i=1 n v out=""
     while :; do
         n="EXCLUDE_CHILD_$i"; v="${!n:-}"
@@ -12505,9 +12891,9 @@ emit_snaponly_sections() {   # <workfile> <name>
     local tag=""
     [ "$SNAPONLY_STAMP" = 1 ] && tag="$(snaponly_collector_tag)"
     local pf; pf="$(profile_file "${PROFILE:-$PROFILE_DEFAULT_NAME}")"
-    [ -r "$pf" ] || die "snaponly: profile '${PROFILE:-$PROFILE_DEFAULT_NAME}' not found ($pf)"
+    [ -r "$pf" ] || die "snaponly: profile '${PROFILE:-$PROFILE_DEFAULT_NAME}' not found (looked in $PROFILE_ROOT and $PROFILE_USER_ROOT)"
     local spf="$pf"
-    [ -n "${SOURCE_PROFILE:-}" ] && { spf="$(profile_file "$SOURCE_PROFILE")"; [ -r "$spf" ] || die "snaponly: source profile '$SOURCE_PROFILE' not found ($spf)"; }
+    [ -n "${SOURCE_PROFILE:-}" ] && { spf="$(profile_file "$SOURCE_PROFILE")"; [ -r "$spf" ] || die "snaponly: source profile '$SOURCE_PROFILE' not found (looked in $PROFILE_ROOT and $PROFILE_USER_ROOT)"; }
 
     profile_fields_load "$spf"
     local -A SRC_KEEP=() SRC_RETAIN=() SRC_GFS=()
@@ -12625,7 +13011,7 @@ snaponly_probe() {   # [host] [port]
     for ds in $PEER_SAVED_DATASETS; do
         client_recursive_args "$ds"
         out=$(bash "$SNAPGET" -n -s ${REC_ARGS[@]+"${REC_ARGS[@]}"} $pflags "${LOAD_ACCOUNT}@${phost}:${ds}" 2>&1); rc=$?
-        if [ "$rc" -ne 0 ] || ! printf '%s\n' "$out" | grep -q '^PLAN=SNAPSHOT-ONLY src='; then
+        if [ "$rc" -ne 0 ] || ! printf '%s\n' "$out" | grep_q '^PLAN=SNAPSHOT-ONLY src='; then
             failed=$((failed + 1))
             PROBE_DETAIL="${PROBE_DETAIL}  FAILED (rc=$rc): $ds"$'\n'"$(printf '%s\n' "$out" | tail -4 | sed 's/^/    /')"$'\n'
             continue
@@ -14168,7 +14554,7 @@ remove_templates_orphaned_by() {   # <file> <templates referenced before, newlin
     while IFS= read -r t; do
         [ -n "$t" ] || continue
         case "$t" in profile__*) ;; *) continue ;; esac
-        printf '%s\n' "$after" | grep -qxF "$t" && continue
+        printf '%s\n' "$after" | grep_q -xF "$t" && continue
         grep -qxF "[template:$t]" "$file" || continue
         remove_template_section "$file" "$t"
         log "removed [template:$t] -- the edit left nothing referencing it"
@@ -15064,11 +15450,33 @@ DS
 # ---------------------------------------------------------------------------
 SOURCE_REPO_DIR="${SOURCE_REPO_DIR:-/root/scripts/zfs-snapshot-all}"
 
+# remote_apt_install_cmd <package> -> a command for a remote root shell
+#
+# The tries of deploy.sh's apt_install_with_fallback except its
+# --no-install-recommends step: plain install, then apt-get update and once
+# more, then -- when apt answered 404 -- the newest
+# version from a non-security origin (first install on Debian 11, 2026-11-04:
+# security.debian.org no longer served the bullseye debs the lists named; the
+# main-archive version installed). Runs in a subshell, so `exit` ends only it;
+# on failure apt's own output is what it prints. The package name is a literal
+# from this file, never data.
+remote_apt_install_cmd() {
+    local p="$1"
+    printf '%s' "( export DEBIAN_FRONTEND=noninteractive; apt-get install -y $p >/dev/null 2>&1 && exit 0; apt-get update >/dev/null 2>&1; o=\$(apt-get install -y $p 2>&1) && exit 0; case \"\$o\" in *404*) v=\$(apt-cache madison $p 2>/dev/null | awk -F'|' '\$3 !~ /security/ { gsub(/[[:space:]]/, \"\", \$2); print \$2; exit }'); if [ -n \"\$v\" ]; then echo \"apt: 404 for $p from the archive its list names -- trying $p=\$v from the main archive\"; o=\$(apt-get install -y $p=\$v 2>&1) && exit 0; fi ;; esac; printf '%s\\n' \"\$o\"; exit 1 )"
+}
+
 source_probe() {   # <host> <port> -> sets PROBE_* ; returns 0 when ssh answered
     local host="$1" port="$2" out rc=0
-    PROBE_SSH_ERR=""; PROBE_HOSTNAME=""; PROBE_POOLS=""; PROBE_ZFS=0; PROBE_GIT=0; PROBE_PKG=""; PROBE_REV=""
-    out=$(rux_root_ssh "$host" "$port" "echo HOSTNAME=\$(hostname); command -v zfs >/dev/null 2>&1 && echo ZFS=yes; command -v git >/dev/null 2>&1 && echo GIT=yes; zpool list -H -o name,size,free 2>/dev/null | while IFS=\$(printf '\\t') read -r n sz fr; do echo POOL=\$n,\$sz,\$fr; done; [ -x '$SOURCE_REPO_DIR/zfs-backup.sh' ] && { echo PKG=$SOURCE_REPO_DIR; echo REV=\$(git -C '$SOURCE_REPO_DIR' rev-parse --short HEAD 2>/dev/null); }; echo PROBE=done" 2>&1) || rc=$?
-    if [ "$rc" -ne 0 ] || ! printf '%s\n' "$out" | grep -q '^PROBE=done$'; then
+    PROBE_SSH_ERR=""; PROBE_HOSTNAME=""; PROBE_POOLS=""; PROBE_ZFS=0; PROBE_GIT=0; PROBE_APT=0; PROBE_SUDO=0; PROBE_DIR=""; PROBE_PKG=""; PROBE_REV=""
+    # DIR= is what stands in the way of a clone when there is no package: a
+    # non-empty directory (old zfs-snapshot-all scripts without .git, found on
+    # a first install, 2026-11-04) or a file. An empty directory is fine for git clone.
+    # PKG= needs the checkout's .git as well as zfs-backup.sh: an old copy of
+    # the scripts (zfs-backup.sh included, no .git) is not a package -- taken for
+    # one, the wizard skipped the busy-directory window and the join's git init
+    # failed inside it, leaving a half-created relation (install test, 2026-11-05).
+    out=$(rux_root_ssh "$host" "$port" "echo HOSTNAME=\$(hostname); command -v zfs >/dev/null 2>&1 && echo ZFS=yes; command -v git >/dev/null 2>&1 && echo GIT=yes; command -v apt-get >/dev/null 2>&1 && echo APT=yes; command -v sudo >/dev/null 2>&1 && { command -v visudo >/dev/null 2>&1 || [ -x /usr/sbin/visudo ] || [ -x /sbin/visudo ]; } && echo SUDO=yes; if [ -d '$SOURCE_REPO_DIR' ]; then [ -z \"\$(ls -A '$SOURCE_REPO_DIR' 2>/dev/null)\" ] || echo DIR=notempty; elif [ -e '$SOURCE_REPO_DIR' ]; then echo DIR=notadir; fi; zpool list -H -o name,size,free 2>/dev/null | while IFS=\$(printf '\\t') read -r n sz fr; do echo POOL=\$n,\$sz,\$fr; done; [ -x '$SOURCE_REPO_DIR/zfs-backup.sh' ] && [ -e '$SOURCE_REPO_DIR/.git' ] && { echo PKG=$SOURCE_REPO_DIR; echo REV=\$(git -C '$SOURCE_REPO_DIR' rev-parse --short HEAD 2>/dev/null); }; echo PROBE=done" 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ] || ! printf '%s\n' "$out" | grep_q '^PROBE=done$'; then
         # OpenSSH ends its diagnostics with CR LF. A raw CR inside a JSON string
         # is INVALID JSON and json_escape (a frozen twin) does not escape it, so
         # the reason is flattened HERE: no CR, tabs to spaces, one line.
@@ -15083,6 +15491,9 @@ source_probe() {   # <host> <port> -> sets PROBE_* ; returns 0 when ssh answered
             HOSTNAME=*) PROBE_HOSTNAME="${line#*=}" ;;
             ZFS=yes)    PROBE_ZFS=1 ;;
             GIT=yes)    PROBE_GIT=1 ;;
+            APT=yes)    PROBE_APT=1 ;;
+            SUDO=yes)   PROBE_SUDO=1 ;;
+            DIR=*)      PROBE_DIR="${line#*=}" ;;
             POOL=*)     PROBE_POOLS="${PROBE_POOLS}${PROBE_POOLS:+ }${line#*=}" ;;
             PKG=*)      PROBE_PKG="${line#*=}" ;;
             REV=*)      PROBE_REV="${line#*=}" ;;
@@ -15128,9 +15539,10 @@ cmd_check_source() {
         first=0
         printf '{"name":"%s","size":"%s","free":"%s"}' "$(json_escape "$n")" "$(json_escape "$sz")" "$(json_escape "$fr")"
     done
-    printf ']},"package":{"ok":%s,"path":"%s","rev":"%s"},"git":%s,"repo_dir":"%s"}\n' \
+    printf ']},"package":{"ok":%s,"path":"%s","rev":"%s"},"git":%s,"apt":%s,"sudo":%s,"repo_dir":"%s","repo_dir_blocked":"%s"}\n' \
         "$([ -n "$PROBE_PKG" ] && echo true || echo false)" "$(json_escape "$PROBE_PKG")" "$(json_escape "$PROBE_REV")" \
-        "$([ "$PROBE_GIT" -eq 1 ] && echo true || echo false)" "$(json_escape "$SOURCE_REPO_DIR")"
+        "$([ "$PROBE_GIT" -eq 1 ] && echo true || echo false)" "$([ "$PROBE_APT" -eq 1 ] && echo true || echo false)" \
+        "$([ "$PROBE_SUDO" -eq 1 ] && echo true || echo false)" "$(json_escape "$SOURCE_REPO_DIR")" "$([ -z "$PROBE_PKG" ] && json_escape "$PROBE_DIR")"
 }
 
 # source-pruners HOST[:PORT] [--port=N] DATASET... (owner note 4, 2026-10-08)
@@ -15182,8 +15594,15 @@ cmd_prepare_source() {
         echo ">>> next: zfs-backup.sh add-client NAME --host=$SRC_HOST ... (its JOIN runs deploy.sh --join there)"
         return 0
     fi
-    [ "$PROBE_GIT" -eq 1 ] || die "prepare-source: $SRC_HOST has no git -- install it there first (apt install git). Nothing was changed."
+    # Every refusal comes before the first change. The old directory is not
+    # moved for the operator: old scripts there may still be in root's crontab.
+    case "$PROBE_DIR" in
+        notempty) die "prepare-source: $SOURCE_REPO_DIR on $SRC_HOST exists, is not empty and holds no package (old scripts?) -- git clone cannot go there. Check root's crontab on $SRC_HOST for lines using it, then move it aside, e.g. mv $SOURCE_REPO_DIR $SOURCE_REPO_DIR.old-$(date +%Y%m%d). Nothing was changed." ;;
+        notadir)  die "prepare-source: $SOURCE_REPO_DIR on $SRC_HOST exists and is not a directory -- move it aside first. Nothing was changed." ;;
+    esac
+    [ "$PROBE_GIT" -eq 1 ] || [ "$PROBE_APT" -eq 1 ] || die "prepare-source: $SRC_HOST has no git and no apt-get -- install git there first. Nothing was changed."
     echo "PLAN (prepare-source $SRC_HOST):"
+    [ "$PROBE_GIT" -eq 1 ] || echo "  on $SRC_HOST as root:  apt-get install -y git   (no git there; apt-get update and a retry if the first try fails; on a 404, the main-archive version)"
     echo "  on $SRC_HOST as root:  git clone $url $SOURCE_REPO_DIR"
     echo "  if the host cannot reach $url: a bundle of this checkout goes over scp and the clone is made from it"
     echo "  nothing else: no cron, no relationship, no key (add-client's JOIN does those)"
@@ -15192,6 +15611,11 @@ cmd_prepare_source() {
         return 0
     fi
     local err
+    if [ "$PROBE_GIT" -ne 1 ]; then
+        err=$(rux_root_ssh "$SRC_HOST" "$SRC_PORT" "$(remote_apt_install_cmd git) && command -v git >/dev/null" 2>&1) \
+            || die "prepare-source: apt-get install git on $SRC_HOST failed: $(printf '%s' "$err" | tr -d '\r' | grep -v '^$' | tail -1). Install it there by hand, then re-run."
+        echo ">>> installed git on $SRC_HOST$(printf '%s' "$err" | tr -d '\r' | sed -n 's/^apt: 404 for [^ ]* /: 404 /p' | head -1)"
+    fi
     if err=$(rux_root_ssh "$SRC_HOST" "$SRC_PORT" "git clone -q '$url' '$SOURCE_REPO_DIR'" 2>&1); then
         echo ">>> cloned $url into $SOURCE_REPO_DIR on $SRC_HOST"
     else
@@ -15407,9 +15831,11 @@ cmd_delete_relation() {
     fi
 
     # Who else uses this peer? Counted from the records, in a subshell per file so
-    # one record's fields never leak into the next.
+    # one record's fields never leak into the next. No peer is nobody's peer: two
+    # records without PEER_HOST are not a shared pairing (install test 2026-11-05,
+    # "the pairing with  stays: migawki-b").
     local others="" f o
-    for f in "$CLIENTS_DIR"/*.conf; do
+    [ -n "$peer" ] && for f in "$CLIENTS_DIR"/*.conf; do
         [ -f "$f" ] || continue
         [ "$f" = "$cpath" ] && continue
         o=$( CLIENT_NAME=""; STATE=""; PEER_HOST=""; record_load client "$f"
@@ -15618,10 +16044,10 @@ local_source_change() {   # <add|remove> <name> <dataset> <yes 0|1>
     [ "${#srcs[@]}" -gt 0 ] || die "$how-source: $cronfile has no [dataset:] section of '$name'"
     local s
     if [ "$how" = remove ]; then
-        printf '%s\n' "${srcs[@]}" | grep -qxF -- "$ds" || die "remove-source: '$ds' is not a source of '$name'. Nothing was changed."
+        printf '%s\n' "${srcs[@]}" | grep_q -xF -- "$ds" || die "remove-source: '$ds' is not a source of '$name'. Nothing was changed."
         [ "${#srcs[@]}" -gt 1 ] || die "remove-source: '$ds' is the last source of '$name' -- remove the relationship instead: zfs-backup delete-relation $name"
     else
-        printf '%s\n' "${srcs[@]}" | grep -qxF -- "$ds" && die "add-source: '$ds' is already in '$name'. Nothing was changed."
+        printf '%s\n' "${srcs[@]}" | grep_q -xF -- "$ds" && die "add-source: '$ds' is already in '$name'. Nothing was changed."
         case "$ds" in *:*) die "add-source: '$ds' names a remote host -- '$name' is a LOCAL copy" ;; esac
         zfs list -H -o name -- "$ds" >/dev/null 2>&1 \
             || die "add-source: source '$ds' does not exist on this host (zfs list found nothing). Nothing was changed."
@@ -18290,7 +18716,7 @@ save_profile_add_tier() {
 save_profile_free_minute() {
     local line="$1" taken="$2" m h rest n=0
     read -r m h rest <<<"$line"
-    while printf '%s\n' "$taken" | grep -qxF "$m $h" && [ "$n" -lt 12 ]; do
+    while printf '%s\n' "$taken" | grep_q -xF "$m $h" && [ "$n" -lt 12 ]; do
         m=$(( (m + 5) % 60 )); n=$((n + 1))
     done
     echo "$m $h $rest"
@@ -18423,7 +18849,7 @@ cmd_save_profile() {
         _t="${ftier[$i]}"
         [ -n "$_t" ] || { rm -rf "$workdir"; die "save-profile: --${fname[$i]} comes before any --tier= -- say which tier it changes. Nothing was written."; }
         [ -n "${amap[$_t]+x}" ] && _t="${amap[$_t]}"
-        cron_config_section "$work" "[template:$_t]" | grep -q . \
+        cron_config_section "$work" "[template:$_t]" | grep_q . \
             || { rm -rf "$workdir"; die "save-profile: '$from' has no tier '$_t'. It has: $(sed -n -E 's/^\[template:([^]]*)\]$/\1/p' "$src" | tr '\n' ' '). Nothing was written."; }
         set_or_remove_section_field "$work" "[template:$_t]" "${fname[$i]}" "${fvalue[$i]}" \
             || { rm -rf "$workdir"; die "save-profile: could not write '${fname[$i]}' into [template:$_t] -- nothing was written"; }
@@ -18442,7 +18868,7 @@ cmd_save_profile() {
     # first guard refused every tier of such a template).
     local d _pat _others _makers
     for d in ${drop[@]+"${drop[@]}"}; do
-        cron_config_section "$work" "[template:$d]" | grep -q . \
+        cron_config_section "$work" "[template:$d]" | grep_q . \
             || { rm -rf "$workdir"; die "save-profile: --drop-tier: '$from' has no tier '$d'. Nothing was written."; }
         _pat=$(cron_config_section "$work" "[template:$d]" | sed -n -E 's/^[[:space:]]*pattern[[:space:]]*=[[:space:]]*//p' | head -1)
         _others=$(awk -v me="[template:$d]" -v pat="$_pat" '
@@ -19765,11 +20191,12 @@ profile_usage_load() {
 # provenance); what they lose is a later "refresh from the template", so the
 # plan says how many there are.
 cmd_delete_profile() {
-    local name="" yes=0 ask=0 a
+    local name="" yes=0 ask=0 if_unused=0 a
     for a in "$@"; do
         case "$a" in
             --yes|-y) yes=1 ;;
             --ask)    ask=1 ;;
+            --if-unused) if_unused=1 ;;
             -*) die "delete-profile: unknown option '$a'" ;;
             *)  [ -z "$name" ] || die "delete-profile: takes one NAME"; name="${a%.conf}" ;;
         esac
@@ -19783,6 +20210,14 @@ cmd_delete_profile() {
     [ -f "$f" ] || die "delete-profile: no own template '$name' in $PROFILE_USER_ROOT. Nothing was changed."
     profile_usage_load
     local n="${PROFILE_USED_BY[$name]:-0}"
+    # --if-unused (the wizard's clean-up of its own draft): a relationship that
+    # names the template -- a PENDING one too, which still has to activate from
+    # it -- keeps it. First install, 2026-11-04: the wizard failed after add-client,
+    # deleted its draft, and the retry the FATAL promised died "profile not found".
+    if [ "$if_unused" -eq 1 ] && [ "$n" -gt 0 ]; then
+        log "delete-profile: '$name' kept -- $n relationship(s) on this host name it ($f)."
+        return 0
+    fi
     echo "PLAN (delete-profile):"
     echo "  delete: $f"
     if [ "$n" -gt 0 ]; then
@@ -20838,7 +21273,7 @@ status_snaponly_view() {
     if [ "$(id -un 2>/dev/null)" = "$acct" ]; then _tab="$(crontab -l 2>&1)"; _trc=$?
     elif [ "$(id -u)" = 0 ]; then _tab="$(crontab -u "$acct" -l 2>&1)"; _trc=$?; fi
     if [ "$_trc" -eq 0 ]; then ncron=""
-    elif printf '%s' "${_tab:-}" | grep -q "^no crontab for"; then _tab=""; ncron=""; fi
+    elif printf '%s' "${_tab:-}" | grep_q "^no crontab for"; then _tab=""; ncron=""; fi
     [ "$ncron" = "?" ] || ncron="$(printf '%s\n' "$_tab" | grep -cF -e "-L $name " -e "-L $name\"")" || ncron=0
     if [ "$ncron" = "?" ]; then echo "Cron:              ? (crontab of account '$acct' unreadable)"
     elif [ "$ncron" -gt 0 ]; then echo "Cron:              $ncron lines in the crontab of account '$acct'"
@@ -20885,7 +21320,7 @@ status_local_view() {
         _tab="$(crontab -u "$acct" -l 2>&1)"; _trc=$?
     fi
     if [ "$_trc" -eq 0 ]; then ncron=""
-    elif printf '%s' "${_tab:-}" | grep -q "^no crontab for"; then _tab=""; ncron=""
+    elif printf '%s' "${_tab:-}" | grep_q "^no crontab for"; then _tab=""; ncron=""
     fi
     [ "$ncron" = "?" ] || ncron="$(printf '%s\n' "$_tab" | grep -cF -e "-L $name " -e "-L $name\"")" || ncron=0
     if [ "$ncron" = "?" ]; then
@@ -21659,7 +22094,7 @@ remove_local_relation() {
         printf 'REMOVED_AT="%s"\n' "$(date '+%Y-%m-%d %H:%M:%S')"
     } > "${cpath}.new" && mv -f "${cpath}.new" "$cpath"
     if client_paused "$name"; then rm -f "$(pause_marker_path "$name")" || :; fi
-    rmdir "$RELATIONSHIPS_DIR/$name" 2>/dev/null || :
+    relationship_dir_rmdir "$name"
     log "local relationship '$name' removed. The copies stay: ${MANAGED_DATASETS:-none recorded}"
 }
 
@@ -21849,7 +22284,7 @@ cmd_remove_client() {
             && log "cleared this client's PAUSED_LOCAL marker" \
             || warn "could not remove $(pause_marker_path "$name") -- remove it manually, or the next client named '$name' will report (and clear) it at add-client"
     fi
-    rmdir "$RELATIONSHIPS_DIR/$name" 2>/dev/null || :
+    relationship_dir_rmdir "$name"
 
     if [ "${#peer_shared_with[@]}" -gt 0 ]; then
         log "client '$name' removed locally. NO peer-side commands to run: the pairing with $PEER_HOST stays, because ${peer_shared_with[*]} still uses it."
@@ -22293,6 +22728,7 @@ rux_grant_remotely_preflight() {   # <host> <port> [will_join_now=0]
     if ! rux_root_ssh "$host" "$port" "true" >/dev/null 2>&1; then
         die "--grant-remotely: no root ssh channel to $host (BatchMode, pinned /root/.ssh/known_hosts). Establish it first -- e.g. install this host's root key there: ssh-copy-id root@$host -- or drop --grant-remotely and run the grant on the source yourself: deploy.sh --commit-scope=$COLLECTOR_LABEL. Nothing was changed anywhere."
     fi
+    [ "${RUX_GRANT_QUIESCE:-0}" -eq 1 ] && rux_source_sudo_ready "$host" "$port"
     # The manifest requirement holds only when THIS run will not create it.
     # The one-command flow's own add-client performs the join (--join-remotely,
     # the default) minutes after this gate -- demanding a PRE-existing join
@@ -22330,6 +22766,49 @@ joined it does step 3 for you."
 # it is recorded in the same audit line.
 RUX_GRANT_QUIESCE="${RUX_GRANT_QUIESCE:-0}"
 
+# rux_remote_commit_scope <host> <port> <repo dir> <" --allow-quiesce" or ""> -> rc of the remote run
+#
+# First install, 2026-11-04: the run was cut to `| tail -4`, so the line that said
+# WHY (apt could not install sudo) never reached this host's log, and the wizard's
+# "Reason" showed an unrelated mail warning instead. On success the tail is still
+# enough; on failure the whole remote output goes into this host's log, and the
+# remote's own !!!/FATAL lines are repeated marked "!!! [on host]" -- the marker is
+# what the wizard's refusal window picks first (tui/wt-lib.sh verb_refusal).
+rux_remote_commit_scope() {
+    local host="$1" port="$2" repo="$3" aq="$4" out rc=0
+    out=$(rux_root_ssh "$host" "$port" "cd '$repo' && ./deploy.sh --commit-scope='$COLLECTOR_LABEL'$aq" 2>&1) || rc=$?
+    out=$(printf '%s\n' "$out" | tr -d '\r')
+    if [ "$rc" -eq 0 ]; then
+        printf '%s\n' "$out" | tail -4
+        return 0
+    fi
+    echo "--- deploy.sh --commit-scope='$COLLECTOR_LABEL'$aq on $host: rc=$rc, its whole output ---"
+    printf '%s\n' "$out" | sed 's/^/    /'
+    echo "--- end of the output from $host ---"
+    printf '%s\n' "$out" | sed -n -E 's/^(!!! |FATAL: )[[:space:]]*//p' | while IFS= read -r _l; do
+        printf '!!! [on %s] %s\n' "$host" "$_l"
+    done
+    return "$rc"
+}
+
+# rux_source_sudo_ready <host> <port> -- before the first change of a --grant-quiesce run
+#
+# First install, 2026-11-04: a default Proxmox VE has no sudo, and the freeze grant
+# is a sudoers rule. deploy.sh installs sudo itself, but only inside --commit-scope,
+# AFTER the join and the replication grant -- there apt failed and the pair was left
+# half-enrolled. So it is asked (and installed, as prepare-source installs git)
+# here, while nothing has been changed yet.
+rux_source_sudo_ready() {
+    local host="$1" port="$2" out
+    out=$(rux_root_ssh "$host" "$port" "command -v sudo >/dev/null 2>&1 && { command -v visudo >/dev/null 2>&1 || [ -x /usr/sbin/visudo ] || [ -x /sbin/visudo ]; } && echo SUDO=yes; command -v apt-get >/dev/null 2>&1 && echo APT=yes" 2>&1)
+    case "$out" in *SUDO=yes*) return 0 ;; esac
+    case "$out" in *APT=yes*) ;; *) die "--grant-quiesce: $host has no sudo and no apt-get -- install sudo there first, or drop --grant-quiesce. Nothing was changed anywhere." ;; esac
+    log "--grant-quiesce: $host has no sudo (a default Proxmox VE has none) -- installing it there before the first change: apt-get install -y sudo"
+    out=$(rux_root_ssh "$host" "$port" "$(remote_apt_install_cmd sudo) && command -v sudo >/dev/null 2>&1 && { command -v visudo >/dev/null 2>&1 || [ -x /usr/sbin/visudo ] || [ -x /sbin/visudo ]; }" 2>&1) \
+        || die "--grant-quiesce: apt-get install sudo on $host failed: $(printf '%s' "$out" | tr -d '\r' | grep -v '^$' | tail -1). Install sudo there by hand (or drop --grant-quiesce), then re-run. Nothing else was changed anywhere."
+    log "--grant-quiesce: sudo installed on $host$(printf '%s' "$out" | tr -d '\r' | sed -n 's/^apt: 404 for [^ ]* /: 404 /p' | head -1)"
+}
+
 rux_grant_remotely() {   # <host> <port> <requested dataset>
     local host="$1" port="$2" requested="$3"
     local aq="" aq_note=""
@@ -22341,6 +22820,10 @@ rux_grant_remotely() {   # <host> <port> <requested dataset>
     if ! rux_root_ssh "$host" "$port" "true" >/dev/null 2>&1; then
         die "--grant-remotely: no root ssh channel to $host (BatchMode, pinned /root/.ssh/known_hosts). Establish it first -- e.g. install this host's root key there: ssh-copy-id root@$host -- or drop --grant-remotely and run the grant on the source yourself: deploy.sh --commit-scope=$COLLECTOR_LABEL. Nothing was changed anywhere."
     fi
+    # Again here, not only in the early gate: a RESUME (the retry a failed run
+    # promises) skips that gate, and sudo must be there before the scope is
+    # written and committed.
+    [ -n "$aq" ] && rux_source_sudo_ready "$host" "$port"
 
     if rux_root_ssh "$host" "$port" "test -s '$hfile'" >/dev/null 2>&1; then
         # A committed scope exists. Until 2026-08-23 this branch said "nothing
@@ -22374,7 +22857,7 @@ rux_grant_remotely() {   # <host> <port> <requested dataset>
                 done
                 [ -n "$q_repo" ] || die "--grant-quiesce: could not find deploy.sh on $host"
                 log "--grant-remotely: scope already covers the request; re-committing on $host for --grant-quiesce"
-                rux_root_ssh "$host" "$port" "cd '$q_repo' && ./deploy.sh --commit-scope='$COLLECTOR_LABEL'$aq" 2>&1 | tail -4 \
+                rux_remote_commit_scope "$host" "$port" "$q_repo" "$aq" \
                     || die "--grant-quiesce: deploy.sh --commit-scope='$COLLECTOR_LABEL' --allow-quiesce FAILED on $host (see above)"
                 return 0
             fi
@@ -22404,7 +22887,8 @@ include_children = yes
 ' "$_rh"
             done <<< "$missing"
         } | rux_root_ssh_in "$host" "$port" "cat >> '$sfile'"             || die "--grant-remotely: could not append to the scope file on $host -- nothing was committed"
-        rux_root_ssh "$host" "$port" "cd '$extend_repo' && ./deploy.sh --commit-scope='$COLLECTOR_LABEL'$aq" 2>&1 | tail -4             || die "--grant-remotely: deploy.sh --commit-scope='$COLLECTOR_LABEL' FAILED on $host (see above). The scope file was extended; finish or inspect locally there."
+        rux_remote_commit_scope "$host" "$port" "$extend_repo" "$aq" \
+            || die "--grant-remotely: deploy.sh --commit-scope='$COLLECTOR_LABEL' FAILED on $host (see above). The scope file was extended; finish or inspect locally there."
         local ext_mfile; ext_mfile=$(peer_manifest_path "$COLLECTOR_LABEL")
         rux_root_ssh "$host" "$port" "printf 'GRANTED_REMOTELY_BY=%q
 ' '$ext_stamp (extension$aq_note)' >> '$ext_mfile'"             || warn "--grant-remotely: the extension is committed but the audit line could not be appended to $ext_mfile on $host -- add it manually"
@@ -22520,7 +23004,7 @@ An operator prepared that file, and this flag is not permission to overwrite the
     } | rux_root_ssh_in "$host" "$port" "cat > '$sfile'" \
         || die "--grant-remotely: could not write the scope file on $host -- nothing was committed"
 
-    rux_root_ssh "$host" "$port" "cd '$remote_repo' && ./deploy.sh --commit-scope='$COLLECTOR_LABEL'$aq" 2>&1 | tail -4 \
+    rux_remote_commit_scope "$host" "$port" "$remote_repo" "$aq" \
         || die "--grant-remotely: deploy.sh --commit-scope='$COLLECTOR_LABEL' FAILED on $host (see above). The scope file was written; finish or inspect locally there."
 
     local mfile; mfile=$(peer_manifest_path "$COLLECTOR_LABEL")

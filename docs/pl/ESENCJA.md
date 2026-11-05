@@ -21,10 +21,20 @@ Wszystko w bashu, zadania chodzą z crona, a do codziennej pracy jest tekstowe G
 1. Na kolektorze, jako root: pobierz pakiet i przygotuj host.
 
    ```bash
+   apt-get install -y git      # świeży Proxmox nie ma gita
    git clone https://github.com/AdalbertKing/zfsbackup.git /root/scripts/zfs-snapshot-all
    cd /root/scripts/zfs-snapshot-all
    ./deploy.sh --backup-user=zfsbackup
    ```
+
+   Jeśli `/root/scripts/zfs-snapshot-all` już istnieje (stare skrypty, bez `.git`), `git clone` tam nie wejdzie:
+   sprawdź w `crontab -l` roota, czy coś stamtąd chodzi, i odsuń katalog, np.
+   `mv /root/scripts/zfs-snapshot-all /root/scripts/zfs-snapshot-all.old-RRRRMMDD`. Na źródle kreator
+   sprawdza to samo i odmawia, zanim cokolwiek zmieni; gita na źródle doinstalowuje sam.
+
+   Bez opcji `deploy.sh` nadaje kontu uprawnienia na `rpool/data` i `rpool/ROOT/pve-1` (domyślne datasety
+   Proxmoksa). Na hoście z innymi pulami podaj własne: `./deploy.sh --backup-user=zfsbackup --grant-datasets=hdd`
+   (kilka po przecinku). Listę datasetów pokazuje `zfs list -H -o name`.
 
 2. Uruchom GUI i załóż pierwszą relację: **F3 Relacje**, klawisz **Ins**. Kreator pyta o rodzaj relacji,
    host źródłowy, datasety, cel, szablon, ile migawek zostaje na źródle i nazwę, pokazuje podsumowanie
@@ -36,6 +46,14 @@ Wszystko w bashu, zadania chodzą z crona, a do codziennej pracy jest tekstowe G
    ```
 
    Do hosta źródłowego kolektor potrzebuje wstępu SSH jako root; pakiet na źródle kreator zainstaluje sam.
+
+   GUI startuje po angielsku. Po polsku: **F10** (ustawienia hosta), pozycja `language` = `pl`, albo
+
+   ```bash
+   zfs-backup settings set gui.language=pl --yes
+   ```
+
+   Komunikaty poleceń zostają po angielsku.
 
 3. Sprawdź po godzinie: **F2 Przebiegi** (co biegło i co pobiegnie, z błędami).
 
