@@ -391,6 +391,11 @@ front end never edits the config file:
                                     relationship's copies, whose next pull would
                                     discard any replica_ snapshot). list-replicas
                                     shows its prefix as '-'.
+                                    [--exclude-family=A,B] (with --passive): snapshot
+                                    families the pickup never takes, as in a
+                                    relationship -- written as -E in the section's
+                                    flags (A22: __replicate_ is renamed and rotated by
+                                    pvesr, a copy must not stand on it).
                                     on-insert = no time, only when the disk is
                                     plugged in (needs install-media-trigger).
                                     [--recursive=yes|no] [--fixed|--removable]
@@ -4059,6 +4064,21 @@ assert_target_block_not_clobbered() {   # <config whose render is about to be in
                 local _rold _rnew; _rold=$(retention_flags_of "$line"); _rnew=$(retention_flags_of "$twin")
                 warn "  retention changed, the job itself stays: ${_rold% } -> ${_rnew% }"
                 warn "    $line"
+                continue
+            fi
+            # Label exemption (A5, 2026-11-06): the same job under a new zfs-job label --
+            # gen-cron now spells out a basename two datasets share (pve0-data ->
+            # pve0-hdd-data). Everything but the "(...)" in the label must match, and the
+            # change is said out loud: history keyed by the old label stops there.
+            local lnorm ltwin=""
+            lnorm=$(printf '%s\n' "$norm" | schedule_normalized_identity | sed -E 's/(zfs-job\.sh "[^"(]*)\([^)"]*\)"/\1()"/')
+            while IFS= read -r pline; do
+                [ -n "$pline" ] || continue
+                [ "$(printf '%s\n' "$pline" | schedule_normalized_identity | sed -E 's/(zfs-job\.sh "[^"(]*)\([^)"]*\)"/\1()"/')" = "$lnorm" ] || continue
+                ltwin="$pline"; break
+            done <<< "$proposed_norm"
+            if [ -n "$ltwin" ]; then
+                warn "  job label changed, the job itself stays: $(printf '%s' "$line" | grep -o 'zfs-job\.sh "[^"]*"' | head -1) -> $(printf '%s' "$ltwin" | grep -o 'zfs-job\.sh "[^"]*"' | head -1)"
                 continue
             fi
             # Fifth exemption: the peer-root ladder this run is migrating off.
@@ -8170,7 +8190,7 @@ cmd_set_transfer() {
 # Owner note 15 (2026-10-08): "Prepare the medium once, by hand" was the one step
 # of a replica the package could not do, from batch or from the GUI. This is it:
 #
-#   zpool create -m none -o failmode=continue -O compression=zstd POOL DEVICE
+#   zpool create -m none -o ashift=12 -o failmode=continue -O compression=zstd POOL DEVICE
 #   zfs create POOL/BASE           -- the dataset that tells the gate it is THIS disk
 #   zpool export POOL              -- the disk can go to the safe
 #
@@ -8245,7 +8265,7 @@ cmd_prepare_media() {
     echo "PLAN (prepare-media):"
     echo "  disk:     $dev  ($real, $(lsblk -dn -o SIZE,MODEL "$real" 2>/dev/null | sed 's/  */ /g'))"
     lsblk -nr -o NAME,FSTYPE,LABEL "$real" 2>/dev/null | awk 'NF > 1 {print "  WIPED:    " $1 " holds " $2 (NF > 2 ? " (" $3 ")" : "")}'
-    echo "  1. zpool create -f -m none -o failmode=continue -O compression=zstd $pool $dev   -- EVERYTHING on the disk is erased"
+    echo "  1. zpool create -f -m none -o ashift=12 -o failmode=continue -O compression=zstd $pool $dev   -- EVERYTHING on the disk is erased"
     # W19(b) (owner 2026-10-11, "ma byc proste" 2026-10-13): the medium encrypted with a
     # KEY FILE on this host, never a passphrase -- a passphrase would stop the nightly and
     # the on-insert runs. One key per pool name, so the disks of a rotation pair (same
@@ -8271,7 +8291,7 @@ cmd_prepare_media() {
     # compression=zstd (W19, owner 2026-10-11): what the replica receives with zfs send -c
     # keeps its own compression; this is for everything written there otherwise, and so
     # the pool says plainly what it is.
-    zpool create -f -m none -o failmode=continue -O compression=zstd "$pool" "$dev" || die "prepare-media: zpool create failed (see above). Nothing else was done."
+    zpool create -f -m none -o ashift=12 -o failmode=continue -O compression=zstd "$pool" "$dev" || die "prepare-media: zpool create failed (see above). Nothing else was done."
     if [ "$enc" -eq 1 ]; then
         if [ "$keynew" -eq 1 ]; then
             ( umask 077; mkdir -p "$MEDIA_KEY_DIR" && od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > "$keyfile" ) \
@@ -8390,6 +8410,24 @@ cmd_remove_media_trigger() {
     log "media trigger removed. Replicas now run only on their schedule; the cron entries are untouched."
 }
 
+# A snapshot FAMILY list as --exclude-family takes it (A,B,...): each name in
+# the characters ZFS allows in a snapshot name, minus the space, not starting
+# with '-' -- the grammar gen-cron.sh family_name_ok holds for exclude_family
+# and for -E in 'flags' (REV-20261106-190). Every name becomes an -E word in a
+# root crontab line, so anything else is refused here, before any config is
+# written.
+check_family_list() {   # <verb> <list>
+    local _f
+    case "$2" in *[!A-Za-z0-9_.:,-]*) die "$1: --exclude-family='$2' -- not a list of snapshot family names (letters, digits, _ . : -, comma-separated)" ;; esac
+    case ",$2," in *,,*) die "$1: --exclude-family='$2' has an empty entry -- a stray comma, most likely" ;; esac
+    for _f in ${2//,/ }; do
+        case "$_f" in -*|*[!A-Za-z0-9_.:-]*)
+            die "$1: --exclude-family='$2' -- '$_f' is not a snapshot family name (letters, digits, _ . : -, comma-separated, not starting with -)" ;;
+        esac
+    done
+    return 0
+}
+
 cmd_add_replica() {   # <name> --source=DS [--source=DS2 ...] --dst=POOL/BASE [...]
     # --ask [NAME]: the same questions as whiptail windows (F6 in the GUI: Ins =
     # a new replica, Enter + 'e' = change one). The windows only ask and show
@@ -8412,7 +8450,7 @@ cmd_add_replica() {   # <name> --source=DS [--source=DS2 ...] --dst=POOL/BASE [.
     local name="" source="" dst="" sched="" pref="replica_" rec=1 media="removable" notify="" history=""
     local mon_warn="" mon_crit="" passive=0 _prefset=0 on_insert="" keep="" rraw=0
     local -a xchild=() mguids=()
-    local config="" do_install=0 assume_yes=0 a _ans
+    local config="" do_install=0 assume_yes=0 a _ans xfam=""
     # --source IS REPEATABLE, and also takes a comma list, so a front end can
     # send either shape. One medium often holds more than one thing worth
     # keeping, and a second [replica:] onto the same disk is refused further
@@ -8435,6 +8473,8 @@ cmd_add_replica() {   # <name> --source=DS [--source=DS2 ...] --dst=POOL/BASE [.
             # wizard uses the same basket as the relationship wizard, exceptions
             # included). Written as -X in the section's flags; needs recursion.
             --exclude-child=*) xchild+=("${a#*=}") ;;
+            # A22 (field 2026-11-06): the same -E the relationships carry (exclude_family).
+            --exclude-family=*) check_family_list add-replica "${a#*=}"; xfam="${xfam:+$xfam,}${a#*=}" ;;
             # P5 (owner 2026-10-09, "po ID"): the disks of this replica by pool GUID,
             # repeatable or comma-separated; the gate refuses any other disk.
             --media-guid=*) IFS=',' read -ra _sp <<< "${a#*=}"
@@ -8493,6 +8533,13 @@ cmd_add_replica() {   # <name> --source=DS [--source=DS2 ...] --dst=POOL/BASE [.
         xflags="$xflags${xflags:+ }-X $_xc"
     done
     [ -z "$xflags" ] || [ "$rec" -eq 1 ] || die "add-replica: --exclude-child needs --recursive=yes -- without children there is nothing to leave out"
+    if [ -n "$xfam" ]; then
+        [ "$passive" -eq 1 ] || die "add-replica: --exclude-family needs --passive -- a replica with its own prefix takes only that family already"
+        local _xf
+        for _xf in ${xfam//,/ }; do
+            xflags="$xflags${xflags:+ }-E $_xf"
+        done
+    fi
     local _i _j
     for ((_i=0; _i<${#sources[@]}; _i++)); do
         for ((_j=_i+1; _j<${#sources[@]}; _j++)); do
@@ -8650,12 +8697,14 @@ cmd_zfs_tree() {
       zfs list -H -p -o name,creation -r -t snapshot -- "${roots[@]}" 2>/dev/null | sed 's/^/S\t/'
     } | awk -F'\t' '
         $1 == "D" { if (!($2 in typ)) ord[++n] = $2; typ[$2] = $3; next }
-        $1 == "S" { i = index($2, "@"); d = substr($2, 1, i - 1); c[d]++; if ($3 + 0 > nw[d] + 0) nw[d] = $3; next }
+        $1 == "S" { i = index($2, "@"); d = substr($2, 1, i - 1); c[d]++; if ($3 + 0 > nw[d] + 0) nw[d] = $3
+                    if (substr($2, i + 1, 11) == "__replicate") pv[d] = 1   # A17: a pvesr replica holds these
+                    next }
         END {
             printf "{\"datasets\":["
             for (i = 1; i <= n; i++) {
                 d = ord[i]
-                printf "%s{\"name\":\"%s\",\"type\":\"%s\",\"snapshots\":%d,\"newest\":%d}", (i > 1 ? "," : ""), d, typ[d], c[d] + 0, nw[d] + 0
+                printf "%s{\"name\":\"%s\",\"type\":\"%s\",\"snapshots\":%d,\"newest\":%d,\"pvesr\":%s}", (i > 1 ? "," : ""), d, typ[d], c[d] + 0, nw[d] + 0, (d in pv ? "true" : "false")
             }
             print "]}"
         }'
@@ -8688,15 +8737,16 @@ cmd_zfs_snapshots() {
 # one piece that knows the difference between "the pool is not imported" and
 # "the pool is imported but this is the WRONG disk". A listing that flattened
 # those two into a boolean would hide the only dangerous one.
-# replica_section_excludes <config> <name> -- the -X patterns in [replica:<name>]'s
-# flags, one per line. They are written there by add-replica --exclude-child.
+# replica_section_excludes <config> <name> [option] -- the -X patterns (or another
+# option's values, -E) in [replica:<name>]'s flags, one per line. add-replica writes
+# them there: --exclude-child as -X, --exclude-family as -E.
 replica_section_excludes() {
-    awk -v want="[replica:$2]" '
+    awk -v want="[replica:$2]" -v opt="${3:--X}" '
         $0 == want { f = 1; next } /^\[/ { f = 0 }
         f { t = $0; sub(/^[ \t]+/, "", t); k = t; sub(/[ \t]*=.*$/, "", k)
             if (k != "flags") next
             v = t; sub(/^[^=]*=[ \t]*/, "", v); n = split(v, a, /[ \t]+/)
-            for (i = 1; i < n; i++) if (a[i] == "-X") print a[i + 1] }' "$1"
+            for (i = 1; i < n; i++) if (a[i] == opt) print a[i + 1] }' "$1"
 }
 
 cmd_list_replicas() {
@@ -8832,11 +8882,12 @@ JSRC
                 [ -n "$_x" ] || continue
                 _xarr="$_xarr${_xarr:+,}\"$(json_escape "$_x")\""
             done < <(replica_section_excludes "$config" "$name")
+            local _xfam; _xfam=$(replica_section_excludes "$config" "$name" -E | paste -sd, -)
             # media_key (W19b): the key file of an encrypted medium, by the pool name of
             # dst -- known without the disk in the slot.
             local _mk="$MEDIA_KEY_DIR/${dst%%/*}.key"; [ -s "$_mk" ] || _mk=""
-            printf '{"name":"%s","source":"%s","sources":[%s],"dst":"%s","schedule":"%s","prefix":"%s","media":"%s","recursive":"%s","history":"%s","present":"%s","last_seen":"%s","last_current":"%s","monitor_warn":"%s","monitor_crit":"%s","exclude_child":[%s],"media_guids":"%s","on_insert":"%s","keep":"%s","raw":"%s","media_key":"%s"}' \
-                "$name" "$src" "$_jarr" "$dst" "$sched" "$pref" "${media:-fixed}" "$rec" "$hist" "$present" "$last" "$lcur" "$mw" "$mc" "$_xarr" "$mg" "${oi:-no}" "$kp" "${rw:-no}" "$_mk"
+            printf '{"name":"%s","source":"%s","sources":[%s],"dst":"%s","schedule":"%s","prefix":"%s","media":"%s","recursive":"%s","history":"%s","present":"%s","last_seen":"%s","last_current":"%s","monitor_warn":"%s","monitor_crit":"%s","exclude_child":[%s],"exclude_family":"%s","media_guids":"%s","on_insert":"%s","keep":"%s","raw":"%s","media_key":"%s"}' \
+                "$name" "$src" "$_jarr" "$dst" "$sched" "$pref" "${media:-fixed}" "$rec" "$hist" "$present" "$last" "$lcur" "$mw" "$mc" "$_xarr" "$(json_escape "$_xfam")" "$mg" "${oi:-no}" "$kp" "${rw:-no}" "$_mk"
         else
             printf '%-14s %-28s -> %-24s %-14s %-11s %s\n' "$name" "$src" "$dst" "$sched" "$hist" "$present"
             [ -n "$last" ] && printf '%-14s   last seen: %s\n' "" "$last"
@@ -9179,7 +9230,7 @@ cmd_local_backup() {
             # The same exclusions as the remote form, written as the same
             # [dataset:] scope fields (exclude_child_<n> -> -X, exclude_family -> -E).
             --exclude-child=*)  lb_excl+=("${a#*=}") ;;
-            --exclude-family=*) lb_exfam="${lb_exfam:+$lb_exfam,}${a#*=}" ;;
+            --exclude-family=*) check_family_list local-backup "${a#*=}"; lb_exfam="${lb_exfam:+$lb_exfam,}${a#*=}" ;;
             # W17: an encrypted source copied encrypted (-w), first copy included.
             --raw)       lb_raw=1 ;;
             # --passive (2026-10-24, Site-A pve2): the copy ADOPTS snapshots somebody
@@ -10291,7 +10342,7 @@ cmd_add_client() {
             --own-snapshots) own_snaps=1 ;;
             --stamp-family) stamp_family=1 ;;
             --raw)         raw_send=1 ;;
-            --exclude-family=*) exclude_family="${exclude_family:+$exclude_family,}${a#*=}" ;;
+            --exclude-family=*) check_family_list add-client "${a#*=}"; exclude_family="${exclude_family:+$exclude_family,}${a#*=}" ;;
             --exclude-child=*) excludes+=("${a#*=}") ;;
             --mode=*)      mode="${a#*=}" ;;
             --target=*)    target="${a#*=}"; target_given=1 ;;
@@ -15459,10 +15510,33 @@ SOURCE_REPO_DIR="${SOURCE_REPO_DIR:-/root/scripts/zfs-snapshot-all}"
 # security.debian.org no longer served the bullseye debs the lists named; the
 # main-archive version installed). Runs in a subshell, so `exit` ends only it;
 # on failure apt's own output is what it prints. The package name is a literal
-# from this file, never data.
+# from this file, never data; the pins taken from apt's output are checked by
+# apt_main_archive_pins.
 remote_apt_install_cmd() {
     local p="$1"
-    printf '%s' "( export DEBIAN_FRONTEND=noninteractive; apt-get install -y $p >/dev/null 2>&1 && exit 0; apt-get update >/dev/null 2>&1; o=\$(apt-get install -y $p 2>&1) && exit 0; case \"\$o\" in *404*) v=\$(apt-cache madison $p 2>/dev/null | awk -F'|' '\$3 !~ /security/ { gsub(/[[:space:]]/, \"\", \$2); print \$2; exit }'); if [ -n \"\$v\" ]; then echo \"apt: 404 for $p from the archive its list names -- trying $p=\$v from the main archive\"; o=\$(apt-get install -y $p=\$v 2>&1) && exit 0; fi ;; esac; printf '%s\\n' \"\$o\"; exit 1 )"
+    printf '%s' "$(declare -f apt_main_archive_pins); ( export DEBIAN_FRONTEND=noninteractive; apt-get install -y $p >/dev/null 2>&1 && exit 0; apt-get update >/dev/null 2>&1; o=\$(apt-get install -y $p 2>&1) && exit 0; pins=''; for try in 1 2 3; do case \"\$o\" in *404*) ;; *) break ;; esac; new=\$(apt_main_archive_pins $p \"\$o\" \"\$pins\"); [ \"\$new\" != \"\$pins\" ] || break; pins=\$new; echo \"apt: 404 for $p from the archive its list names -- trying \$pins from the main archive\"; o=\$(apt-get install -y \$pins 2>&1) && exit 0; done; printf '%s\\n' \"\$o\"; exit 1 )"
+}
+
+# apt_main_archive_pins <package> <apt output> [<pins so far>] -> "name=version ..."
+#
+# The pins so far, plus <package> and every package apt's output shows a 404
+# for, each at its newest version outside the security archive. Pinning the
+# named package alone is not enough: on a Debian 11 source (2026-11-05) git from the
+# main archive still pulled git-man from the security archive -- a 404 again.
+# A name with no such version stays out, and so does anything that is not a
+# Debian package name or version: apt's output is data, and the pins go
+# unquoted into apt-get (one word each). deploy.sh carries the same function
+# (a test compares the two).
+apt_main_archive_pins() {
+    local p="$1" o="$2" pins="${3:-}" q v
+    for q in "$p" $(printf '%s\n' "$o" | sed -n 's#^E: Failed to fetch .*/\([^/_]*\)_[^/]*[[:space:]]404[[:space:]].*#\1#p' | sort -u); do
+        case "$q" in ''|*[!a-z0-9.+-]*) continue ;; esac    # a Debian package name, nothing else
+        case " $pins " in *" $q="*) continue ;; esac
+        v=$(apt-cache madison "$q" 2>/dev/null | awk -F'|' '$3 !~ /security/ { gsub(/[[:space:]]/, "", $2); print $2; exit }')
+        case "$v" in ''|*[!A-Za-z0-9.+~:-]*) continue ;; esac    # a Debian version, nothing else
+        pins="${pins:+$pins }$q=$v"
+    done
+    printf '%s' "$pins"
 }
 
 source_probe() {   # <host> <port> -> sets PROBE_* ; returns 0 when ssh answered
@@ -15755,6 +15829,18 @@ record_is_removed_name_live_as_source() {
     id "zfsbackup-$1" >/dev/null 2>&1 && [ -s "${PEER_STATE_DIR:-/etc/zfs-snapshot-all/peers}/$1.conf" ]
 }
 
+# progress_forget_label <label> -- delete the transfer progress records carrying exactly
+# this label; prints how many. A18: delete-relation's last step (see there).
+progress_forget_label() {
+    local d="${ZFS_PROGRESS_DIR:-/var/lib/zfs-snapshot-all/progress}" f n=0
+    for f in "$d"/*.json; do
+        [ -e "$f" ] || continue
+        grep -qF "\"label\":\"$1\"," "$f" 2>/dev/null || continue
+        rm -f "$f" 2>/dev/null && n=$((n + 1))
+    done
+    printf '%s' "$n"
+}
+
 cmd_delete_relation() {
     local name="" yes=0 keep_source=0 keep_record=0 destroy=0 ask=0 check_source=0 a
     for a in "$@"; do
@@ -15983,6 +16069,12 @@ cmd_delete_relation() {
             done
         done
     fi
+    # A18 (Dabrowska 2026-11-06): the progress records of the deleted relationship's runs
+    # (label = its name) outlived it, and one left at "running" by a copy cut short alarmed
+    # "bez pulsu" days later. A run in progress refused the delete above, so whatever
+    # carries this label now is history of a relationship that no longer exists.
+    local _pn; _pn=$(progress_forget_label "$name")
+    [ "${_pn:-0}" -gt 0 ] && log "delete-relation: removed $_pn progress record(s) of '$name'"
     [ "$rc" -eq 0 ] && log "delete-relation: '$name' is gone${others:+ (the pairing with $peer stays: $others)}." \
                     || log "delete-relation: '$name' removed WITH LEFTOVERS -- read the !!! lines above."
     return "$rc"
@@ -23266,7 +23358,7 @@ rux_entry() {
             --own-snapshots) rux_own=1 ;;   # passed to add-client: the family on the source is leftovers
             --stamp-family) rux_stamp=1 ;;  # passed to add-client: snaponly family stamped with this collector's label (U141)
             --raw)         rux_raw=1 ;;
-            --exclude-family=*) exclude_family="${exclude_family:+$exclude_family,}${a#*=}" ;;
+            --exclude-family=*) check_family_list rux "${a#*=}"; exclude_family="${exclude_family:+$exclude_family,}${a#*=}" ;;
             --exclude-child=*) excludes+=("${a#*=}") ;;
             --profile=*) profile="${a#*=}"; flag_profile rux "$profile" ;;
             --source-profile=*) source_profile="${a#*=}" ;;

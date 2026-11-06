@@ -3448,7 +3448,7 @@ apply_recorded_grant_datasets
 APT_LAST_ERR=""
 APT_FALLBACK=""
 apt_install_with_fallback() {
-    local pkg="$1" out ver
+    local pkg="$1" out pins="" new try
     APT_LAST_ERR=""; APT_FALLBACK=""
     apt-get install -y "$pkg" 2>/dev/null && return 0
     warn "plain install of $pkg failed, running apt-get update first (pve-enterprise 401 is expected/harmless here)"
@@ -3462,18 +3462,43 @@ apt_install_with_fallback() {
     # A 404 for the package itself (first install on Debian 11, 2026-11-04):
     # the lists named bullseye-security debs (git deb11u5, sudo deb11u4) that
     # security.debian.org no longer served, and the same package from the main
-    # archive installed. One try with the newest version from a non-security
-    # origin, said out loud.
-    if printf '%s' "$out" | grep_q '404'; then
-        ver=$(apt-cache madison "$pkg" 2>/dev/null | awk -F'|' '$3 !~ /security/ { gsub(/[[:space:]]/, "", $2); print $2; exit }')
-        if [ -n "$ver" ]; then
-            warn "apt could not fetch $pkg (404 from the archive its package list names) -- trying $pkg=$ver from the main archive"
-            out=$(apt-get install -y --no-install-recommends "$pkg=$ver" 2>&1) && { APT_FALLBACK="$pkg=$ver"; return 0; }
-            printf '%s\n' "$out"
-        fi
-    fi
+    # archive installed. Retries with the newest non-security version of the
+    # package AND of every dependency apt names in a 404 (git alone left git-man
+    # on the security archive, a Debian 11 source 2026-11-05), said out loud.
+    for try in 1 2 3; do
+        printf '%s' "$out" | grep_q '404' || break
+        new=$(apt_main_archive_pins "$pkg" "$out" "$pins")
+        [ "$new" != "$pins" ] || break
+        pins="$new"
+        warn "apt could not fetch $pkg (404 from the archive its package list names) -- trying $pins from the main archive"
+        # $pins unquoted on purpose: one word per name=version
+        out=$(apt-get install -y --no-install-recommends $pins 2>&1) && { APT_FALLBACK="$pins"; return 0; }
+        printf '%s\n' "$out"
+    done
     APT_LAST_ERR=$(printf '%s\n' "$out" | grep -E '^E: ' | tail -1)
     return 1
+}
+
+# apt_main_archive_pins <package> <apt output> [<pins so far>] -> "name=version ..."
+#
+# The pins so far, plus <package> and every package apt's output shows a 404
+# for, each at its newest version outside the security archive. Pinning the
+# named package alone is not enough: on a Debian 11 source (2026-11-05) git from the
+# main archive still pulled git-man from the security archive -- a 404 again.
+# A name with no such version stays out, and so does anything that is not a
+# Debian package name or version: apt's output is data, and the pins go
+# unquoted into apt-get (one word each). zfs-backup.sh carries the same function
+# (a test compares the two).
+apt_main_archive_pins() {
+    local p="$1" o="$2" pins="${3:-}" q v
+    for q in "$p" $(printf '%s\n' "$o" | sed -n 's#^E: Failed to fetch .*/\([^/_]*\)_[^/]*[[:space:]]404[[:space:]].*#\1#p' | sort -u); do
+        case "$q" in ''|*[!a-z0-9.+-]*) continue ;; esac    # a Debian package name, nothing else
+        case " $pins " in *" $q="*) continue ;; esac
+        v=$(apt-cache madison "$q" 2>/dev/null | awk -F'|' '$3 !~ /security/ { gsub(/[[:space:]]/, "", $2); print $2; exit }')
+        case "$v" in ''|*[!A-Za-z0-9.+~:-]*) continue ;; esac    # a Debian version, nothing else
+        pins="${pins:+$pins }$q=$v"
+    done
+    printf '%s' "$pins"
 }
 
 # ---- can this host actually DELIVER an alert? ------------------------------
@@ -6186,7 +6211,7 @@ fi
 # the dependency/repo/alerting/capacity phases above, but is otherwise a
 # separate one-shot operation: it deliberately does NOT touch Phase 8's
 # BACKUP_USER account below (a different, unrelated delegation) and never
-# adds cron lines -- that stays manual, same as everything else in Part 5.
+# adds cron lines -- those are gen-cron.sh's, through the GUI or zfs-backup.sh.
 # ------------------------------------------------------------------------------
 # PEER_STATE_DIR/PEER_KEY_DIR and the path helpers built from them moved to
 # just above do_join_check -- do_commit_scope_check needs peer_manifest_path
@@ -8351,48 +8376,20 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
 fi
 echo
 log "===================================================================="
-log "Automated part done. Manual steps remaining (Part 5, NOT scripted):"
+log "Automated part done. Next step:"
 log "===================================================================="
+# A3 (field 2026-11-05): this used to list four hand-written cron recipes
+# ("Part 5, NOT scripted") from before gen-cron and the GUI existed. After the
+# wizard had already done the work it read like unfinished business. The
+# schedule is the package's job now; the one step that stays human is the mail relay.
 cat <<'EOF'
 
-  1. Add the actual snapsend.sh / snapget.sh / delsnaps.sh cron lines for
-     THIS host's datasets. There is no generic template here on purpose --
-     copying another host's dataset names blindly is how backups silently
-     stop protecting the right data. Prefer writing a config and letting
-     gen-cron.sh render the lines -- it lints what these hand-written
-     shapes cannot. If writing manually anyway:
+  Relations, replicas and their schedule are made by the package itself:
+      zfs-backup gui        (or: zfs-backup.sh --help)
+  gen-cron.sh writes the cron lines. Do not write snapsend/delsnaps lines by hand.
 
-       <schedule> /root/scripts/zfs-snapshot-all/snapsend.sh -m <prefix> \
-         [-e] [-r|-R] [-u] [-z] -v 3 <DATASETS> [<REMOTE>] \
-         2>>/root/scripts/cron.log || /root/scripts/notify-fail.sh "<short job name>"
-
-     For delsnaps.sh (retention): its -v is a bare TOGGLE, not '-v 3' --
-     the engines' -v takes a level, delsnaps' does not, and '-v 3' there
-     makes '3' the dataset list (basket B7; the two parsers are frozen).
-     Use -R when subtree retention is wanted, and a specific enough pattern
-     (e.g. automated_hourly, not just automated_) unless a flat/blanket
-     retention is genuinely what you want. Always give explicit retention
-     flags: delsnaps with NO retention flags defaults to age-mode with
-     threshold=now, which deletes everything the pattern matches.
-
-  2. Before adding a new schedule, sanity-check it against what's ALREADY
-     in crontab -l on this host -- specifically watch for jobs that can
-     legitimately overrun into the next scheduled slot for a DIFFERENT job
-     touching related data (this is what caused the original silent
-     backup-gap bug and the near-miss on hdd/lxc weekly snapshots). The
-     per-target flock lock (added 2026-07-07) protects against two
-     invocations of the SAME target colliding, but does not protect two
-     DIFFERENT jobs from stepping on each other's dataset lifecycle
-     (e.g. a pruning job racing a send job on the same dataset).
-
-  3. After adding cron lines, verify with a manual dry-run first:
-       ./snapsend.sh -n <DATASETS> [<REMOTE>]   # -n = read-only, no side effects
-     and only then let cron pick it up.
-
-  4. If mail alerting (Part 4 above) needs a relay because direct postfix
-     delivery didn't work: that requires host-specific SMTP credentials and
-     is a decision for a human, not this script -- see the notes it printed
-     above.
+  Mail: if direct delivery did not work (the notes above say so), a relay needs
+  this host's SMTP credentials -- a decision for a human, not this script.
 
 EOF
 

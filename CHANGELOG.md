@@ -4,6 +4,55 @@ Every release of this repository is one commit; its message and the `RELEASE-OF`
 development revision it was built from. Releases between tagged versions are listed here only
 when they change how the tool is used.
 
+## [1.0.12] — 2026-11-05
+
+- **apt 404 on a dependency** (first install on a Debian 11 source host): the 404 fallback of
+  1.0.11 pinned only the package it installed, so `git` from the main archive still pulled
+  `git-man` from the security archive and the wizard's source preparation failed. Every apt
+  install the tool does (`deploy.sh`'s dependencies, git and sudo on the source) now also pins
+  each package named in apt's 404 lines to its newest version outside the security archive, up
+  to three tries.
+- **Deployment guide:** the first `git` on Debian 11, before the package exists, names the same
+  pinning by hand (`git` and `git-man`).
+- **One replica, one run at a time.** A copy still running when the next trigger comes (schedule
+  or a re-plug) is not started a second time: the new run ends with rc 75 and says since when the
+  copy runs; its detach no longer exports the disk under the running copy. The age monitor reports
+  a running copy as OK (WARNING past the critical age).
+- **New replica on a disk already attached:** the wizard asks whether to start the first copy now
+  (in the background, as F7).
+- **`prepare-media` creates the pool with `ashift=12`.** USB bridges report 512-byte sectors on
+  4 KiB disks; ZFS then chose `ashift=9` and every write became a read-modify-write.
+- **F2 Przebiegi:** finished runs of the last 72 h (was 12 h); a running run is always listed, also
+  after F8 and when it started before the window. The idle screen is redrawn whole once a minute,
+  so a console broadcast no longer leaves garbage on it (Ctrl-R does the same at once).
+- **F4 Kopie** of a snapshot-only relation lists the guest disks replicated by `pvesr`.
+- **gen-cron:** two datasets with the same basename in one relation get distinct notify labels;
+  the relation install (`zfs-backup.sh`) no longer refuses a block where only such a label changed. Commented-out
+  `snapsend`/`delsnaps` lines in root's crontab no longer block the install.
+- **delete-relation** also removes the relation's progress records; the capacity monitor reports a
+  record whose process is gone as orphaned (and marks it dead) instead of a hung copy.
+- **`deploy.sh`** ends with the next step (`zfs-backup gui`) instead of hand-written cron recipes.
+- **Replica wizard:** the cron field names its five fields, minute first, with examples.
+- **A long copy from a Proxmox VE replicated disk is no longer reported as failed.** Proxmox VE
+  replaces its `__replicate_` snapshot every few hours and a dataset carrying them is not held, so a copy
+  running longer than that found the sent snapshot gone and said `VERIFY FAILED`. The snapshot's
+  GUID is recorded when it is sent and proves the copy when the source no longer has it.
+- **First copy:** a target dataset that does not exist yet is no longer logged as "Could not list
+  the snapshots ... failure".
+- **A passive replica skips snapshot families like a relationship does.** `add-replica
+  --exclude-family=A,B` (with `--passive`) gives the copy the same `-E` exclusions a relationship
+  has; the replica wizard sets `__replicate_,vzdump,__migration__` for a passive replica that has none, so the
+  copy stands on the tool's own snapshots instead of the ones Proxmox VE replication renames and
+  replaces every few hours. `list-replicas --json` shows the list as `exclude_family`.
+- **A replica run that cannot record itself does not start.** If the gate cannot create or open its
+  lock, or write and read back its run record (state directory not writable, a directory where the record
+  belongs), attach stops with rc 2 before any import. A detach that finds a record it cannot read
+  does not export the pool (it says DO NOT UNPLUG if the pool is imported).
+- **Snapshot family names are checked.** `--exclude-family` (add-replica, add-client, rux,
+  local-backup), `exclude_family` and `-E` in `flags` accept letters, digits and `_ . : -` only;
+  gen-cron refuses `flags` that contain `;`, `&`, `|`, `<`, `>`, a backtick, `$(` or a newline,
+  because the value is copied into root's crontab line unchanged.
+
 ## [1.0.11] — 2026-11-05
 
 - **No false "monitor BROKEN" and no failed bookmark prune from a pipe** (U149, U165). Under
