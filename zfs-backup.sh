@@ -16912,6 +16912,7 @@ relation_copy_sources() {
 # key|built-in default|kind|applies to|help (Polish -- shown in the window)
 SETTINGS_REGISTRY='gui.language|en|enum:en,pl|-|język okien GUI (en, pl); komunikaty poleceń zostają po angielsku
 alerts.email|root|email|-|kto dostaje maile o kopiach
+alerts.site|-|name|-|nazwa instalacji (firmy) w temacie maili, np. Site-A -> "[ZFS] Site-A pve2 ..."; "-" = pełna nazwa hosta
 alerts.errors|daily|enum:daily,immediate|-|błędy: zbiorczo raz na dobę albo od razu
 alerts.warnings|daily|enum:daily,immediate|-|ostrzeżenia: zbiorczo raz na dobę albo od razu
 alerts.repeat_after|4h|dur|-|tryb "od razu": ten sam alert znowu po tym czasie
@@ -17002,6 +17003,9 @@ settings_validate() {   # <key> <value> -> 0, or the reason on stdout and rc 1
             lo=$(printf '%s' "$kind" | cut -d: -f2); hi=$(printf '%s' "$kind" | cut -d: -f3)
             case "$v" in *[!0-9]*) ;; *) [ "$v" -ge "$lo" ] && [ "$v" -le "$hi" ] && return 0 ;; esac
             echo "'$v' -- a number from $lo to $hi"; return 1 ;;
+        name)
+            case "$v" in -) return 0 ;; [A-Za-z0-9]*) case "$v" in *[!A-Za-z0-9._-]*) ;; *) [ ${#v} -le 32 ] && return 0 ;; esac ;; esac
+            echo "'$v' -- a name: letters, digits, . _ - (up to 32, no spaces), or - for none"; return 1 ;;
         profile)
             [ -r "$(profile_file "$v")" ] && return 0
             echo "'$v' -- no such template (list: zfs-backup.sh list-profiles)"; return 1 ;;
@@ -17665,19 +17669,23 @@ cmd_job_stats() {
         lbl = ""
         for (i = 5; i <= NF; i++) { if ($i ~ /^rc=/) break; lbl = lbl (lbl == "" ? "" : " ") $i }
         if (lbl == "") next
-        if ($3 == "BEGIN") { bt[lbl] = secs($1); next }
+        # A STACK of open starts per label, not one slot (lab, 2026-11-07): a second
+        # start of a line while the first holds the lock ends at once with rc 75, so
+        # an END belongs to the NEWEST open start. One slot let the skip take the real
+        # start of the real run and left that run with no duration. rc 75 is a skip, not a failure.
+        if ($3 == "BEGIN") { bt[lbl, ++sp[lbl]] = secs($1); next }
         rc = ($NF ~ /^rc=/) ? substr($NF,4) + 0 : 0
         n[lbl]++
-        if (rc != 0) f[lbl]++
+        if (rc != 0 && rc != 75) f[lbl]++
         # awk variables are global, so d survives the previous END line. Without
         # this reset a job whose BEGIN fell outside the window would inherit the
         # duration of whatever ran before it -- a wrong number that looks right.
         d = ""
-        if (lbl in bt) {
-            d = secs($1) - bt[lbl]; if (d < 0) d += 86400
-            tot[lbl] += d; c[lbl]++
-            if (d > mx[lbl]) mx[lbl] = d
-            delete bt[lbl]
+        if (sp[lbl] > 0) {
+            d = secs($1) - bt[lbl, sp[lbl]]; if (d < 0) d += 86400
+            # a skip (rc 75) took no time and copied nothing: not in the average, not the max
+            if (rc != 75) { tot[lbl] += d; c[lbl]++; if (d > mx[lbl]) mx[lbl] = d }
+            delete bt[lbl, sp[lbl]]; sp[lbl]--
         }
         # THE NEWEST run, compared -- not the last line read. The logs are fed
         # live-file-first and rotated-after, so "last seen" is the END OF THE
@@ -17687,8 +17695,10 @@ cmd_job_stats() {
         # sum over the window, which is not a quantity anyone reads -- 27 runs
         # of a job add up to a number that says nothing about how long the job
         # takes. Owner, 2026-09-02: "Naglowek czas laczny jest bez sensu."
-        t = day " " substr($1,12,5)
-        if (!(lbl in lastwhen) || t > lastwhen[lbl]) { lastwhen[lbl] = t; lastrc[lbl] = rc; lastdur[lbl] = (d == "" ? -1 : d) }
+        # Compared to the SECOND, shown to the minute (lab 2026-11-07): a skip and the real
+        # run ending in the same minute tied, and the one read first -- the skip -- stayed last.
+        t = day " " substr($1,12,5); ts = day " " substr($1,12,8)
+        if (!(lbl in lastkey) || ts > lastkey[lbl]) { lastkey[lbl] = ts; lastwhen[lbl] = t; lastrc[lbl] = rc; lastdur[lbl] = (d == "" ? -1 : d) }
     }
     END { for (k in n) printf "%s\t%d\t%d\t%d\t%d\t%s\t%d\t%d\t%d\n", k, n[k], f[k]+0, (c[k] ? tot[k]/c[k] : -1), mx[k]+0, lastwhen[k], lastrc[k], tot[k]+0, lastdur[k]+0 }
         ' | sort)
@@ -17775,7 +17785,9 @@ cmd_job_stats() {
                 | awk -F'\t' -v since="$(( $(date +%s) - runs_h * 3600 - 86400 ))" '$1 != "" && $3 + 0 >= since + 0 { print $1 "\t" $3 "\t" $2 }')
             rl_rows=$(zcat -f $logs 2>/dev/null | awk -v since="$rsince" '
     function label(   i, l) { l = ""; for (i = 5; i <= NF; i++) { if ($i ~ /^rc=/) break; l = l (l == "" ? "" : " ") $i } return l }
-    /ZFS-JOB BEGIN/ { l = label(); if (l != "") bt[l] = $1; next }
+    # Open starts are a STACK per label (the run-rows rule above, lab 2026-11-07): the
+    # lock skip (rc 75) of a second start ends first and must not take the start of the real run.
+    /ZFS-JOB BEGIN/ { l = label(); if (l != "") bt[l, ++sp[l]] = $1; next }
     /ZFS-JOB END/ {
         l = label(); rc = ($NF ~ /^rc=/) ? substr($NF,4) + 0 : 0
         if (l != "" && $1 >= since) {
@@ -17789,12 +17801,16 @@ cmd_job_stats() {
                 if (etxt == "") etxt = tail
                 sub(/^[0-9-]+ [0-9:]+ - /, "", etxt); gsub(/\t/, " ", etxt)
             }
-            printf "%s\t%s\t%s\t%d\t%s\n", l, (l in bt) ? bt[l] : "-", $1, rc, (etxt == "") ? "-" : substr(etxt, 1, 300)
+            printf "%s\t%s\t%s\t%d\t%s\n", l, (sp[l] > 0) ? bt[l, sp[l]] : "-", $1, rc, (etxt == "") ? "-" : substr(etxt, 1, 300)
         }
-        delete bt[l]; nb = 0; next
+        if (sp[l] > 0) { delete bt[l, sp[l]]; sp[l]-- }
+        if ($1 > lastend[l]) lastend[l] = $1
+        nb = 0; next
     }
     { if (nb < 400) buf[++nb] = $0 }
-    END { for (l in bt) if (bt[l] >= since) printf "%s\t%s\t-\t-1\t-\n", l, bt[l] }')
+    # In progress: the newest open start, and only when no END of its line came after it --
+    # a start a reboot killed stays on the stack and must not read as running for hours.
+    END { for (l in sp) if (sp[l] > 0 && bt[l, sp[l]] >= since && !(bt[l, sp[l]] < lastend[l])) printf "%s\t%s\t-\t-1\t-\n", l, bt[l, sp[l]] }')
         fi
     fi
     # Volume, the digest's way: `written` of every snapshot created since the

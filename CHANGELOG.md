@@ -4,6 +4,36 @@ Every release of this repository is one commit; its message and the `RELEASE-OF`
 development revision it was built from. Releases between tagged versions are listed here only
 when they change how the tool is used.
 
+## [1.0.13] — 2026-11-07
+
+- **Which installation a mail is about.** A new setting, `alerts.site` (F10, or `zfs-backup.sh settings set
+  alerts.site=Site-A --yes`), names the installation. The subject of the daily summary and of an
+  alert mail (immediate mode) then reads `[ZFS] Site-A pve2 ...`; with a sendmail, the sender reads
+  `zfs-backup Site-A pve2`.
+  Without it the subject carries the host's full name (`pve2.example.net`) rather than the bare `pve2`,
+  which several firms can have.
+- **The first copy of a replica carries the history.** A new mirror replica (`snapget.sh -e -M`)
+  used to start from the newest snapshot only, so the older ones never reached it. Its first copy
+  now sends the oldest eligible snapshot in full and then every later one up to the newest. A
+  replica made before this change keeps what it has; only "Start over on this disk" (F6, Enter, `e`) fills it in. `-i` and `-H` keep their
+  own rules.
+- **Excluded families stay excluded inside an incremental.** `zfs send -I` carries every snapshot
+  between its two ends. With `-E` (for example a replica that excludes `__replicate_`), an
+  excluded snapshot between the last common one and the newest still reached the target. This
+  applied to the first copy and to every later run, in `snapget.sh` and `snapsend.sh`. When an
+  excluded snapshot lies in that interval, the engines now send the same data as a chain of `-i`
+  steps through the snapshots that are not excluded. Snapshots copied earlier are not removed.
+- **A family name in `flags` is checked as written.** `-E a*b` in a hand-edited `flags` used to
+  pass the check whenever a file matching `a*b` existed in the directory `gen-cron.sh` ran from.
+- **Runs and job statistics with overlapping runs.** A second start of the same line while the
+  first one still runs ends at once with rc 75; its end took the start time of the real run, so
+  that run showed no duration and the skip counted as a failure. Ends now pair with the newest
+  open start, and rc 75 is not a failure (job table, Runs, the digest).
+- **Last run of a replica.** When a skip (rc 75) and the real run ended in the same minute, the
+  skip could be shown as the last run (0 s, and "ERROR (rc=75)" in the details). The last run is
+  now the one that ended later to the second; a skip does not count in the average or maximum
+  time; the details say "skipped" like the list.
+
 ## [1.0.12] — 2026-11-05
 
 - **apt 404 on a dependency** (first install on a Debian 11 source host): the 404 fallback of
