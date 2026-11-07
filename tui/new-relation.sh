@@ -349,7 +349,7 @@ for x in d.get("datasets", []):
     if n.count("/") == 1 and n.rsplit("/", 1)[1].lower() in ("backups", "backup", "kopie"): print(n)
 json.dump(info, open(sys.argv[1] + ".info", "w", encoding="utf-8"))
 json.dump(anyd, open(sys.argv[1] + ".any", "w", encoding="utf-8"))' "$TMPD/fs.all" | tr -d '\r' >"$TMPD/targets.tsv"
-    # U155 (Dąbrowska 2026-11-04: „mamy manager dysku, chcę nawigować po dysku, a nie pisać
+    # U155 (u klienta 2026-11-04: „mamy manager dysku, chcę nawigować po dysku, a nie pisać
     # ścieżki z palca”): krok otwiera od razu drzewo datasetów tego hosta. Kursor na celu, pod
     # którym są już kopie tych danych (U147), albo na celu relacji / <pula>/backups. Nowy cel:
     # Ins w drzewie, potem sama nazwa. Bez listy datasetów (list-datasets nie odpowiedział) --
@@ -692,7 +692,7 @@ sync_from_chain() {   # -> 0, gdy lustro/backup/kopia lokalna/migawki zdalne i k
     local r n c f e
     for r in ${B_ROOT[@]+"${B_ROOT[@]}"}; do
         while IFS=$'\t' read -r n c f e; do
-            # U138 (Dąbrowska 2026-11-01): korzeń `rpool/data` sam nie ma migawek, mają je dyski
+            # U138 (u klienta 2026-11-01): korzeń `rpool/data` sam nie ma migawek, mają je dyski
             # pod nim (repliki pvesr) -- liczą się też dzieci korzenia. Lustro jak dotąd: sam korzeń.
             if [ "$MODE" = sync ]; then [ "$n" = "$r" ] || continue
             else case "$n" in "$r"|"$r"/*) ;; *) continue ;; esac; fi
@@ -732,7 +732,7 @@ step_passive() {   # U138: kopia lokalna pasywnie, choc na zrodle nie ma jeszcze
     local def=no; [ "${FORCE_PASSIVE:-0}" -eq 1 ] && def=yes
     geom
     wt --title "$(T 'Pasywnie?')" --ok-button "$(T Dalej)" --cancel-button "$(T Wstecz)" --notags --default-item "$def" \
-       --menu "$(T 'Na źródle nie ma jeszcze migawek naszej rodziny. Pasywnie: kopia tylko PRZYJMUJE migawki,\nktóre zrobi ktoś inny (np. relacja migawek zdalnych + replika pvesr), i niczego na źródle\nnie tworzy ani nie kasuje. Do czasu, aż tamte się pojawią, kopia nie ma czego kopiować.')" "$H" "$W" 2 \
+       --menu "$(T 'Na źródle nie ma jeszcze migawek naszej rodziny. Pasywnie: kopia tylko PRZYJMUJE migawki,\nktóre zrobi ktoś inny (np. relacja migawek zdalnych + replika pvesr), i niczego na źródle\nnie tworzy ani nie kasuje. Do czasu, aż tamte się pojawią, kopia nie ma czego kopiować.')\n\n$(T 'Pasywnie = istniejące migawki źródła: idzie stan z ostatniej z nich, nie bieżący; dataset bez migawek nie jest kopiowany.')" "$H" "$W" 2 \
        no "$(T 'Nie -- kopia robi własne migawki')" \
        yes "$(T 'Tak -- pasywnie, przyjmuje cudze migawki (łańcuch)')" || return 1
     [ "$WT_OUT" = yes ] && FORCE_PASSIVE=1 || FORCE_PASSIVE=0
@@ -817,7 +817,7 @@ step_chain() {   # 0 = odpowiedź zapisana, 1 = wstecz
         CHAIN_ANS="$WT_OUT"; CHAIN_FOR="${B_ROOT[*]}"
         return 0
     fi
-    # U153 (właściciel 2026-11-04, Dąbrowska: „strasznie zagmatwany”, „nie wspominasz o pvesr”):
+    # U153 (właściciel 2026-11-04, u klienta: „strasznie zagmatwany”, „nie wspominasz o pvesr”):
     # najczęstsze źródło tych migawek -- replika pvesr -- nazwane wprost, odpowiedzi bez żargonu.
     wt --title "$(title 5 "$(T 'Migawki naszej rodziny już są na źródle')")" --ok-button "$(T Dalej)" --cancel-button "$(T Wstecz)" --notags --default-item "$def" \
        --menu "$(Tv 'Na $HOST są już migawki naszej rodziny:\n$facts\n\nSkąd się tu wzięły? Najczęściej przynosi je replikacja Proxmox (pvesr)\nz drugiego węzła, rzadziej robi je inna relacja. Świeże (sprzed 1-2 godz.)\nznaczą, że ktoś je wciąż robi.\n\nPrzyjmuję: kopia bierze te migawki; na źródle nic nie tworzy ani nie kasuje.\nResztki: nikt ich już nie robi -- kopia robi własne; stare z czasem znikną.' '$HOST' "$(T 'źródle') $( [ -n "$HOST" ] && hostw || hostname -s)" '$facts' "$facts")" "$H" "$W" 2 \
@@ -1425,6 +1425,8 @@ step_summary() {    # 0 = wykonano (RC_RUN), 1 = wstecz, 2 = do datasetów, 3 = 
           elif [ "$MODE" = snaponly ]; then echo "$(Tv 'Bez kopii: migawki na $HOST, jego datasety.  Szablon: $PROFILE.' '$HOST' "$(hostw)" '$PROFILE' "$PROFILE")"
                [ -n "$FP_P" ] && echo "$(Tv 'Krótka retencja $FASTPRUNE h: szablon relacji $FP_P (kopia $PROFILE).' '$FASTPRUNE' "$FASTPRUNE" '$FP_P' "$FP_P" '$PROFILE' "$PROFILE")"
           else echo "$(T 'Cel:') ${TARGET:-$(T '(lustro: ta sama ścieżka)')}.  $(Tv 'Trzyma tutaj: $PROFILE.  U źródła:' '$PROFILE' "$PROFILE") $(if is_passive_copy; then T 'nic (pasywnie)'; else printf '%s' "${SRCPROF:-$(T 'jak tutaj')}"; fi)."; fi
+          if [ "$MODE" != snaponly ] && [ "$NOCOPY" -eq 0 ] && { is_passive_copy || passive_forced; }; then
+              echo "$(T 'Pasywnie = istniejące migawki źródła: idzie stan z ostatniej z nich, nie bieżący; dataset bez migawek nie jest kopiowany.')"; fi
           if [ "$MODE" = snaponly ] || [ "$NOCOPY" -eq 1 ]; then :
           elif [ -n "$EXFAM" ]; then echo "$(T 'Pomijane migawki z prefiksami:') ${EXFAM//,/, }."
           else echo "$(T 'Pomijane migawki: żadne (kopiowane wszystkie).')"; fi
