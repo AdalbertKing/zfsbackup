@@ -67,9 +67,14 @@ fi
 # repliki; plan ją wtedy odnawia (install-media-trigger --install), jak brakującą.
 RULE_HERE=no; grep -qs 'Managed by zfs-backup.sh install-media-trigger' "$RULES" && RULE_HERE=yes
 [ "$RULE_HERE" = yes ] && ! grep -qs 'run-replicas --on-insert' "$RULES" && RULE_HERE=old
-# Reguła do 1.0.15 była łamana na dwie linie (odwrotny ukośnik na końcu); systemd-udevd 247
-# ją odrzucał, więc włożenie dysku nic nie uruchamiało (pve1, 2026-11-09). Taka też jest "stara".
-[ "$RULE_HERE" = yes ] && grep -qs '[\\]$' "$RULES" && RULE_HERE=old
+# Reguła do 1.0.15 miała odwrotny ukośnik przed RUN+= -- na hoście wyszła jedna linia
+# '... zfs_member", \  RUN+="..."' (pve1, 2026-11-09); systemd-udevd 247 ją odrzucał, więc
+# włożenie dysku nic nie uruchamiało. Bieżąca reguła nie ma ukośnika w żadnej linii poza
+# komentarzami, więc każdy taki ukośnik (w środku albo na końcu linii) znaczy "stara".
+[ "$RULE_HERE" = yes ] && grep -qs '^[^#].*[\\]' "$RULES" && RULE_HERE=old
+# Reguła bez systemd-run --collect: nieudany bieg zostawiał jednostkę "failed" i każde
+# następne włożenie dysku pod tą samą nazwą jądra było odrzucane (pve1, 2026-11-09).
+[ "$RULE_HERE" = yes ] && ! grep -qs -- '--collect' "$RULES" && RULE_HERE=old
 
 # Lądowiska relacji na tym kolektorze (managed_datasets z status --json): replika,
 # której źródło je obejmuje, ma domyślnie NIE robić własnych migawek (uwaga 20).
@@ -201,6 +206,8 @@ prep_media() {   # <pula> <baza> -> PREP_DST, PREP_GUID ; 0 = sformatowany, 1 = 
         wt --title "$(T 'Czasownik odmówił -- nic nie zmieniono')" --msgbox "$(grep -E 'FATAL' "$TMPD/prep.plan" | sed 's/^FATAL: //' | fold -s -w $((W - 6)))" 12 "$W"
         return 1
     fi
+    # Wiersz CLI ("Re-run with --yes") nie jest dla okna: tu zatwierdza przycisk (pve1, 2026-11-09).
+    sed -i '/^>>> plan only/d' "$TMPD/prep.plan"
     yesno_text "$TMPD/prep.plan" "$(Tv 'Replika $NAME -- formatowanie nośnika' '$NAME' "$NAME")" "$(T 'Sformatuj (KASUJE dysk)')" "$(T Wstecz)" --defaultno || return 1
     info "$(Tv 'Replika $NAME -- nośnik' '$NAME' "$NAME")" "$(Tv 'Formatuję $dev...' '$dev' "$dev")"
     if ! "$ZB" prepare-media "$pool" "$dev" --base="$base" "${enc[@]}" --yes >"$TMPD/prep.log" 2>&1; then
