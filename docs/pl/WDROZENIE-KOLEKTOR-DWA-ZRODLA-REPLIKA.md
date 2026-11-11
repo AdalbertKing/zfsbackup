@@ -224,9 +224,9 @@ polecenie raz jeszcze i sprawdź, że
 
 Po włożeniu dysku i zwłoce (`replica.insert_wait`, domyślnie 60 s) ruszają tylko repliki,
 których nośnikiem jest ten dysk: po GUID puli, gdy replika ma listę dysków, inaczej po nazwie
-puli (reguła podaje urządzenie, `blkid` czyta z niego pulę; gdy nic nie odczyta, ruszają
-wszystkie repliki „po włożeniu”, jak dotąd). Inny dysk ZFS (np. dopiero
-co sformatowany, zanim kreator zapisze jego GUID) nie uruchamia niczego i nie daje alarmu;
+puli (reguła podaje urządzenie, `blkid` czyta z niego pulę; gdy nie odczyta ani nazwy, ani
+GUID, nie rusza żadna replika, a w logu jest o tym jedna linia -- od następnego wydania po 1.0.17). Inny dysk ZFS (np. dopiero
+co sformatowany, zanim kreator zapisze jego GUID) nie uruchamia repliki, która ma listę dysków (GUID), i nie daje alarmu;
 w logu zostaje po jednej linii na pominiętą replikę. Reguła wywołuje `systemd-run --collect`, więc nieudany bieg nie
 blokuje następnych włożeń. Regułę bez `--collect` kreator repliki odnawia w planie.
 
@@ -487,6 +487,12 @@ ponów to samo polecenie.
 `remove-replica` na **ostatnim** zadaniu w configu zdejmuje cały blok zarządzany
 i mówi o tym wprost. Żaden z tych czasowników nie kasuje datasetów ani kopii na
 nośniku: „unpairing ends the relationship, not the backup".
+
+`remove-replica --install` usuwa też pliki stanu repliki w
+`/var/lib/zfs-snapshot-all/media/` (`<nazwa>.current`, `.synced`, `.last-seen` i rekordy
+biegu), więc nowa replika o tej samej nazwie zaczyna od zera. Kopia, która właśnie biegnie,
+jest wymieniona w planie i nie jest przerywana: dobiega do końca, odłącza dysk i do tego
+czasu zachowuje własne rekordy biegu.
 
 **Kopii na nośniku pakiet nie kasuje** — nie ma na to osobnego czasownika. Dysk
 czyści się formatowaniem: w GUI zmiana repliki -> „Dodaj dysk".

@@ -228,9 +228,9 @@ run the command once more and check that
 After a disk is connected and the delay has passed (`replica.insert_wait`, 60 s by default),
 only the replicas whose medium this disk is start: by pool GUID when the replica lists its
 disks, otherwise by pool name (the rule passes the device and `blkid` reads its pool; when it
-reads nothing, every on-insert replica starts, as before).
+reads neither the name nor the GUID, no replica starts and one log line says so -- from the release after 1.0.17).
 Another ZFS disk (for example one just formatted, before the wizard saves its GUID) starts
-nothing and raises no alert; the log keeps one line per replica skipped. The rule calls `systemd-run --collect`,
+no replica that lists its disks (GUIDs) and raises no alert; the log keeps one line per replica skipped. The rule calls `systemd-run --collect`,
 so a failed run does not block later connections. The replica wizard renews a rule without
 `--collect` in its plan.
 
@@ -494,6 +494,12 @@ unclosed `zfs unallow` (an old manual grant), run the `zfs unallow -u <uid>
 `remove-replica` on the **last** job in the config removes the whole managed block
 and says so outright. None of these verbs deletes datasets or the copies on the
 medium: "unpairing ends the relationship, not the backup".
+
+`remove-replica --install` also removes the replica's state files in
+`/var/lib/zfs-snapshot-all/media/` (`<name>.current`, `.synced`, `.last-seen`, and the run
+records), so a new replica of the same name starts clean. A copy running at that moment is
+named in the plan and is not stopped: it runs to its end, exports the disk, and keeps its own
+run records until then.
 
 **The package does not delete the copies on the medium** — there is no separate verb
 for that. The disk is cleaned by formatting: in the GUI, change the replica ->
