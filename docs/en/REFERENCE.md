@@ -100,7 +100,7 @@ These are the names the GUI uses.
 | Kind | What it does | Engine |
 |---|---|---|
 | backup | The collector pulls datasets of a source into its own target and keeps a tiered history on both sides | `snapget.sh`, `delsnaps.sh` |
-| mirror (lustro) | Sync mode: the collector holds the source's datasets at the same paths and, after each pull, destroys the target snapshots the source no longer has (`snapget.sh -M`) | `snapget.sh -M` |
+| mirror (lustro) | Sync mode: the collector holds the source's datasets at the same paths and, after each pull, destroys the target snapshots the source no longer has, judged by GUID (`snapget.sh -M`) | `snapget.sh -M` |
 | local copy (kopia lokalna) | A copy of local datasets onto another local pool, run by root or a named account | `snapget.sh` with a local source |
 | local snapshots (migawki lokalne) | Snapshots on the source, pruned in place, nothing copied (`--target=''`) | `snapsend.sh`, `delsnaps.sh` |
 | remote snapshots (migawki zdalne) | The collector takes snapshots on a remote source and copies nothing (`[snaponly:]` section, `snapget.sh -s`) | `snapget.sh -s`, `delsnaps.sh` |
@@ -183,6 +183,12 @@ target (the hourlies of a collector outage, for example). `zfs send -I` does not
 bookmark, so the increment goes in two steps: `-i` from the bookmark to the oldest source snapshot
 after it that `-E` does not exclude, then the usual `-I` to the newest, so the snapshots the source made in the meantime
 reach the target too.
+
+An increment from a bookmark gets the same checks as one from a common snapshot. On a sync or
+exact (`-t`) target that was written to after its newest snapshot, the run refuses rather than
+let `zfs recv -F` roll the write back. When the snapshots between the bookmark and the newest
+cannot be listed in full, the run refuses and the next run tries again; a single diff would skip them
+for good. `-T` measures the interval from the bookmark's creation time.
 
 Bookmark names are `tgt-<8 hex chars>`, a hash of the target dataset path (and of the `-j`
 identifier, if any). Nothing else on the source touches them, so exactly one bookmark per
@@ -578,7 +584,7 @@ freeze runs there. Three flags exist only here:
 
 | Flag | Meaning |
 |---|---|
-| `-M` | Mirror (sync relations): after a successful pull, destroy on the target every snapshot the source no longer has that is OLDER than the common base, so the target holds what the source holds. Never the base or anything newer, never a Proxmox-reserved family, and nothing at all when the source list cannot be read or comes back empty. Decided per dataset, so with `-R` every expanded child mirrors its own source. Not with `-r` |
+| `-M` | Mirror (sync relations): after a successful pull, destroy on the target every snapshot the source no longer has (no source snapshot carries its GUID, under any name, so a renamed snapshot stays) that is OLDER than the common base, so the target holds what the source holds. Never the base or anything newer, never a Proxmox-reserved family, and nothing at all when the source list or either side's GUID list cannot be read or the source list comes back empty. Decided per dataset, so with `-R` every expanded child mirrors its own source. Not with `-r` |
 | `-s` | Snapshot-only, no transfer: takes the source snapshot(s) where the source lives (over ssh for `[user@]host:dataset`, locally for a bare dataset) and stops: nothing is sent, received, held, bookmarked, mirrored or created here. For datasets that another mechanism already copies (`pvesr` in a Proxmox cluster) and that only need this relation's own snapshot family. Takes exactly one positional argument (the source list); a target argument and every flag that only shapes a transfer are refused before any ssh or snapshot (`-e -t -M -f -F`, and `-z -Z -g -N -l -A -b -H -i -T -w -o -x -u -U -E`). `-m -j -v -n -r -R -X -S -q -Q -L -p -k -K -O -c` stay. Needs neither mbuffer nor a compressor. `-n` prints one `PLAN=SNAPSHOT-ONLY src=<dataset>` line per selected dataset. Stats status is `snapshot_only` or `snapshot_only_failed`, never `success` |
 | `-Q <SECONDS>` | How long the remote deadman waits before thawing unconditionally (default 120, minimum 10). Only meaningful with `-q` |
 
@@ -951,7 +957,7 @@ A header is always `[type:name]`, split on the first `:`, except `[defaults]`.
 | `[dataset:<path>]` | A dataset you own end to end. `use_template` or `relation`, plus per-dataset fields. Runs create(+send/pull) and an inline self-prune scoped to its own path (or its subtree with `recursive`). `dst` makes it a push (the section path is the local source), `src = [user@]host:path` makes it a pull (the section path is the local destination and must end with `path` verbatim); both on one section is rejected. Also: `flags` (identity only: `-K -k -O -p`), `flags_<tier>`, `send_schedule_<tier>`, `prune_schedule_<tier>`, `quiesce`, `autotune`, `pair_label`, and the link and scope fields `bandwidth`, `compression`, `cipher`, `history`, `raw`, `passive` (adopt the newest existing snapshot, `-e`), `exclude_family` (`-E`), `exclude_child_<n>` (`-X`, numbered from 1), `media`, `prune_foreign` |
 | `[prune:<scope>]` | Standalone additive prune for scopes you do **not** create locally (a backup store, the source of a pull). `recursive=`/`clear_cut=` opt in to `-R`/`-F`; `prune = no` makes the section a monitor carrier only; `ssh_flags` for a remote (`host:path`) scope; `gfs = yes` plus `gfs_pattern` combine all tiers into one `-G` ladder. A `[prune:]` never sends, so transfer fields are refused |
 | `[snaponly:<[user@]host:dataset>]` | Snapshots on a remote source, taken by `snapget.sh -s`, nothing copied. The section name is the source. Tiers come from `use_template`; `pair_label` is required; also `recursive`, `notify`, `notify_raw`, `ssh_flags`. A target, engine flags or target-side prune fields are refused. The source's retention is a `[prune:<scope>]` with `side = source` |
-| `[replica:<name>]` | Another copy of a dataset this host already holds, usually onto a removable disk. `source` (local datasets, comma list), `dst` (a base dataset on the medium, never a pool root and never remote), `schedule`, `prefix` or `passive = yes`, `media = removable`, `media_guids`, `on_insert`, `recursive`, `keep`, `history`, `raw`, `flags`, `notify`, and `monitor`/`monitor_warn`/`monitor_crit`. The name only labels the medium; a source may have several replicas |
+| `[replica:<name>]` | Another copy of a dataset this host already holds, usually onto a removable disk. `source` (datasets, comma list; always local, a name holding `:` too, e.g. `tank/data:part`), `dst` (a base dataset on the medium, never a pool root and never remote), `schedule`, `prefix` or `passive = yes`, `media = removable`, `media_guids`, `on_insert`, `recursive`, `keep`, `history`, `raw`, `flags`, `notify`, and `monitor`/`monitor_warn`/`monitor_crit`. The name only labels the medium; a source may have several replicas |
 | `[excluded:<prefix>]` | How many of the **newest** snapshots carrying a Proxmox-reserved prefix to protect, per dataset: `keep = <N>` or `keep = all`. Emits `-P` onto every snapshot-prune line |
 | `[prune-bookmarks:<scope>]` | Age-based cleanup of orphaned bookmarks: `schedule`, `age` (raw `delsnaps.sh` age flags, required), `pattern` (default `tgt-`), `recursive`, `ssh_flags` for a remote scope, `notify` |
 

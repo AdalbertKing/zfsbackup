@@ -4,6 +4,41 @@ Every release of this repository is one commit; its message and the `RELEASE-OF`
 development revision it was built from. Releases between tagged versions are listed here only
 when they change how the tool is used.
 
+## [1.0.20] — 2026-11-12
+
+- **A mirror keeps a snapshot that was renamed on the source** (REV-20261112-196). `-M` (sync
+  relations, removable replicas) now decides "gone from the source" by GUID. A snapshot renamed
+  on either side stays. A snapshot that only shares a name with a source snapshot, with another
+  GUID, is not on the source. When either side's GUID list cannot be read, or does not name
+  exactly the snapshots of its name list (empty, partial, or changed while read), nothing is
+  deleted.
+- **The bookmark path keeps the safety checks** (REV-20261112-195):
+  - A push onto a sync or exact (`-t`) path whose copy was written to after its newest snapshot
+    is refused there too. Before, a bookmark-backed increment skipped that check and `zfs recv -F`
+    rolled the write back.
+  - When the snapshots between a bookmark and the newest one cannot be listed in full, the run refuses
+    and the next run tries again. Before, it sent a single diff and those snapshots never arrived.
+  - `-T` applies to an increment from a bookmark too, measured from the bookmark's creation.
+- **A release refuses a change no review covers** (`release/coverage-gate.sh`). The gate compares
+  the run-time package of the published release (read from the release repo's `origin/main`) with
+  the candidate. Every shipped file that changed, was newly shipped or stopped being shipped must
+  be reached through submitted review ranges: each response names `implementation:` and
+  `<!-- base: <sha> -->`. That includes edits made inside a merge. A file's state is its mode
+  and its bytes after the release scrub, so a chmod or a scrub change that rewrites a shipped
+  file needs a review as well. A resubmission of the same review keeps its earlier ranges as
+  `<!-- submitted: <base> <sha> -->` lines, so narrowing `base:` does not drop earlier work.
+- **Attaching a removable replica medium** (REV-20261112-194):
+  - A replica source whose name holds `:` (`tank/data:part`) is copied as a local dataset.
+    Before, the engine read the part before the `:` as an ssh host, while the media gate
+    checked the name as given.
+  - A medium is refused as "a different lineage" only when no target snapshot shares a GUID
+    with a source snapshot or bookmark. A snapshot renamed on either side counts. Unreadable
+    evidence no longer leads to a refusal or to `zfs destroy` advice.
+  - A medium imported before the run (by an interrupted run of ours or by an operator) gets
+    the same lineage and free-space checks. On refusal an operator's import stays imported.
+  - A source tree that cannot be listed in full no longer counts as "no new data", so the copy
+    is not skipped on that basis.
+
 ## [1.0.19] — 2026-11-12
 
 - **A copy no longer loses snapshots the source pruned while the collector was away.** When the

@@ -100,7 +100,7 @@ Takich nazw używa GUI.
 | Rodzaj | Co robi | Silnik |
 |---|---|---|
 | backup | Kolektor pobiera datasety źródła do własnego celu i trzyma warstwową historię po obu stronach | `snapget.sh`, `delsnaps.sh` |
-| lustro (mirror) | Tryb sync: kolektor trzyma datasety źródła pod tymi samymi ścieżkami i po każdym pobraniu niszczy migawki celu, których źródło już nie ma (`snapget.sh -M`) | `snapget.sh -M` |
+| lustro (mirror) | Tryb sync: kolektor trzyma datasety źródła pod tymi samymi ścieżkami i po każdym pobraniu niszczy migawki celu, których źródło już nie ma, rozpoznawane po GUID (`snapget.sh -M`) | `snapget.sh -M` |
 | kopia lokalna (local copy) | Kopia lokalnych datasetów na inną lokalną pulę, uruchamiana przez roota lub wskazane konto | `snapget.sh` z lokalnym źródłem |
 | migawki lokalne (local snapshots) | Migawki na źródle, prune w miejscu, nic nie jest kopiowane (`--target=''`) | `snapsend.sh`, `delsnaps.sh` |
 | migawki zdalne (remote snapshots) | Kolektor robi migawki na zdalnym źródle i niczego nie kopiuje (sekcja `[snaponly:]`, `snapget.sh -s`) | `snapget.sh -s`, `delsnaps.sh` |
@@ -182,6 +182,12 @@ migawka i `zfs recv -F` kasował na celu wszystkie nowsze (np. godzinowe po prze
 `zfs send -I` nie przyjmuje bookmarka, więc przyrost idzie w dwóch krokach: `-i` z bookmarka do
 najstarszej migawki źródła po nim, której `-E` nie wyklucza, potem zwykłe `-I` do najnowszej, i migawki zrobione na źródle w
 międzyczasie też docierają na cel.
+
+Przyrost z bookmarka przechodzi te same kontrole co przyrost ze wspólnej migawki. Na celu sync
+albo dokładnym (`-t`), do którego coś zapisano po jego najnowszej migawce, przebieg odmawia,
+zamiast pozwolić `zfs recv -F` cofnąć ten zapis. Gdy nie da się w pełni wylistować migawek między
+bookmarkiem a najnowszą, przebieg odmawia, a następny próbuje znowu; pojedyncza różnica pominęłaby
+je na zawsze. `-T` liczy odstęp od chwili utworzenia bookmarka.
 
 Nazwy bookmarków mają postać `tgt-<8 znaków hex>`: to skrót ścieżki datasetu celu (oraz
 identyfikatora `-j`, jeśli jest). Nic innego na źródle ich nie rusza, więc dokładnie jeden bookmark
@@ -582,7 +588,7 @@ zamrożenie odbywa się tam. Trzy flagi istnieją tylko tutaj:
 
 | Flaga | Znaczenie |
 |---|---|
-| `-M` | Lustro (relacje sync): po udanym pobraniu zniszcz na celu każdą migawkę, której źródło już nie ma, a która jest STARSZA niż wspólna baza, żeby cel trzymał to, co źródło. Nigdy bazy ani niczego nowszego, nigdy zarezerwowanej rodziny Proxmoxa, i nic w ogóle, gdy lista źródła nie daje się odczytać albo wraca pusta. Rozstrzygane per dataset, więc przy `-R` każde rozwinięte dziecko lustruje swoje własne źródło. Nie z `-r` |
+| `-M` | Lustro (relacje sync): po udanym pobraniu zniszcz na celu każdą migawkę, której źródło już nie ma (żadna migawka źródła nie ma jej GUID, pod żadną nazwą, więc migawka o zmienionej nazwie zostaje), a która jest STARSZA niż wspólna baza, żeby cel trzymał to, co źródło. Nigdy bazy ani niczego nowszego, nigdy zarezerwowanej rodziny Proxmoxa, i nic w ogóle, gdy nie daje się odczytać lista źródła albo lista GUID którejś strony, albo gdy lista źródła wraca pusta. Rozstrzygane per dataset, więc przy `-R` każde rozwinięte dziecko lustruje swoje własne źródło. Nie z `-r` |
 | `-s` | Tylko migawki, bez transferu: robi migawkę (migawki) źródła tam, gdzie źródło żyje (przez ssh dla `[user@]host:dataset`, lokalnie dla samego datasetu) i na tym kończy: nic nie jest wysyłane, odbierane, trzymane holdem, bookmarkowane, lustrowane ani tworzone tutaj. Dla datasetów, które inny mechanizm już kopiuje (`pvesr` w klastrze Proxmoxa) i które potrzebują tylko własnej rodziny migawek tej relacji. Przyjmuje dokładnie jeden argument pozycyjny (listę źródeł); argument celu i każda flaga, która tylko kształtuje transfer, są odrzucane przed jakimkolwiek ssh czy migawką (`-e -t -M -f -F` oraz `-z -Z -g -N -l -A -b -H -i -T -w -o -x -u -U -E`). `-m -j -v -n -r -R -X -S -q -Q -L -p -k -K -O -c` zostają. Nie potrzebuje ani mbuffera, ani kompresora. `-n` wypisuje jedną linię `PLAN=SNAPSHOT-ONLY src=<dataset>` na każdy wybrany dataset. Status w statystykach to `snapshot_only` lub `snapshot_only_failed`, nigdy `success` |
 | `-Q <SEKUNDY>` | Jak długo zdalny deadman czeka, zanim odmrozi bezwarunkowo (domyślnie 120, minimum 10). Ma sens tylko z `-q` |
 
@@ -967,7 +973,7 @@ Nagłówek ma zawsze postać `[type:name]`, dzieloną na pierwszym `:`, z wyjąt
 | `[dataset:<path>]` | Dataset, którym zarządzasz od początku do końca. `use_template` lub `relation`, plus pola per dataset. Wykonuje create(+send/pull) i wbudowany self-prune ograniczony do własnej ścieżki (albo jej poddrzewa przy `recursive`). `dst` czyni z niego wysyłkę (ścieżka sekcji to lokalne źródło), `src = [user@]host:path` czyni z niego pobranie (ścieżka sekcji to lokalny cel i musi kończyć się dokładnie `path`); oba na jednej sekcji są odrzucane. Ponadto: `flags` (tylko tożsamość: `-K -k -O -p`), `flags_<tier>`, `send_schedule_<tier>`, `prune_schedule_<tier>`, `quiesce`, `autotune`, `pair_label` oraz pola łącza i zakresu `bandwidth`, `compression`, `cipher`, `history`, `raw`, `passive` (przejmij najnowszą istniejącą migawkę, `-e`), `exclude_family` (`-E`), `exclude_child_<n>` (`-X`, numerowane od 1), `media`, `prune_foreign` |
 | `[prune:<scope>]` | Samodzielny, addytywny prune dla zakresów, których lokalnie **nie** tworzysz (magazyn kopii, źródło pobrania). `recursive=`/`clear_cut=` włączają `-R`/`-F`; `prune = no` czyni z sekcji wyłącznie nośnik strażnika; `ssh_flags` dla zakresu zdalnego (`host:path`); `gfs = yes` plus `gfs_pattern` łączą wszystkie szczeble w jedną drabinę `-G`. `[prune:]` nigdy nie wysyła, więc pola transferu są odrzucane |
 | `[snaponly:<[user@]host:dataset>]` | Migawki na zdalnym źródle, robione przez `snapget.sh -s`, bez kopiowania czegokolwiek. Nazwa sekcji to źródło. Szczeble pochodzą z `use_template`; `pair_label` jest wymagane; ponadto `recursive`, `notify`, `notify_raw`, `ssh_flags`. Cel, flagi silnika i pola prune po stronie celu są odrzucane. Retencja źródła to `[prune:<scope>]` z `side = source` |
-| `[replica:<name>]` | Kolejna kopia datasetu, który ten host już ma, zwykle na dysk wymienny. `source` (lokalne datasety, lista rozdzielona przecinkami), `dst` (bazowy dataset na nośniku, nigdy korzeń puli i nigdy zdalny), `schedule`, `prefix` lub `passive = yes`, `media = removable`, `media_guids`, `on_insert`, `recursive`, `keep`, `history`, `raw`, `flags`, `notify` oraz `monitor`/`monitor_warn`/`monitor_crit`. Nazwa tylko opisuje nośnik; źródło może mieć kilka replik |
+| `[replica:<name>]` | Kolejna kopia datasetu, który ten host już ma, zwykle na dysk wymienny. `source` (lokalne datasety, lista rozdzielona przecinkami; zawsze lokalne, także nazwa z `:`, np. `tank/dane:czesc`), `dst` (bazowy dataset na nośniku, nigdy korzeń puli i nigdy zdalny), `schedule`, `prefix` lub `passive = yes`, `media = removable`, `media_guids`, `on_insert`, `recursive`, `keep`, `history`, `raw`, `flags`, `notify` oraz `monitor`/`monitor_warn`/`monitor_crit`. Nazwa tylko opisuje nośnik; źródło może mieć kilka replik |
 | `[excluded:<prefix>]` | Ile **najnowszych** migawek z zarezerwowanym przez Proxmoxa prefiksem chronić, per dataset: `keep = <N>` lub `keep = all`. Dokłada `-P` do każdej linii prune migawek |
 | `[prune-bookmarks:<scope>]` | Czyszczenie osieroconych bookmarków według wieku: `schedule`, `age` (surowe flagi wieku `delsnaps.sh`, wymagane), `pattern` (domyślnie `tgt-`), `recursive`, `ssh_flags` dla zakresu zdalnego, `notify` |
 
