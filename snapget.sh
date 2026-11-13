@@ -33,7 +33,27 @@ set -o pipefail
 #                    instruction. They are twins: a capability in one direction
 #                    and not the other is how the two drift, and test/twins
 #                    exists because that has happened before.
-#   -e               Use existing latest snapshot on source instead of creating a new one
+#   -e               Use existing latest snapshot on source instead of creating a new one.
+#                    The Proxmox-reserved families (__replicate_, vzdump,
+#                    __migration__) are never adopted under -e, with or without
+#                    -E, unless -m names that family (-e -m __replicate_)
+#                    (2026-11-12, W5): pvesr replaces __replicate_ every few
+#                    minutes, so it was nearly always "the newest", and -M never
+#                    removes a reserved family from the target.
+#   --source-keep=N  After a SUCCESSFUL non-recursive pull of a snapshot this run
+#                    made with -m, destroy on the SOURCE this job's own older
+#                    snapshots (-m prefix + this engine's timestamp, or its
+#                    quiesce crash form) beyond the N newest (2026-11-12, W5:
+#                    an active replica's snapshots piled up on both pvesr nodes).
+#                    The per-target bookmark keeps the next increment possible.
+#                    Only snapshots a run of THIS target made (stamped on the
+#                    source, zfsbackup:srckeep-owner, naming the target path and
+#                    its pool GUID, so rotating disks differ) and the target holds
+#                    (by GUID): another medium of the same family never loses
+#                    its base; unstamped ones stay (REV-20261112-197).
+#                    Needs -m and -i; not with -e or -s; under -r nothing is
+#                    pruned (level 1).
+#                    A failed listing or destroy is a warning, never a failed run.
 #   -z               Compress the data stream (default compressor: zstd). Redundant
 #                    against a remote source -- see "COMPRESSION DEFAULT" below,
 #                    this is now ON by default there. Ignored, with a log line,
@@ -537,6 +557,7 @@ PORT=22
 TARGET_EXACT=0
 USE_EXISTING_SNAPSHOT=0
 declare -a EXCLUDE_SNAPS=()
+SOURCE_KEEP=0      # --source-keep=N (W5, 2026-11-12); 0 = never touch the source
 # -q: quiesce the Proxmox guest that owns each SOURCE dataset before
 # snapshotting it. Unlike snapsend.sh's -q, the guest is on the REMOTE host
 # here, so the whole freeze/snapshot/thaw runs in one remote invocation --
@@ -1102,6 +1123,11 @@ snapshot_only_dataset() {
         return 0
     fi
     if [ $QUIESCE_SNAPPED -eq 1 ]; then
+        # Round 5 (F1e): report it only if it is there.
+        if [ -z "$(get_snapshot_guid "$src_dataset" "${SNAP_MESSAGE}${RUN_SUFFIX}" "$remote_user" "$remote_host")" ]; then
+            log 0 "Snapshot-only: ${src_dataset}@${SNAP_MESSAGE}${RUN_SUFFIX} is not on ${remote_host:-this host} after the quiesce window -- failing"
+            return 1
+        fi
         log 1 "Snapshot-only: ${src_dataset}@${SNAP_MESSAGE}${RUN_SUFFIX} was taken inside the quiesce window -- no second snapshot"
         return 0
     fi
@@ -1297,6 +1323,125 @@ guest_disk_is_live() {   # <dataset> -> 0 if it IS a live guest disk, 1 otherwis
 # target is then not provable). Proxmox-reserved families are never touched.
 # A snapshot that will not die (held, busy) is reported and left; the run
 # still fails so somebody looks.
+# --source-keep=N (W5, 2026-11-12). An active replica (-m P, keep on the medium) made a
+# snapshot on the SOURCE every run and nothing ever removed it there: on a guest that
+# pvesr replicates, every one of them also went to the other node. After a successful
+# pull this destroys the job's OWN older snapshots on the source beyond the N newest.
+#   own = <MESSAGE><timestamp> or <crash form of MESSAGE><timestamp>, the two names this
+#         engine gives (create_snapshot, quiesce_crash_message) -- exact, so another
+#         job's "replica_usb2_<ts>" is not "replica_<ts>";
+#   only snapshots at or before the one just sent, in createtxg order -- a newer one
+#         (made concurrently) is never in the set;
+#   nothing when the listing fails or the sent snapshot is not in it;
+#   only snapshots THIS target holds, by GUID (REV-20261112-197). Two media of one
+#   replica share the family (same -m): B's run must never take the base of A, whose
+#   bookmark refresh may have failed or not happened yet -- record_send_bookmark is
+#   best-effort and runs after the hold is released. Holding is not enough, see
+#   round 2 below: only snapshots stamped as THIS target's own count. A prunes A's
+#   stamped snapshots itself, on A's run, and never its own head; B never touches
+#   them. Correctness does not depend on any bookmark.
+#
+# Round 2 (REV-20261112-197 re-review): a GUID on this target is NOT proof that the
+# snapshot is this target's own -- history copied before (a history-all run, an -H
+# seed, an import) can put A's base on B as well. So ownership is recorded where it
+# is created: the run that makes the snapshot for a --source-keep job stamps it on
+# the source with SOURCE_OWNER_PROP = this target's tag (source_owner_tag: the
+# target, -j and, since round 3, the target pool's GUID). Only snapshots carrying THIS target's stamp AND held by this
+# target are prunable. An unstamped snapshot (made before, by hand, by another job,
+# or when the stamp could not be set) is ambiguous and stays on the source.
+SOURCE_OWNER_PROP="zfsbackup:srckeep-owner"
+
+# Round 3 (F1c): two rotating disks share the target path (same pool name and base,
+# different pool GUIDs admitted by media_guids), so the path alone names both. The
+# owner is the target path, -j AND the GUID of the pool that holds the target -- the
+# physical medium. An unreadable pool GUID gives no owner: nothing stamped, nothing
+# pruned.
+source_owner_tag() {   # <tgt_dataset> -> tag on stdout, rc 1 when the pool GUID is unreadable
+    local pg
+    pg=$(zpool get -H -o value guid "${1%%/*}" 2>/dev/null) || return 1
+    [[ "$pg" =~ ^[0-9]+$ ]] || return 1
+    bookmark_target_tag "$1" "${IDENTIFIER}:pool-guid:$pg"
+}
+
+mark_source_owner() {   # <src_dataset@snap> <tgt_dataset> [remote_user remote_host]
+    local snap="$1" tag ruser="${3:-}" rhost="${4:-}"
+    if ! tag=$(source_owner_tag "$2"); then
+        log 1 "Warning: --source-keep: cannot read the pool GUID of '$2' -- '$snap' is not marked and will never be pruned by --source-keep"
+        return 0
+    fi
+    if [ -n "$rhost" ]; then
+        ssh -n "${SSH_OPTS[@]}" "$ruser@$rhost" "zfs set $SOURCE_OWNER_PROP=$tag '$snap'"
+    else
+        zfs set "$SOURCE_OWNER_PROP=$tag" "$snap"
+    fi || log 1 "Warning: --source-keep: cannot mark '$snap' as this target's own -- it will never be pruned by --source-keep"
+    return 0
+}
+
+prune_source_family() {   # <src_dataset> <sent_snap> <tgt_dataset> [remote_user remote_host]
+    local src="$1" sent="$2" tgt="$3" ruser="${4:-}" rhost="${5:-}" list rc crash s n g o i idx=-1
+    local ts='[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+    local own=() doomed=() gone=0 stuck=0 d tguids mytag
+    if ! mytag=$(source_owner_tag "$tgt"); then
+        log 1 "Warning: --source-keep: cannot read the pool GUID of '$tgt' -- nothing pruned"
+        return 0
+    fi
+    if [ "${DRY_RUN:-0}" -eq 1 ]; then
+        log 1 "--source-keep=$SOURCE_KEEP: dry run -- the job's own snapshots on '$src' that '$tgt' holds, beyond the $SOURCE_KEEP newest, would be destroyed"
+        return 0
+    fi
+    crash="$(quiesce_crash_message "$MESSAGE")"
+    # The target is local in snapget.sh. An unreadable or empty answer is never "this
+    # medium holds nothing": nothing is pruned.
+    tguids=$(zfs list -H -o guid -t snapshot -d 1 "$tgt" 2>/dev/null); rc=$?
+    if [ $rc -ne 0 ] || [ -z "$tguids" ]; then
+        log 1 "Warning: --source-keep: cannot list the snapshots of the target '$tgt' -- nothing pruned"
+        return 0
+    fi
+    if [ -n "$rhost" ]; then
+        list=$(ssh -n "${SSH_OPTS[@]}" "$ruser@$rhost" "zfs list -H -o name,guid,$SOURCE_OWNER_PROP -s createtxg -t snapshot -d 1 '$src'"); rc=$?
+    else
+        list=$(zfs list -H -o "name,guid,$SOURCE_OWNER_PROP" -s createtxg -t snapshot -d 1 "$src"); rc=$?
+    fi
+    if [ $rc -ne 0 ]; then
+        log 1 "Warning: --source-keep: cannot list the snapshots of '$src'${rhost:+ on $rhost} -- nothing pruned"
+        return 0
+    fi
+    while IFS=$'\t' read -r s g o; do
+        n="${s#"$src"@}"
+        [ -n "$s" ] && [ "$n" != "$s" ] || continue
+        [[ "$g" =~ ^[0-9]+$ ]] || continue
+        case "$n" in
+            "$MESSAGE"$ts|"$crash"$ts)
+                [ "$o" = "$mytag" ] && grep -qxF -- "$g" <<< "$tguids" && own+=("$n") ;;
+        esac
+    done <<< "$list"
+    for i in "${!own[@]}"; do [ "${own[$i]}" = "$sent" ] && idx=$i; done
+    if [ $idx -lt 0 ]; then
+        log 1 "Warning: --source-keep: '$src@$sent' is not among the snapshots marked as this target's own that both the source and '$tgt' hold -- nothing pruned"
+        return 0
+    fi
+    for (( i = 0; i <= idx - SOURCE_KEEP; i++ )); do doomed+=("${own[$i]}"); done
+    if [ ${#doomed[@]} -eq 0 ]; then
+        log 2 "--source-keep=$SOURCE_KEEP: nothing to prune on '$src'"
+        return 0
+    fi
+    for d in "${doomed[@]}"; do
+        case "$d" in
+            *[!A-Za-z0-9_.:-]*)
+                log 1 "Warning: --source-keep: '$src@$d' carries an unexpected character -- left alone"
+                stuck=$((stuck + 1)); continue ;;
+        esac
+        if [ -n "$rhost" ]; then
+            ssh -n "${SSH_OPTS[@]}" "$ruser@$rhost" "zfs destroy '$src@$d'" && gone=$((gone + 1)) || stuck=$((stuck + 1))
+        else
+            zfs destroy "$src@$d" && gone=$((gone + 1)) || stuck=$((stuck + 1))
+        fi
+    done
+    log 1 "--source-keep=$SOURCE_KEEP on '$src'${rhost:+ ($rhost)}: $gone of the job's older snapshots destroyed, $stuck left (kept: the $SOURCE_KEEP newest up to '$sent')"
+    [ $stuck -eq 0 ] || log 1 "Warning: --source-keep: $stuck older snapshot(s) of the job stay on '$src' (held, no 'destroy' delegation, or an unexpected name)"
+    return 0
+}
+
 mirror_target() {
     local src="$1" tgt="$2" ruser="$3" rhost="$4"
     local src_list tgt_list base s
@@ -1555,6 +1700,16 @@ process_dataset() {
 
     if [[ "$src_dataset" == "$tgt_dataset" && -z "$remote_host" ]]; then
         log 1 "Running in local snapshot-only mode"
+        # Round 5 (adversarial pass), the snapsend.sh twin: the quiesce window
+        # already took this member's snapshot; a second one would be unfrozen.
+        if [ "${QUIESCE_SNAPPED:-0}" -eq 1 ]; then
+            if [ -z "$(get_snapshot_guid "$src_dataset" "${SNAP_MESSAGE}${RUN_SUFFIX}")" ]; then
+                log 0 "Quiesce: this run's snapshot '${src_dataset}@${SNAP_MESSAGE}${RUN_SUFFIX}' is not on the source -- snapshot-only fails"
+                return 1
+            fi
+            log 1 "Snapshot for $src_dataset was already taken inside the quiesce window -- not creating a second, unquiesced one"
+            return 0
+        fi
         snapshot=$(create_snapshot "$src_dataset" "$remote_user" "$remote_host") || return 1
         log 1 "Successfully created local snapshot: $snapshot"
         return 0
@@ -1628,7 +1783,14 @@ process_dataset() {
                     [ -n "$resumed_snap" ] && release_snapshot "$resumed_snap" "$remote_user" "$remote_host"
                     clear_inflight_snap "$tgt_dataset" "$src_dataset"
                     log 1 "Resumed transfer completed successfully"
-                    return 0
+                    # Round 5 (adversarial pass): the resumed stream is an
+                    # older run's point. Inside a quiesce window this member
+                    # still owes its own snapshot -- go on and copy it, the
+                    # way the abandon branch above falls through.
+                    if [ "${QUIESCE_SNAPPED:-0}" -ne 1 ]; then
+                        return 0
+                    fi
+                    log 1 "Quiesce: continuing to this run's snapshot '${SNAP_MESSAGE}${RUN_SUFFIX}'"
                 else
                     log 0 "Resume attempt failed"
                     # Still under MAX_RESUME_ATTEMPTS -- leave the hold in
@@ -1691,6 +1853,29 @@ process_dataset() {
     if [ "$USE_EXISTING_SNAPSHOT" -eq 1 ]; then
         local src_snaps
         src_snaps=($(get_sorted_snapshots "$src_dataset" "$remote_user" "$remote_host")) || return 1
+        # REV-20261112-197 round 5 (F1e, the W6 design): a successful quiesce window
+        # made THIS member's snapshot. That obligation comes before every generic
+        # return below -- empty inventory, all excluded, no family -- which exist for
+        # passive -e and would otherwise report a vanished member as scaffolding.
+        # Own point present and not excluded: the returns below cannot fire (the
+        # list is not empty, the own name survives -E and starts with -m). Absent or
+        # explicitly excluded: this member fails, and so does the aggregate.
+        if [ "$QUIESCE_SNAPPED" -eq 1 ]; then
+            local _qown="${SNAP_MESSAGE}${RUN_SUFFIX}" _qhit=0 _qs _qx
+            for _qs in "${src_snaps[@]}"; do
+                [ "$_qs" = "$_qown" ] && { _qhit=1; break; }
+            done
+            if [ $_qhit -eq 0 ]; then
+                log 0 "Quiesce: this run's snapshot '${src_dataset}@${_qown}' is not on the source -- this member fails, it is not scaffolding"
+                return 1
+            fi
+            for _qx in ${EXCLUDE_SNAPS[@]+"${EXCLUDE_SNAPS[@]}"}; do
+                case "$_qown" in "$_qx"*)
+                    log 0 "Quiesce: this run's snapshot '${src_dataset}@${_qown}' matches the -E exclusion '$_qx' -- refusing, the window's own point cannot be excluded"
+                    return 1 ;;
+                esac
+            done
+        fi
         if [ ${#src_snaps[@]} -eq 0 ]; then
             if [ $FLAT_RECURSE -eq 1 ]; then
                 # Under -R the request is a SUBTREE and -e's family defines
@@ -1763,16 +1948,46 @@ process_dataset() {
         fi
 
         local latest_snap="${src_snaps[-1]}"
+        # REV-20261112-197 round 4 (F1d): a successful quiesce window made this run's
+        # snapshot, always named ${SNAP_MESSAGE}${RUN_SUFFIX}. Copy exactly that one.
+        # The newest of the family may belong to another job that ran meanwhile, and
+        # copying it makes this target depend on a point the other job owns and
+        # prunes. If this run's snapshot is not there, refuse; do not substitute.
+        if [ "$QUIESCE_SNAPPED" -eq 1 ]; then
+            local _own="${SNAP_MESSAGE}${RUN_SUFFIX}" _found=0 _s
+            for _s in "${src_snaps[@]}"; do
+                [ "$_s" = "$_own" ] && { _found=1; break; }
+            done
+            if [ $_found -eq 0 ]; then
+                log 0 "Quiesce: this run's snapshot '${src_dataset}@${_own}' is not on the source -- refusing to copy another snapshot in its place"
+                return 1
+            fi
+            [ "$latest_snap" = "$_own" ] \
+                || log 1 "Quiesce: '${src_dataset}@${latest_snap}' is newer than this run's snapshot -- copying this run's '${_own}', not it"
+            latest_snap="$_own"
+        fi
         snapshot="${src_dataset}@${latest_snap}"
+        # Round 3 (F2): stamp only this run's own quiesced snapshot. --source-keep
+        # refuses -e, so in this branch it is always the quiesce path.
+        if [ "$SOURCE_KEEP" -gt 0 ] && [ "$QUIESCE_SNAPPED" -eq 1 ]; then
+            mark_source_owner "$snapshot" "$tgt_dataset" "$remote_user" "$remote_host"
+        fi
     else
         snapshot=$(create_snapshot "$src_dataset" "$remote_user" "$remote_host") || return 1
         latest_snap="${snapshot##*@}"
+        [ "$SOURCE_KEEP" -gt 0 ] && mark_source_owner "$snapshot" "$tgt_dataset" "$remote_user" "$remote_host"
     fi
 
     # A20: the identity of what is sent, recorded before the send -- the proof below
     # falls back to it when the source rotated the snapshot away meanwhile.
     local sent_guid
     sent_guid=$(get_snapshot_guid "$src_dataset" "$latest_snap" "$remote_user" "$remote_host")
+    # Round 5 (F1e, path map item 7): the window's own point vanished after its
+    # selection. Fail the member here, before the target is touched.
+    if [ "$QUIESCE_SNAPPED" -eq 1 ] && [ -z "$sent_guid" ]; then
+        log 0 "Quiesce: this run's snapshot '${snapshot}' is gone or unreadable after selection -- this member fails"
+        return 1
+    fi
 
     # Hold it for the whole transfer window, including across a resume that
     # spans later cron runs -- see HOLD-BASED PROTECTION in lib-zfs-snap.sh.
@@ -2474,6 +2689,14 @@ process_dataset() {
     # remote here.
     [ $RECURSIVE -ne 1 ] && record_send_bookmark "$src_dataset" "$latest_snap" "$tgt_dataset" "$remote_user" "$remote_host" "$IDENTIFIER"
 
+    if [ "$SOURCE_KEEP" -gt 0 ]; then
+        if [ $RECURSIVE -eq 1 ]; then
+            log 1 "--source-keep: nothing pruned on '$src_dataset' under -r (one atomic stream, no per-dataset bookmark)"
+        else
+            prune_source_family "$src_dataset" "$latest_snap" "$tgt_dataset" "$remote_user" "$remote_host"
+        fi
+    fi
+
     log 1 "Transfer completed successfully"
     return 0
 }
@@ -2572,6 +2795,12 @@ translate_long_options() {
                 shift ;;
             --recursive)
                 echo "Error: --recursive needs a mode: --recursive=atomic|flat|no" >&2; exit 1 ;;
+            --source-keep=*)
+                SOURCE_KEEP="${a#--source-keep=}"
+                case "$SOURCE_KEEP" in
+                    ''|*[!0-9]*|0*) echo "Error: --source-keep= takes a whole number of at least 1 (got '${a#--source-keep=}')" >&2; exit 1 ;;
+                esac
+                shift ;;
             --*)
                 echo "Error: unknown option $a" >&2; exit 1 ;;
             -?*)
@@ -2681,6 +2910,32 @@ fi
 if [ $FLAT_RECURSE -eq 1 ] && [ $RECURSIVE -eq 1 ]; then
     echo "Error: -r and -R are mutually exclusive (-r = one atomic zfs recv -R stream, -R = independent per-dataset pulls)" >&2
     exit 1
+fi
+# W5 (2026-11-12): --source-keep prunes the job's OWN snapshots, which exist only when
+# this run makes them (-m, no -e) and sends (no -s: nothing is sent, so the prune never runs).
+if [ "$SOURCE_KEEP" -gt 0 ] && { [ $USE_EXISTING_SNAPSHOT -eq 1 ] || [ -z "$MESSAGE" ] || [ $SNAPSHOT_ONLY -eq 1 ]; }; then
+    echo "Error: --source-keep needs -m and no -e and no -s: it prunes only the snapshots this job makes and sends" >&2
+    exit 1
+fi
+# REV-20261112-197: and -i, so each run adds one snapshot to each medium. Safety does NOT
+# rest on -i (round 2: earlier history or an -H seed can still put another medium's base on
+# this target); it rests on the owner stamp, see prune_source_family.
+if [ "$SOURCE_KEEP" -gt 0 ] && [ $SKIP_INTERMEDIATES -ne 1 ]; then
+    echo "Error: --source-keep needs -i (one new snapshot per run on each medium)" >&2
+    exit 1
+fi
+# W5 (2026-11-12): under a DECLARED -e the Proxmox-reserved families are never adopted.
+# Added here, before the quiesce paths below switch USE_EXISTING_SNAPSHOT on for their
+# own snapshots, so only the operator's -e gets it. An -m that itself names a reserved
+# family (`-e -m __replicate_`) is the explicit opt-out for that family.
+if [ $USE_EXISTING_SNAPSHOT -eq 1 ]; then
+    for _rf in __replicate_ vzdump __migration__; do
+        case "$MESSAGE" in "$_rf"*) continue ;; esac
+        _have=0
+        for _xp in ${EXCLUDE_SNAPS[@]+"${EXCLUDE_SNAPS[@]}"}; do [ "$_xp" = "$_rf" ] && _have=1; done
+        [ $_have -eq 1 ] || EXCLUDE_SNAPS+=("$_rf")
+    done
+    unset _rf _have _xp
 fi
 # A repeat of the SAME mode is refused too. It is harmless today -- but the
 # rule is about the declaration, not its effect, and once --recursive=<mode>

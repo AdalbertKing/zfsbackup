@@ -328,6 +328,9 @@ zamrażania.
 
 Okno zamrożenia zawiera **wyłącznie** `zfs snapshot`, nigdy transfer. Gość z kilkoma dyskami jest
 zamrażany raz na przebieg, a wszystkie jego dyski dostają migawkę razem w jednym atomowym oknie.
+Przebieg kopiuje potem dokładnie migawkę z tego okna, nawet gdy w międzyczasie inne zadanie zrobiło
+nowszą migawkę tej samej rodziny. Jeśli tej migawki zabraknie przed kopią, przebieg odmawia,
+zamiast skopiować inną.
 `zfs snapshot` przyjmuje kilka nazw tylko w obrębie jednej puli, więc datasety rozłożone na kilka
 pul dostają jedno atomowe wywołanie na pulę; każdy gość pozostaje zamrożony do powrotu ostatniego
 wywołania, więc wszystkie dyski nadal lądują w tej samej chwili. Odmrożenie gwarantuje pułapka
@@ -341,6 +344,12 @@ jest zamrożona, i mierzy czas od pierwszego zamrożenia. Gość, który już ni
 okno dłuższe niż budżet (`QUIESCE_MAX_WINDOW`, domyślnie 5 sekund), powoduje odmowę zrobienia
 migawki, zamiast robić ją na zamrożeniu, które mogło już zniknąć. Zwiększaj budżet tylko wtedy,
 gdy wiesz, że dane goście utrzymają zamrożenie.
+
+**Co kopiuje przebieg z udanym zamrożeniem.** Każdy dataset objęty oknem kopiuje dokładnie migawkę
+zrobioną w tym oknie, nigdy nowszą, którą w międzyczasie zrobiło inne zadanie. Jeśli tej migawki
+brakuje (usunięta albo wyłączona przez `-E`), ten dataset kończy się błędem, a przebieg też;
+pod `-R` nie jest pomijany jako pusty dataset. Migawka awaryjna (`_crash_`) jest robiona osobno
+dla każdego datasetu i tej zasady nie dotyczy.
 
 **Polityka błędu.** Nieudane zamrożenie nadal robi migawkę, spójną po awarii, chyba że szczebel
 mówi `,strict`:
@@ -1096,6 +1105,15 @@ notify       = pulled
   3x), a godzina kopii każdego poziomu przesuwa się na 10 minut po biegu repliki, który przynosi
   migawkę tego poziomu (np. kopia dzienna 01:11 za repliką `*/2:00` → 02:10). Kopia, która po
   przesunięciu przechodzi przez północ, przesuwa też dzień tygodnia albo miesiąca.
+- **Replika aktywna z `keep` i migawki Proxmoxa.** Replika aktywna z `keep = N` trzyma na źródle
+  tylko najnowszą własną migawkę (`--source-keep=1`), po jednej na nośnik, gdy replika ma ich
+  kilka: starsze znikają po udanej kopii, każdy nośnik usuwa tylko migawki zrobione przez jego własne przebiegi (oznaczone na źródle,
+  `zfsbackup:srckeep-owner`, według celu i GUID puli) i które sam ma; nieoznaczone zostają, a
+  zakładka `#tgt-` niesie następny przyrost. `--source-keep` odrzuca `-e` i `-s` oraz uruchomienie bez `-m` albo
+  bez `-i`; przy `history = all` lub `auto:N` generator go nie używa. Replika
+  pasywna (`-e`) nigdy nie przyjmuje migawek samego Proxmoxa (`__replicate_`, `vzdump`,
+  `__migration__`), także bez `-E`, chyba że jej `-m` nazywa jedną z tych rodzin
+  (`-e -m __replicate_`).
 - `recursive` steruje wszystkimi trzema wygenerowanymi liniami z jednej deklaracji: `no` = ten
   dataset, `flat` = `-R` przy transferze, `delsnaps -R`, `check-snap-age -R`; `atomic` = `-r` przy
   transferze z tym samym `-R` dla prune i strażnika.

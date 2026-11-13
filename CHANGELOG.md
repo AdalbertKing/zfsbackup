@@ -4,6 +4,47 @@ Every release of this repository is one commit; its message and the `RELEASE-OF`
 development revision it was built from. Releases between tagged versions are listed here only
 when they change how the tool is used.
 
+## [1.0.21] — 2026-11-13
+
+- **Under `-R`, a quiesced dataset whose window snapshot is missing fails** (REV-20261112-197
+  round 5, both engines). Before, a member left empty, fully `-E`-excluded or without the `-m`
+  family was skipped as scaffolding and the run reported success without copying it. Also under
+  quiesce: a snapshot that disappears after selection fails the dataset; a resumed interrupted
+  transfer no longer ends the dataset before the window's snapshot is copied; `-s` checks that the
+  window's snapshot exists; `snapget.sh`'s local snapshot-only mode no longer takes a second,
+  unfrozen snapshot. Passive runs (no window) are unchanged.
+- **A quiesced run copies the snapshot its own window made** (REV-20261112-197 round 4, both
+  `snapsend.sh` and `snapget.sh`). Before, it took the newest snapshot of the `-m` family, which
+  could be another job's snapshot made between the window and the copy. Such a copy made the
+  target depend on a point the other job owns and, with `--source-keep`, later prunes. If the
+  window's snapshot is gone before the copy, the run now refuses.
+
+- **An active replica with `keep` keeps only its newest own snapshot on the source** (W5-1; one per medium when it has several). New
+  `snapget.sh --source-keep=N`: after a successful pull of the snapshot the run made with `-m`
+  (not under `-r`; under `-R` each dataset is pruned on its own), the job's own older snapshots
+  (exact `-m` prefix plus the engine's timestamp, or its quiesce crash form) beyond the N newest
+  are destroyed on the source, and only those a run of this same target made (the run stamps its snapshot on the source with
+  the user property `zfsbackup:srckeep-owner`, naming the target and its pool GUID, so two
+  rotating disks of one pool name are two owners; a successful quiesce window's snapshot is
+  stamped too) and the target holds (by GUID); a snapshot without
+  that stamp (older history, an `-H` seed, one made by hand) is never pruned: with two media
+  of one replica, each medium's head stays on the source until that medium's own next run, so
+  one medium never takes another's base, even when a bookmark could not be made
+  (REV-20261112-197). Other families and other jobs' snapshots are never touched; a
+  failed listing or destroy is a warning, not a failed run; `-n` destroys nothing. Refused with
+  `-e`, with `-s`, without `-m`, or without `-i`; `snapsend.sh` refuses it (pull-only).
+  `gen-cron.sh` passes `--source-keep=1` only to an active replica with `keep = N` that runs
+  with `-i` (an explicit `history = all` or `auto:N` gets none); the mirror variant (`-m P -M`)
+  does not get it, because under `-M` the medium follows the source, so the pruning would delete
+  the medium's copies too.
+- **A passive copy never adopts a Proxmox-reserved snapshot** (W5-2). Under `-e` both engines skip
+  `__replicate_`, `vzdump` and `__migration__` as the newest/base, with or without `-E`. An `-m`
+  that names one of those families (for example `-e -m __replicate_`) opts that family out. A
+  dataset with only reserved snapshots now refuses under `-e` ("Every source snapshot on
+  '<dataset>' matches an -E exclusion"); under `-R` it is skipped as scaffolding. Reserved
+  snapshots already on a medium stay (the mirror never removes a reserved family); remove them by
+  hand once.
+
 ## [1.0.20] — 2026-11-12
 
 - **A mirror keeps a snapshot that was renamed on the source** (REV-20261112-196). `-M` (sync

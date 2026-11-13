@@ -607,6 +607,7 @@ PORT=22
 TARGET_EXACT=0
 USE_EXISTING_SNAPSHOT=0
 declare -a EXCLUDE_SNAPS=()
+SOURCE_KEEP=0      # parsed by the shared translate_long_options; refused below (pull-only, W5)
 # -q: quiesce the Proxmox guest that owns each dataset before snapshotting it.
 # "no" (default), "agent" (qemu-guest-agent, VMs), "fs" (host fsfreeze, containers)
 # or "auto" (pick per guest). See the QUIESCE section in lib-zfs-snap.sh.
@@ -1381,6 +1382,11 @@ process_dataset() {
         # multi-dataset `zfs snapshot` it came from. Checked separately from
         # USE_EXISTING_SNAPSHOT so -e keeps its own meaning.
         if [ "${QUIESCE_SNAPPED:-0}" -eq 1 ]; then
+            # Round 5 (F1e): report it only if it is there.
+            if [ -z "$(get_snapshot_guid "$src_dataset" "${SNAP_MESSAGE}${RUN_SUFFIX}")" ]; then
+                log 0 "Quiesce: this run's snapshot '${src_dataset}@${SNAP_MESSAGE}${RUN_SUFFIX}' is not on the source -- snapshot-only fails"
+                return 1
+            fi
             log 1 "Snapshot for $src_dataset was already taken inside the quiesce window -- not creating a second, unquiesced one"
             return 0
         fi
@@ -1442,7 +1448,14 @@ process_dataset() {
                     [ -n "$resumed_snap" ] && release_snapshot "$resumed_snap" "" ""
                     clear_inflight_snap "$tgt_dataset" "$src_dataset"
                     log 1 "Resumed transfer completed successfully"
-                    return 0
+                    # Round 5 (adversarial pass): the resumed stream is an
+                    # older run's point. Inside a quiesce window this member
+                    # still owes its own snapshot -- go on and copy it, the
+                    # way the abandon branch above falls through.
+                    if [ "${QUIESCE_SNAPPED:-0}" -ne 1 ]; then
+                        return 0
+                    fi
+                    log 1 "Quiesce: continuing to this run's snapshot '${SNAP_MESSAGE}${RUN_SUFFIX}'"
                 else
                     log 0 "Resume attempt failed"
                     # Still under MAX_RESUME_ATTEMPTS -- leave the hold in
@@ -1504,6 +1517,25 @@ process_dataset() {
     if [ "$USE_EXISTING_SNAPSHOT" -eq 1 ]; then
         local src_snaps
         src_snaps=($(get_sorted_snapshots "$src_dataset")) || return 1
+        # REV-20261112-197 round 5 (F1e), same rule as snapget.sh: a successful quiesce
+        # window made THIS member's snapshot, and that comes before every generic
+        # passive return below. Absent or explicitly excluded: the member fails.
+        if [ "$QUIESCE_SNAPPED" -eq 1 ]; then
+            local _qown="${SNAP_MESSAGE}${RUN_SUFFIX}" _qhit=0 _qs _qx
+            for _qs in "${src_snaps[@]}"; do
+                [ "$_qs" = "$_qown" ] && { _qhit=1; break; }
+            done
+            if [ $_qhit -eq 0 ]; then
+                log 0 "Quiesce: this run's snapshot '${src_dataset}@${_qown}' is not on the source -- this member fails, it is not scaffolding"
+                return 1
+            fi
+            for _qx in ${EXCLUDE_SNAPS[@]+"${EXCLUDE_SNAPS[@]}"}; do
+                case "$_qown" in "$_qx"*)
+                    log 0 "Quiesce: this run's snapshot '${src_dataset}@${_qown}' matches the -E exclusion '$_qx' -- refusing, the window's own point cannot be excluded"
+                    return 1 ;;
+                esac
+            done
+        fi
         if [ ${#src_snaps[@]} -eq 0 ]; then
             if [ $FLAT_RECURSE -eq 1 ]; then
                 # Under -R the request is a SUBTREE and -e's family defines
@@ -1578,6 +1610,22 @@ process_dataset() {
         fi
 
         local latest_snap="${src_snaps[-1]}"
+        # REV-20261112-197 round 4 (F1d), same rule as snapget.sh: after a successful
+        # quiesce window, copy exactly this run's ${SNAP_MESSAGE}${RUN_SUFFIX}. The
+        # newest of the family may be another job's, made outside the window.
+        if [ "$QUIESCE_SNAPPED" -eq 1 ]; then
+            local _own="${SNAP_MESSAGE}${RUN_SUFFIX}" _found=0 _s
+            for _s in "${src_snaps[@]}"; do
+                [ "$_s" = "$_own" ] && { _found=1; break; }
+            done
+            if [ $_found -eq 0 ]; then
+                log 0 "Quiesce: this run's snapshot '${src_dataset}@${_own}' is not on the source -- refusing to copy another snapshot in its place"
+                return 1
+            fi
+            [ "$latest_snap" = "$_own" ] \
+                || log 1 "Quiesce: '${src_dataset}@${latest_snap}' is newer than this run's snapshot -- copying this run's '${_own}', not it"
+            latest_snap="$_own"
+        fi
         snapshot="${src_dataset}@${latest_snap}"
     else
         snapshot=$(create_snapshot "$src_dataset") || return 1
@@ -1588,6 +1636,12 @@ process_dataset() {
     # falls back to it when the source rotated the snapshot away meanwhile.
     local sent_guid
     sent_guid=$(get_snapshot_guid "$src_dataset" "$latest_snap")
+    # Round 5 (F1e, path map item 7): the window's own point vanished after its
+    # selection. Fail the member here, before the target is touched.
+    if [ "$QUIESCE_SNAPPED" -eq 1 ] && [ -z "$sent_guid" ]; then
+        log 0 "Quiesce: this run's snapshot '${snapshot}' is gone or unreadable after selection -- this member fails"
+        return 1
+    fi
 
     # Hold it for the whole transfer window, including across a resume that
     # spans later cron runs -- see HOLD-BASED PROTECTION in lib-zfs-snap.sh.
@@ -2292,6 +2346,12 @@ translate_long_options() {
                 shift ;;
             --recursive)
                 echo "Error: --recursive needs a mode: --recursive=atomic|flat|no" >&2; exit 1 ;;
+            --source-keep=*)
+                SOURCE_KEEP="${a#--source-keep=}"
+                case "$SOURCE_KEEP" in
+                    ''|*[!0-9]*|0*) echo "Error: --source-keep= takes a whole number of at least 1 (got '${a#--source-keep=}')" >&2; exit 1 ;;
+                esac
+                shift ;;
             --*)
                 echo "Error: unknown option $a" >&2; exit 1 ;;
             -?*)
@@ -2383,6 +2443,23 @@ shift $((OPTIND-1))
 if [ $FLAT_RECURSE -eq 1 ] && [ $RECURSIVE -eq 1 ]; then
     echo "Error: -r and -R are mutually exclusive (-r = one atomic zfs send -R stream, -R = independent per-dataset sends)" >&2
     exit 1
+fi
+# W5 (2026-11-12): --source-keep is pull-only -- the replica engine is snapget.sh
+# (gen-cron.sh replica_engine_cmd); the twin parser accepts the spelling, this refuses it.
+if [ "$SOURCE_KEEP" -gt 0 ]; then
+    echo "Error: --source-keep is a snapget.sh (pull) option; snapsend.sh does not prune its source" >&2
+    exit 1
+fi
+# W5 (2026-11-12), the twin of snapget.sh: under a DECLARED -e the Proxmox-reserved
+# families are never adopted, with or without -E; an -m naming one is the opt-out.
+if [ $USE_EXISTING_SNAPSHOT -eq 1 ]; then
+    for _rf in __replicate_ vzdump __migration__; do
+        case "$MESSAGE" in "$_rf"*) continue ;; esac
+        _have=0
+        for _xp in ${EXCLUDE_SNAPS[@]+"${EXCLUDE_SNAPS[@]}"}; do [ "$_xp" = "$_rf" ] && _have=1; done
+        [ $_have -eq 1 ] || EXCLUDE_SNAPS+=("$_rf")
+    done
+    unset _rf _have _xp
 fi
 # A repeat of the SAME mode is refused too. It is harmless today -- but the
 # rule is about the declaration, not its effect, and once --recursive=<mode>

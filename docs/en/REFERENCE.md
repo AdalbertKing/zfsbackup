@@ -326,6 +326,9 @@ snapshotted as normal, with no attempt to quiesce.
 
 The freeze window contains **only** `zfs snapshot`, never the transfer. A guest owning several
 disks is quiesced once per run and all its disks are snapshotted together in one atomic window.
+The run then copies exactly the snapshot that window made, even when another job has made a newer
+snapshot of the same family in the meantime. If that snapshot is gone before the copy, the run
+refuses instead of copying another one.
 `zfs snapshot` accepts several names only within one pool, so datasets spanning several pools get
 one atomic call per pool; every guest stays frozen until the last call returns, so all disks still
 land on the same instant. Thaw is guaranteed by an `EXIT` trap. Quiescing is ignored together with
@@ -339,6 +342,12 @@ elapsed time from the first freeze. A guest that is no longer frozen, or a windo
 budget (`QUIESCE_MAX_WINDOW`, default 5 seconds), refuses the snapshot rather than snapshotting on
 a freeze that may already be gone. Raise the budget only if you know the guests involved can hold
 the freeze.
+
+**What a successfully quiesced run copies.** Each dataset the window covered copies exactly the snapshot that
+window made, never a newer one another job made in the meantime. If that snapshot is missing
+(destroyed, or excluded with `-E`), that dataset fails and so does the run; under `-R` it is not
+skipped as an empty dataset. A crash-consistent fallback (`_crash_`) takes its snapshot per dataset
+and is not bound by this.
 
 **Failure policy.** A failed freeze still takes the snapshot, crash-consistent, unless the tier says
 `,strict`:
@@ -1078,6 +1087,15 @@ notify       = pulled
   interval; alarm at least 3x), and each tier's copy time moves to 10 minutes after the replica
   run that brings that tier's snapshot (e.g. a daily copy at 01:11 behind a `*/2:00` replica -> 02:10). A
   copy that the shift moves past midnight also moves its day of week or month.
+- **Active replica with `keep`, and Proxmox's own snapshots.** An active replica with `keep = N`
+  keeps only its newest own snapshot on the source (`--source-keep=1`), one per medium when the
+  replica has several: older ones go after a successful copy, each medium removes only the
+  snapshots its own runs made (stamped on the source, `zfsbackup:srckeep-owner`, by target and pool GUID) and that medium holds;
+  unstamped ones stay, and the `#tgt-` bookmark carries the next increment. `--source-keep`
+  is refused with `-e`, with `-s`, without `-m` and without `-i`; with `history = all` or
+  `auto:N` the generator does not use it. A passive replica (`-e`) never adopts Proxmox's own
+  snapshots (`__replicate_`, `vzdump`, `__migration__`), with or without `-E`, unless its `-m`
+  names one of those families (`-e -m __replicate_`).
 - `recursive` drives all three generated lines from one declaration: `no` = this dataset,
   `flat` = `-R` on the transfer, `delsnaps -R`, `check-snap-age -R`; `atomic` = `-r` on the
   transfer with the same `-R` prune and monitor.
