@@ -16229,6 +16229,17 @@ cmd_delete_relation() {
     fi
 
     local self="$SCRIPT_DIR/zfs-backup.sh" rc=0 source_failed=0
+    # U1 / REV-20261116-B02 F1: the record says the source's half is owed BEFORE anything
+    # changes, and a write that fails stops here with nothing changed. Written after a
+    # failure instead, a refused write (disk full, read-only) left STATE=removed with no
+    # marker, and deploy.sh --uninstall took the record for history. remove-client keeps
+    # the line (it rewrites the record with its old lines first). A completed source half
+    # clears it with an empty value below; a record that still carries the peer, or has no
+    # SOURCE_LEAVE_PENDING at all (an older release), blocks --uninstall.
+    if [ "$do_source" -eq 1 ]; then
+        write_client_field SOURCE_LEAVE_PENDING "$peer" >> "$cpath" \
+            || die "delete-relation: could not record in $cpath that the source's half on $peer is owed -- nothing was changed. Fix the write (disk full, read-only, permissions) and run this again."
+    fi
     if [ "$do_collector" -eq 1 ]; then
         log "delete-relation: 1/4 remove-client $name"
         "$self" remove-client "$name" || die "delete-relation: remove-client failed -- stopped BEFORE the source and the record were touched. Fix what it said and run this again."
@@ -16248,6 +16259,13 @@ cmd_delete_relation() {
             rc=1; source_failed=1
             log "!!! delete-relation: the source's half did NOT complete. The collector's half is done. On $peer, as root:"
             log "!!!     cd $SOURCE_REPO_DIR && ./deploy.sh --leave=$label"
+        fi
+        # The source's half is done: clear the marker set above (an empty value, last
+        # assignment wins). A failed clear leaves it saying "owed" -- the conservative side;
+        # the next run of this command proves the source clean and clears it.
+        if [ "$source_failed" -eq 0 ]; then
+            write_client_field SOURCE_LEAVE_PENDING "" >> "$cpath" \
+                || log "!!! delete-relation: the source's half is done, but $cpath could not be updated to say so -- it still reads 'owed'; running this command again clears it"
         fi
     fi
     # The RECORD is the retry state (REV-144). Purging it after a failed source

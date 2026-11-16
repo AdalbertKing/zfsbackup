@@ -292,7 +292,7 @@ Full flags: `zfs-backup.sh --help`. Verbs without `--yes` only plan.
 | verb | what for | example |
 |---|---|---|
 | `edit-relation` | change an installed relation in place (sections regenerated from the profile); no pairing and no data movement | `zfs-backup.sh edit-relation NAME --profile=P --plan` |
-| `delete-relation` | remove a relation entirely: the jobs here, the account on the source (`deploy.sh --leave`, skipped when another relation uses this host) and the record, which frees the name; copies on disk stay unless `--destroy-copies`; without `--yes` only a plan | `zfs-backup.sh delete-relation NAME --yes` |
+| `delete-relation` | remove a relation entirely: the jobs here, the account on the source (`deploy.sh --leave`, skipped when another relation uses this host) and the record, which frees the name; copies on disk stay unless `--destroy-copies`; without `--yes` only a plan. When the source half does not complete (the source does not answer, or its `--leave` fails), the record stays for a retry, and `deploy.sh --uninstall` refuses until this command completes (`--keep-source` when the source is gone). A removed record without that information (an older release, a bare `remove-client`) blocks the same way | `zfs-backup.sh delete-relation NAME --yes` |
 | `add-source` | add one dataset to an installed relation, on both sides | `zfs-backup.sh add-source NAME hdd/db --yes` |
 | `remove-source` | take one dataset out of a relation, on both sides; copies already taken stay | `zfs-backup.sh remove-source NAME hdd/db --yes` |
 | `export-relation` | write the relation's declarations out as a document (with `--json`) | `zfs-backup.sh export-relation NAME --json` |

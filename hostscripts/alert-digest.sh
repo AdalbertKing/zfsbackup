@@ -1158,6 +1158,12 @@ TIER_M = {"hourly": "godzinowy", "daily": "dobowy", "weekly": "tygodniowy",
           "monthly": u"miesięczny", "yearly": "roczny", "annual": "roczny"}
 REL_RE = re.compile(r"^(?:\S+ )?profile__relacja-(.+?)__(\S+) (.+?)(?: \((.*)\))?$")
 ANY_RE = re.compile(r"^(?:\S+ )?(?:profile__.+?__)?(\S+) (.+?)(?: \((.*)\))?$")
+# A snaponly relation's jobs (gen-cron [snaponly:]): the prune carries the relation,
+# snaponly_src__<name>__<tier>; the snapshot only its tier, "<tier> snapshot (<label>)".
+# ANY_RE read both as tier "prune"/"snapshot" and word "(label)" -- the raw name became
+# the row, every tier the same row title, and the relation listed 0 runs (2026-11-16).
+SO_RE = re.compile(r"^(?:\S+ )?snaponly(?:_src)?__(.+?)__(\S+) (.+?)(?: \((.*)\))?$")
+BARE_RE = re.compile(r"^(?:\S+ )?((?:l?src_)?(?:hourly|daily|weekly|monthly|yearly|annual)) (.+?)(?: \((.*)\))?$")
 
 def tier_of(t):
     base = (t or "").split("_")[-1]
@@ -1167,11 +1173,11 @@ def tier_of(t):
 def parse_label(k):
     """-> relation name (None for a job of no relation), task words, tier base."""
     k = re.sub(r" -- .*$", "", k)
-    m = REL_RE.match(k)
+    m = REL_RE.match(k) or SO_RE.match(k)
     if m:
         rel, tier, word, scope = m.group(1), m.group(2), m.group(3), m.group(4)
     else:
-        m = ANY_RE.match(k)
+        m = BARE_RE.match(k) or ANY_RE.match(k)
         if not m:
             return None, k, "", k
         rel, tier, word, scope = None, m.group(1), m.group(2), m.group(3)
@@ -1232,10 +1238,19 @@ for r in ((js("status.json") or {}).get("relations") or []):
         continue
     x = rel(r.get("name"))
     x["kind"] = kind_of(r)
+    x["passive"] = str(r.get("passive") or "").lower() in ("1", "yes", "true")
+    x["sources"] = set(r.get("sources") or [])
     if r.get("paused_local") or r.get("disabled"):
         x["paused"] = True
 
+# A job whose label names no relation belongs to the one relation whose sources hold
+# all of its own (status --json "sources"); none or several -> it stays on its own.
+def owner_of(srcs):
+    own = [x["name"] for x in rels.values() if srcs and set(srcs) <= x.get("sources", set())]
+    return own[0] if len(own) == 1 else None
+
 jobs = {}
+scope_rel = {}
 for ln in rd("jobs.tsv").splitlines():
     f = ln.split("\t")
     if f[0] == "J" and len(f) >= 15:
@@ -1248,12 +1263,19 @@ for ln in rd("jobs.tsv").splitlines():
              "tier": base, "scope": scope, "ds": [], "err": "",
              "srcs": [x for x in (f[15] if len(f) > 15 else "").split(",") if x]}
         jobs[f[1]] = j
-        rel(relname or scope or task)["jobs"].append(j)
+        owner = relname or owner_of(j["srcs"])
+        if owner and not relname and scope:
+            scope_rel[scope] = owner
+        rel(owner or scope or task)["jobs"].append(j)
     elif f[0] == "D" and len(f) >= 9 and f[1] in jobs:
         jobs[f[1]]["ds"].append(f[2:9])
     elif f[0] == "S" and len(f) >= 2:
         relname, task, base, scope = parse_label(f[1])
-        rel(relname or scope or task)["idle"].append(task + (" (" + scope + ")" if scope and relname else ""))
+        owner = relname or scope_rel.get(scope)
+        idle = rel(owner or scope or task)["idle"]
+        t = task + (" (" + scope + ")" if scope and owner else "")
+        if t not in idle:    # the same label in two cron lines is one missing job, not two
+            idle.append(t)
 
 # A relation with no copy has one side only: "(źródło)" on its prune says nothing there.
 for x in rels.values():
@@ -1490,7 +1512,9 @@ out.append(u"%s: %d %s, %d %s%s%s." % (
     span, runs, plural(runs, "bieg", "biegi", u"biegów"), fails, plural(fails, u"błąd", u"błędy", u"błędów"),
     (" (%d %s)" % (frel, plural(frel, "relacja", "relacje", "relacji"))) if frel else "",
     (", dopisane %s" % human(vol)) if copies else ""))
-fname = "statystyka-%s-%s.html" % (SHORT, time.strftime("%Y-%m-%d", NOW))
+# the full host name, as in the subject: two sites can each have a "pve1", and the
+# reader saving both attachments must not overwrite one with the other
+fname = "statystyka-%s-%s.html" % (HOST, time.strftime("%Y-%m-%d", NOW))
 out.append(u"Pełna statystyka: załącznik %s." % fname)
 if E.get("DG_QUIET") == "1":
     out.append("")
@@ -1513,7 +1537,7 @@ for x in order:
         rows.append(u"<table><tr><th>zadanie</th><th>obiekt</th><th>ostatni bieg</th><th>biegów</th><th>błędy</th>"
                     u"<th>dopisane</th><th>transfer</th><th>czas ost.</th><th>śr.</th><th>max</th><th>ostatni błąd</th></tr>")
         for j in sorted(x["jobs"], key=task_key):
-            copy = j["send"] and bool(j["tg"])
+            copy = j["send"] and bool(j["tg"]) and not x.get("passive")
             rows.append(u"<tr class='%s'><td>%s</td><td class='o'>%s</td><td>%s</td><td>%d</td><td>%d</td><td>%s</td><td>%s</td>"
                         u"<td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
                 cls(j), h(j["task"]), h(obj(j)),
@@ -1525,8 +1549,22 @@ for x in order:
                     rows.append(u"<tr class='ds'><td></td><td class='o'>&nbsp;&nbsp;%s</td><td></td><td>%s</td><td></td><td>%s</td>"
                                 u"<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td></td></tr>" % tuple(h(v) for v in (d[0], d[1], d[2], d[3], d[4], d[5], d[6])))
         rows.append("</table>")
+    pas = [j for j in x["jobs"] if j["send"] and j["tg"]] if x.get("passive") else []
+    if pas:
+        # A passive copy takes the NEWEST snapshot whatever its tier (snapget -e), so the
+        # hourly run carries the daily snapshot pvesr brought: by family the daily job got
+        # 22.25G in 0 s, "22G/s" (pve2-bim, 2026-11-16). Only the relation's sum is real.
+        rows.append(u"<p class='dim'>kopia pasywna: każdy bieg bierze najnowszą migawkę bez względu na szczebel, "
+                    u"więc dopisanych danych nie da się przypisać szczeblom; razem dopisane %s.</p>"
+                    % h(human(sum(j["vb"] for j in pas))))
     if x["idle"]:
         rows.append(u"<p class='warn'>bez biegu w oknie: %s</p>" % h(", ".join(x["idle"])))
+if not order:
+    # Both pve1 (2026-11-16) sent a page holding only "okno: -": their snapshots are made
+    # from the collector, so this host has nothing of its own to count -- say so.
+    rows.append(u"<p>Brak relacji i zadań na tym hoście: w cronie nie ma zadań migawek ani kopii, "
+                u"więc nie ma biegów do policzenia. Migawki tego hosta może robić zdalnie inny host "
+                u"(relacja „migawki zdalne” w jego statystyce).</p>")
 if events:
     rows.append(u"<h2>Zdarzenia z okresu</h2><table><tr><th>kiedy</th><th>rodzaj</th><th>zadanie</th><th>ostatnia linia</th></tr>")
     for ep, sev, job, det in events:

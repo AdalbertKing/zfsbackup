@@ -293,7 +293,7 @@ Pełne flagi: `zfs-backup.sh --help`. Czasowniki bez `--yes` tylko planują.
 | czasownik | po co | przykład |
 |---|---|---|
 | `edit-relation` | zmień zainstalowaną relację na miejscu (sekcje generowane od nowa z profilu); bez parowania i bez ruchu danych | `zfs-backup.sh edit-relation NAZWA --profile=P --plan` |
-| `delete-relation` | usuń relację w całości: zadania tutaj, konto na źródle (`deploy.sh --leave`, pomijane, gdy z tego hosta korzysta inna relacja) i rekord, co zwalnia nazwę; kopie na dysku zostają, chyba że `--destroy-copies`; bez `--yes` tylko plan | `zfs-backup.sh delete-relation NAZWA --yes` |
+| `delete-relation` | usuń relację w całości: zadania tutaj, konto na źródle (`deploy.sh --leave`, pomijane, gdy z tego hosta korzysta inna relacja) i rekord, co zwalnia nazwę; kopie na dysku zostają, chyba że `--destroy-copies`; bez `--yes` tylko plan. Gdy połowa źródła się nie uda (źródło nie odpowiada albo jego `--leave` zawodzi), rekord zostaje do ponowienia, a `deploy.sh --uninstall` odmawia, dopóki to polecenie nie przejdzie (`--keep-source`, gdy źródła już nie ma). Tak samo blokuje usunięty rekord bez tej informacji (starsze wydanie, samo `remove-client`) | `zfs-backup.sh delete-relation NAZWA --yes` |
 | `add-source` | dołóż jeden dataset do zainstalowanej relacji, po obu stronach | `zfs-backup.sh add-source NAZWA hdd/db --yes` |
 | `remove-source` | wyjmij jeden dataset z relacji, po obu stronach; odebrane kopie zostają | `zfs-backup.sh remove-source NAZWA hdd/db --yes` |
 | `export-relation` | zapisz deklaracje relacji jako dokument (z `--json`) | `zfs-backup.sh export-relation NAZWA --json` |

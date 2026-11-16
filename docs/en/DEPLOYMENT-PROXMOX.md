@@ -102,12 +102,24 @@ cd /root/scripts/zfs-snapshot-all
 
 What happens: dependencies are installed, the delegated account `zfsbackup` is
 created, and a cron entry with automatic updating is added. You pick the
-dataset for the copies (e.g. `rpool/backups`) when you create a relation (wizard: the Cel (target) field, CLI: `--target=`).
+dataset for the copies (e.g. `rpool/backups`) when you create a relation (wizard: the Target field, CLI: `--target=`).
 It prints the next step, `zfs-backup gui`: relations, replicas and their schedule are made by
 the package itself, so do not write cron lines by hand.
 
 `--backup-user=zfsbackup` means: **backup jobs will not run as root.** Worth
 it — it limits the damage if anything goes wrong.
+
+The account gets ZFS permissions on the host's datasets. By default these are
+`rpool/data` and `rpool/ROOT/pve-1`, the layout of Proxmox installed on ZFS. If
+the system is on ext4 or LVM and the data lives in another pool (e.g. `hdd`),
+neither of them exists and `deploy.sh` stops with an error (a single missing one
+only warns). Name your own datasets then:
+
+```bash
+./deploy.sh --backup-user=zfsbackup --grant-datasets=hdd
+```
+
+The list is remembered: later runs and updates pick it up automatically.
 
 Check that everything is clean:
 

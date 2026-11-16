@@ -6,6 +6,26 @@ when they change how the tool is used.
 
 ## [Unreleased]
 
+## [1.0.25] — 2026-11-16
+
+- `deploy.sh --uninstall` refuses while a `delete-relation` is still waiting for its source
+  half (it did not complete, e.g. the source was unreachable). Before, the relation record already said `removed`,
+  so uninstall deleted the record the retry needs (U1). The record now says, before any
+  step runs, that the source half is owed; if that cannot be written, nothing is done. A
+  removed record from an older release does not say whether its source half was done, so
+  it blocks `--uninstall` too: `zfs-backup.sh delete-relation NAME --yes` checks the source
+  and frees the name (`--keep-source` if the source host is gone).
+- Deployment guide, step 1: a host where neither default dataset (`rpool/data`,
+  `rpool/ROOT/pve-1`) exists (system on ext4 or LVM, data in another pool) names its datasets with `--grant-datasets=` (D1).
+- The weekly statistics attachment is named with the host's full name
+  (`statystyka-pve1.example.net-<date>.html`): two sites each with a `pve1` no longer overwrite
+  each other's attachment when saved.
+- Statistics page: a remote-snapshot relation's jobs (`snaponly_src__<relation>__<tier>` prunes,
+  `<tier> snapshot (<label>)` snapshots) sit under their relation with their tier, instead of
+  one section per raw job name and a "missing" line without a tier. A passive copy shows no
+  per-tier volume or rate (it takes the newest snapshot whatever its tier), only the relation's
+  total. A host with no job of its own says so instead of an empty page.
+
 ## [1.0.24] — 2026-11-16
 
 - Self-update takes a republished release history: when the release repository's `main`

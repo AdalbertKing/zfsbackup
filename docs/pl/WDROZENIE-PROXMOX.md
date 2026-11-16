@@ -109,6 +109,18 @@ więc linii crona nie pisze się ręcznie.
 `--backup-user=zfsbackup` znaczy: **zadania backupu nie będą chodzić z roota.**
 Warto — to ogranicza szkody, gdyby cokolwiek poszło nie tak.
 
+Konto dostaje uprawnienia ZFS do datasetów hosta. Domyślnie są to `rpool/data`
+i `rpool/ROOT/pve-1`, czyli układ Proxmoksa zainstalowanego na ZFS. Jeśli system
+stoi na ext4 albo LVM, a dane są w innej puli (np. `hdd`), żadnego z nich nie ma
+i `deploy.sh` kończy się błędem (brak tylko jednego daje ostrzeżenie). Podaj wtedy
+swoje datasety:
+
+```bash
+./deploy.sh --backup-user=zfsbackup --grant-datasets=hdd
+```
+
+Lista jest zapamiętywana: kolejne uruchomienia i aktualizacje używają jej automatycznie.
+
 Sprawdź, że jest czysto:
 
 ```bash

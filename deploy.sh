@@ -710,8 +710,15 @@ Peer pairing -- two hosts with NO prior trust (see PAIRING-DESIGN.md):
                           and logrotate config, state under /etc and /var/lib.
                           Without --yes: the plan only. Refused while a
                           relationship or a pairing is still on this host --
-                          each is removed with its own verb first. Datasets,
-                          snapshots, packages and the checkout stay.
+                          each is removed with its own verb first. So is a
+                          removed relationship whose record does not say its
+                          source's half was done (delete-relation's source
+                          half did not complete, a bare remove-client, or a
+                          record from an older release):
+                          zfs-backup.sh delete-relation NAME --yes asks the
+                          source and frees the name; --keep-source if that
+                          host is gone for good. Datasets, snapshots,
+                          packages and the checkout stay.
 
 Maintenance window -- stop and later restore what this host's crontabs run
 (root's, and the delegated account's if one exists or --backup-user names
@@ -4953,6 +4960,10 @@ UNINSTALL_PEER_GECOS="zfs-snapshot-all peer account for "
 uninstall_last_state() {   # <record> -> the last STATE= value
     sed -n 's/^STATE=//p' "$1" 2>/dev/null | tail -1
 }
+uninstall_source_pending() {   # <record> -> the peer whose source half delete-relation still owes, or nothing; rc 1 = no such field at all
+    grep -q '^SOURCE_LEAVE_PENDING=' "$1" 2>/dev/null || return 1
+    sed -n 's/^SOURCE_LEAVE_PENDING=//p' "$1" 2>/dev/null | tail -1 | tr -d "'\""
+}
 do_uninstall() {
     local yes="$1" f st gecos blockers="" acct accounts="" peers="" p ds list acl
     local clients="${CLIENTS_DIR:-/etc/zfs-snapshot-all/clients}"
@@ -4968,6 +4979,23 @@ do_uninstall() {
     for f in "$clients"/*.conf; do
         [ -f "$f" ] || continue
         st=$(uninstall_last_state "$f")
+        # U1 / REV-20261116-B02 F1: a delete-relation that stopped at its source half leaves
+        # STATE=removed AND the record it needs for the retry -- that is still a relationship.
+        # Only a record that SAYS its source half is done (SOURCE_LEAVE_PENDING present and
+        # empty) is history. Without the field (an older release, or a bare remove-client)
+        # nothing proves the source was left: blocked too, and delete-relation sorts it out --
+        # it asks the source, and a source holding nothing of ours frees the name.
+        if [ "$st" = removed ]; then
+            if ! p=$(uninstall_source_pending "$f"); then
+                blockers="$blockers
+    relationship $(basename "$f" .conf) (removed here; the record does not say whether the source's half was done): zfs-backup.sh delete-relation $(basename "$f" .conf) --yes  (it checks the source; if that host is gone for good: --keep-source)"
+                continue
+            elif [ -n "$p" ]; then
+                blockers="$blockers
+    relationship $(basename "$f" .conf) (removed here, the source's half on $p is not done): zfs-backup.sh delete-relation $(basename "$f" .conf) --yes"
+                continue
+            fi
+        fi
         case "$st" in removed|"") continue ;; esac
         blockers="$blockers
     relationship $(basename "$f" .conf) (STATE=$st): zfs-backup.sh delete-relation $(basename "$f" .conf) --yes"
