@@ -317,7 +317,10 @@ Full flags: `zfs-backup.sh --help`. Verbs without `--yes` only plan.
 newest snapshots), `--media-guid=GUID` (the disks of the replica by pool GUID, repeat for a rotation),
 `--on-insert=yes` (also run when the disk is plugged in), `--schedule=auto|'30 2 * * *'|on-insert`.
 A run of one replica never overlaps another: the second ends with rc 75. A first copy that cannot fit
-on the disk is refused before anything is written.
+on the disk is refused before anything is written. An encrypted dataset without its key loaded goes
+only as `--raw` (an encrypted copy); without `--raw` the command refuses at once instead of failing on
+the first run -- add `--raw`, leave it out with `--exclude-child`, or load the key. The GUI wizard adds
+`--raw` itself.
 
 ### Retention
 

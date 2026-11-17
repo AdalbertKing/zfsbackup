@@ -754,7 +754,7 @@
 "SPÓJNE (zamrażanie)": "CONSISTENT (freezing)",
 "KOPIA %s": "COPY %s",
 "Kasuje migawki starsze niż N okresów (dobowe 7 = 7 dni).": "Deletes snapshots older than N periods (daily 7 = 7 days).",
-"Katalog na $TARGET, pod którym lądują przywrócone datasety (każdy pod swoją nazwą). Musi leżeć w <pula>/restore -- tylko tam zgoda na odzysk pozwala kolektorowi tworzyć.": "The directory at $TARGET where the restored datasets are stored (each under its own name). It must be located in <pula>/restore—only there does the restore permission allow the collector to create it.",
+"Katalog na $TARGET, pod którym lądują przywrócone datasety (każdy pod swoją nazwą). Musi leżeć w <pula>/restore -- tylko tam zgoda na odzysk pozwala kolektorowi tworzyć.": "The directory at $TARGET where the restored datasets are stored (each under its own name). It must be located in <pool>/restore—only there does the restore permission allow the collector to create it.",
 "Katalog pakietu zajęty": "Package directory taken",
 "Każdy dysk tego hosta jest w puli albo zamontowany.\\nPodłącz dysk na nośnik i wybierz to jeszcze raz.$( [ -s ": "Every disk of this host is in a pool or mounted.\\nConnect the removable disk and select again.$( [ -s ",
 "Każdy dysk tego hosta jest w puli albo zamontowany.\\nPodłącz inny dysk i wybierz to jeszcze raz.": "Every disk of this host is in a pool or mounted.\\nConnect another disk and choose this again.",

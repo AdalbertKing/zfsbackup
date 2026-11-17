@@ -8683,6 +8683,46 @@ cmd_add_replica() {   # <name> --source=DS [--source=DS2 ...] --dst=POOL/BASE [.
             || die "add-replica: '$_s2' is not a dataset on this host. A replica copies what this machine already holds."
     done
 
+    # AN ENCRYPTED DATASET WITHOUT ITS KEY GOES ONLY RAW (tutorial lab, 2026-11-17).
+    # A plain `zfs send` of it fails with "dataset key must be loaded", so a replica
+    # installed without --raw over such a child failed on its first run. The GUI sets
+    # --raw itself when it sees encryption; here it is refused, not guessed. A child
+    # left out by --exclude-child is not checked; a loaded key sends plain, as before.
+    if [ "$rraw" -eq 0 ]; then
+        # FAIL CLOSED (REV-20261117-B01 F1): an unreadable answer is not "no locked key".
+        # rc != 0, an empty answer, a first row that is not the source, a row outside it
+        # or a row without exactly three fields each refuse; stderr is shown, not dropped.
+        local _locked="" _ln _le _lk _lx _x _skip _rl=() _zo _zrc _ze _zef _row _first
+        [ "$rec" -eq 1 ] && _rl=(-r)
+        _zef=$(mktemp) || die "add-replica: mktemp failed. Nothing was changed."
+        for _s2 in "${sources[@]}"; do
+            _zo=$(zfs list -H -o name,encryption,keystatus ${_rl[@]+"${_rl[@]}"} "$_s2" 2>"$_zef"); _zrc=$?
+            _ze=$(head -c 300 "$_zef" | tr '\n' ' ')
+            [ "$_zrc" -eq 0 ] || { rm -f "$_zef"; die "add-replica: cannot read the encryption of '$_s2' (zfs list rc $_zrc: ${_ze:-no message}). A dataset whose key is not loaded cannot be ruled out. Nothing was changed."; }
+            [ -n "$_zo" ] || { rm -f "$_zef"; die "add-replica: zfs list returned no encryption row for '$_s2'. Nothing was changed."; }
+            _first=1
+            while IFS= read -r _row; do
+                IFS="$(printf '\t')" read -r _ln _le _lk _lx <<<"$_row"
+                if [ -z "$_ln" ] || [ -z "$_le" ] || [ -z "$_lk" ] || [ -n "$_lx" ] \
+                   || { [ "$_first" -eq 1 ] && [ "$_ln" != "$_s2" ]; } \
+                   || { [ "$_ln" != "$_s2" ] && [ "${_ln#"$_s2"/}" = "$_ln" ]; }; then
+                    rm -f "$_zef"
+                    die "add-replica: unexpected encryption row for '$_s2' from zfs list: '$_row'. Nothing was changed."
+                fi
+                _first=0
+                case "$_le" in off|-) continue ;; esac
+                [ "$_lk" = available ] && continue
+                _skip=0
+                for _x in ${xchild[@]+"${xchild[@]}"}; do
+                    printf '%s\n' "$_ln" | grep -Eq -- "$_x" && { _skip=1; break; }
+                done
+                [ "$_skip" -eq 1 ] || _locked="$_locked $_ln"
+            done <<<"$_zo"
+        done
+        rm -f "$_zef"
+        [ -z "$_locked" ] || die "add-replica: encrypted, key not loaded:$_locked -- a plain send of these fails ('dataset key must be loaded'). Add --raw (the copy goes encrypted and needs no key), leave them out with --exclude-child, or load the key (zfs load-key) and run this again. Nothing was changed."
+    fi
+
     # THE MEDIUM MAY BE IN A SAFE, AND THAT IS NOT AN ERROR.
     #
     # The base dataset on the target is what tells the gate the RIGHT disk is in

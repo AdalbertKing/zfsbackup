@@ -6,6 +6,20 @@ when they change how the tool is used.
 
 ## [Unreleased]
 
+## [1.0.26] — 2026-11-17
+
+- `add-replica` refuses a source with an encrypted dataset whose key is not loaded unless
+  `--raw` is given (or the dataset is left out with `--exclude-child`). A plain send of it
+  fails ("dataset key must be loaded"), so such a replica failed on its first run. The GUI
+  wizard already adds `--raw` for an encrypted source.
+  When `zfs list` cannot answer (an error, an empty or malformed answer), `add-replica`
+  refuses as well and shows the error, instead of taking it as "no locked key".
+- New relation wizard: the step counter no longer jumps. Step 1 (the kind) shows no total,
+  since the total depends on the kind; the window "snapshots of our family are already on
+  the source" no longer counts the source-retention step before it is answered (a local copy
+  showed 7, 8, 7 while the chain question was open).
+- English GUI, restore window: `<pool>/restore` instead of the Polish `<pula>/restore`.
+
 ## [1.0.25] — 2026-11-16
 
 - `deploy.sh --uninstall` refuses while a `delete-relation` is still waiting for its source

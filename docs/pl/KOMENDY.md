@@ -318,7 +318,10 @@ Opcje `add-replica` warte znania: `--passive` (bez własnych snapshotów, niesie
 najnowszych snapshotów), `--media-guid=GUID` (dyski repliki według GUID puli, powtarzaj dla rotacji),
 `--on-insert=yes` (uruchom też po włożeniu dysku), `--schedule=auto|'30 2 * * *'|on-insert`.
 Przebiegi jednej repliki nigdy się nie nakładają: drugi kończy się z rc 75. Pierwsza kopia, która się
-nie zmieści na dysku, jest odrzucana, zanim cokolwiek zostanie zapisane.
+nie zmieści na dysku, jest odrzucana, zanim cokolwiek zostanie zapisane. Zaszyfrowany dataset bez
+załadowanego klucza idzie tylko jako `--raw` (kopia zaszyfrowana); bez `--raw` polecenie odmawia
+od razu, zamiast paść przy pierwszym przebiegu -- dodaj `--raw`, pomiń go `--exclude-child` albo
+załaduj klucz. Kreator GUI dodaje `--raw` sam.
 
 ### Retencja
 

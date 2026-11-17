@@ -54,8 +54,11 @@ MODE="backup"; HOST=""; PORT="22"; HOSTNAME_R=""; RECURSION="flat"; NOCOPY=0
 # numer kroku) zostaje, żeby wywołania się nie zmieniały.
 # U66 (właściciel 2026-10-21, przebudowa): kreator KROK PO KROKU -- tytuł mówi, który to krok
 # z ilu (liczą się tylko kroki tego rodzaju relacji); w podsumowaniu bez licznika.
+# Tutorial 1.0.25 (2026-11-17): na pierwszym kroku rodzaj relacji nie jest jeszcze wybrany, a
+# liczba kroków od niego zależy -- „krok 1 z 8” (backup) przechodził w lustrze w „krok 2 z 6”.
+# W kroku 1 bez licznika.
 title() {
-    if [ -n "${WZ_SN:-}" ]; then T 'Nowa relacja -- krok %s z %s: %s' "$WZ_SI" "$WZ_SN" "$2"
+    if [ -n "${WZ_SN:-}" ] && [ "${WZ_SI:-}" != 1 ]; then T 'Nowa relacja -- krok %s z %s: %s' "$WZ_SI" "$WZ_SN" "$2"
     else T 'Nowa relacja: %s' "$2"; fi
 }
 # Kopia lokalna nie ma drugiego hosta: czytelniki pytamy bez adresu (= ten host).
@@ -1562,7 +1565,11 @@ field_applies() {   # <pole> -> 0, gdy pole jest w tej relacji
         target) [ "$MODE" = backup ] || { [ "$MODE" = local ] && [ "$NOCOPY" -eq 0 ]; } ;;
         # U32: lustro trzyma to, co źródło -- osobnej retencji "u źródła" nie ma.
         # Pasywna kopia lokalna nie ma retencji źródła -- migawki źródła nie są jej.
-        srcret) { [ "$MODE" = backup ] && ! passive_forced; } || { is_local_copy && ! is_passive_copy; } ;;
+        # Tutorial 1.0.25 (2026-11-17): dopóki pytanie o migawki rodziny czeka na odpowiedź,
+        # liczy się jej domyślna „przyjmuję” (bez retencji źródła) -- licznik szedł 2 z 7,
+        # 3 z 8, 4 z 7. Okno retencji stoi w kolejności po łańcuchu, więc nic tu nie znika.
+        srcret) { [ "$MODE" = backup ] && ! passive_forced; } \
+                || { is_local_copy && ! is_passive_copy && ! { sync_from_chain && [ -z "$(chain_ans)" ]; }; } ;;
         # U138: pasywnie bez okna lancucha -- kopia lokalna, backup, lustro, gdy na zrodle nie ma migawek rodziny.
         passive) passive_offered ;;
         fastprune) [ "$MODE" = snaponly ] ;;
