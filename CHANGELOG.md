@@ -652,7 +652,8 @@ when they change how the tool is used.
 
 ## [1.0] — 2026-10-25
 
-The first public release (tag `v1.0`).
+The first public release. This repository was restarted with a clean history at 1.0.24, so the
+`v1.0` tag of that time is not in it.
 
 - **Relations**, created in a wizard (F3, Ins): backup, mirror, remote snapshots, and on the
   collector itself local copy and local snapshots.
