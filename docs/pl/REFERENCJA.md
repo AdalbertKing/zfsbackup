@@ -112,7 +112,7 @@ okna. Zobacz [snapsend.sh](#snapsendsh-wysyłka).
 
 | Cel | Czasowniki |
 |---|---|
-| Tworzenie | `--source=HOST:DATASET --target=DATASET [--install]` (zdalny backup; bez `--install` tylko planuje), `--mode=sync` (lustro), `--source=DATASET --target=DATASET` (kopia lokalna), `--target=''` (migawki lokalne), `new-relation` (kreator), `add-client`, `seed`, `activate` |
+| Tworzenie | `--source=HOST:DATASET --target=DATASET [--install]` (zdalny backup; bez `--install` tylko planuje), `--mode=sync` (lustro), `--source=DATASET --target=DATASET` (kopia lokalna; źródło z dziećmi wymaga `--recursive=flat`, `atomic` albo `no`), `--target=''` (migawki lokalne), `new-relation` (kreator), `add-client`, `seed`, `activate` |
 | Zmiana | `edit-relation`, `set-tiers`, `show-tiers`, `set-transfer`, `set-bandwidth`, `add-source`, `remove-source`, `save-profile`, `list-profiles`, `delete-profile`, `edit-config` |
 | Stan | `pause-client` / `resume-client` (pauza logiczna, `-L` w liniach zadań), `disable-client` / `enable-client` (partner odmawia relacji), `move-to-client`, `set-endpoint`, `verify-endpoint`, `final-catchup` |
 | Usuwanie | `remove-client`, `delete-relation` (całe usunięcie jedną komendą) |
@@ -141,8 +141,10 @@ jednorazowo: `ZFS_TUI_LANG=pl zfs-backup gui` albo `--lang=pl`.
 | F5 | Szablony |
 | F6 | Replika |
 | F7 | Uruchom teraz (F2, F3, F6), Przeglądaj (F4) |
-| F8 | Pokaż/schowaj wykonane (F2), pauza/wznów na relacji (F3), Grupuj po relacji (F4), Klucz (F6) |
-| F9 | Grupuj po relacji (F2), Plik -- eksport/import (F3), Przywróć (F4) |
+| F8 | pauza/wznów na relacji (F3), Klucz (F6) |
+| F9 | Plik -- eksport/import (F3), Przywróć (F4) |
+| Ctrl-G | Grupuj po relacji / jedna lista (F2, F4); podpis na dolnej ramce listy |
+| Ctrl-W | Ukryj/pokaż wykonane (F2); podpis na dolnej ramce listy |
 | F10 | Ustawienia (`settings.ini` hosta, zobacz [Alerty](#alerty)) |
 | F12 | Wyjście |
 
@@ -151,7 +153,7 @@ Odzysk z dysku (dawne okno F11 Odzysk) jest od 2026-10-27 w F4 Kopie: wiersz dys
 Szczegóły okien:
 
 - Pasek tytułu pokazuje wersję pakietu, czytaną z pierwszego nagłówka wersji pliku `CHANGELOG.md` dostarczanego obok programu.
-- F2 listuje wykonane przebiegi z ostatnich 72 godzin i zawsze listuje przebieg trwający, także po F8 i gdy zaczął się przed tym oknem. Po nadejściu historii przebiegów otwiera się na najnowszym wykonanym przebiegu. Przebieg bez rekordu końca, którego proces `zfs-job.sh` już nie istnieje, jest pokazany jako PRZERWANY (`job-stats --runs` daje mu rc `-2`); tam, gdzie nie da się czytać procesów innych użytkowników (`hidepid`), zostaje „trwa”. Silnik zabity przez TERM/INT/HUP sam zamyka swoje rekordy postępu jako przerwane. Wiersz znajduje swoje przebiegi po etykiecie własnej linii crona, więc wiersze migawek relacji tylko-migawki i wiersz lokalnego prune złożony z kilku datasetów pokazują własne przebiegi. W bezczynności ekran jest przerysowywany w całości raz na minutę, więc komunikat z konsoli nie zostawia śmieci.
+- F2 listuje wykonane przebiegi z ostatnich 72 godzin i zawsze listuje przebieg trwający, także po Ctrl-W i gdy zaczął się przed tym oknem. Po nadejściu historii przebiegów otwiera się na najnowszym wykonanym przebiegu. Przebieg bez rekordu końca, którego proces `zfs-job.sh` już nie istnieje, jest pokazany jako PRZERWANY (`job-stats --runs` daje mu rc `-2`); tam, gdzie nie da się czytać procesów innych użytkowników (`hidepid`), zostaje „trwa”. Silnik zabity przez TERM/INT/HUP sam zamyka swoje rekordy postępu jako przerwane. Wiersz znajduje swoje przebiegi po etykiecie własnej linii crona, więc wiersze migawek relacji tylko-migawki i wiersz lokalnego prune złożony z kilku datasetów pokazują własne przebiegi. W bezczynności ekran jest przerysowywany w całości raz na minutę, więc komunikat z konsoli nie zostawia śmieci.
 - F4 opisuje dataset repliki, który nie ma jeszcze migawki, jako „kopia trwa”, gdy kopia biegnie, a jako „przerwana, wznowi się”, gdy przerwany odbiór zostawił token wznowienia (`zfs-tree --json` niesie `resume`). Listuje dyski gości relacji tylko-migawki, które replikuje `pvesr`, i pokazuje nośnik repliki słowami F6 (NIE TEN DYSK albo Podłączony, gdy pula nie jest zaimportowana).
 - F6 przy NIE TEN DYSK repliki wymiennej mówi powód, gdy pula o nazwie puli repliki ma ID spoza jej dysków (dysk sformatowany ponownie albo inny): podaje oba ID i drogę przypisania (zmiana repliki, krok nośnik, pula oznaczona (obecny) -- dopisuje ID bez formatowania). `list-replicas --json` niesie `wrong_why` (`guid`, albo `dataset` przy innych odmowach bramy) i `wrong_guid` (ID puli); w innych stanach oba puste.
 - F6 ma kolumnę „Zajęte” i linię nośnika „zajęte N% (X z Y)”, gdy pula dysku jest zaimportowana. Trwająca kopia czyta się „kopia trwa od ...” zamiast ostatniego zakończonego przebiegu, a świeżo włożony dysk, którego kopia czeka, „dysk podłączony, kopia za ~N s” zamiast „odłączony”. Lista replik jest czytana ponownie co 15 s, gdy F6 jest otwarte.

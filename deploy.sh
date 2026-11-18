@@ -5249,9 +5249,35 @@ check_dep mbuffer  mbuffer          required    "snapsend.sh/snapget.sh refuse t
 check_dep hostname hostname         required    "validate_remote_host uses 'hostname -f' to refuse loopback replication"
 check_dep md5sum   coreutils        required    "per-target bookmark tags (lib-zfs-snap.sh)"
 check_dep awk      gawk             required    "snapshot list parsing"
+# U11 (first install on Debian 10, 2026-11-18): `awk` was mawk 1.3.3, which does not know
+# POSIX character classes. `[[:space:]]` matched nothing, profile_prune_ref_ids returned an
+# empty list and gen-cron refused "[relation:X] has no 'tiers'" -- while this table said
+# [ok], because it asked only whether an awk exists. The package uses the classes in awk
+# everywhere, so a wrong answer there is silent elsewhere. Asked of the awk itself.
+awk_posix_classes_ok() {
+    [ "$(printf '\tk = v1\n' | awk '/^[[:space:]]*k[[:space:]]*=[[:space:]]*[[:alpha:]][[:digit:]]$/ { print "M" }' 2>/dev/null)" = M ]
+}
+if command -v awk >/dev/null 2>&1 && ! awk_posix_classes_ok; then
+    if [ "$CHECK_ONLY" -eq 1 ]; then
+        warn "  [BROKEN]  awk ($(readlink -f "$(command -v awk)" 2>/dev/null)) does not match POSIX character classes ([[:space:]]) -- REQUIRED: gen-cron and the engines read every config and listing with them (apt: gawk)"
+        MISSING_OPTIONAL="$MISSING_OPTIONAL awk-posix"
+    else
+        log "  [broken]  awk does not match POSIX character classes ([[:space:]]) -- installing 'gawk'"
+        apt_install_with_fallback gawk >/dev/null 2>&1 || true
+        # Debian's gawk takes the awk alternative at a higher priority than mawk; re-asked,
+        # not assumed.
+        awk_posix_classes_ok \
+            || die "awk does not match POSIX character classes ([[:space:]]) and installing gawk did not change that (awk -> $(readlink -f "$(command -v awk)" 2>/dev/null)${APT_LAST_ERR:+, apt: $APT_LAST_ERR}) -- gen-cron would render relations without tiers. Install gawk and make it the awk alternative (update-alternatives --config awk), then re-run."
+        log "  [installed] gawk -- awk now matches POSIX character classes (awk -> $(readlink -f "$(command -v awk)" 2>/dev/null))"
+    fi
+fi
 # Owner 2026-10-26: browsing a copy (GUI: Przeglądaj) opens it in mc; without mc it falls
 # back to a plain shell in the copy directory. Installed with the package, not required.
 check_dep mc       mc               optional    "browsing a copy in the GUI (without it a plain shell)"
+# First install on PVE 6.4 / Debian 10, 2026-11-18: browsing a Windows guest's copy refused
+# "no NTFS driver" -- kernel 5.4 has no ntfs3 module, and nothing installed ntfs-3g, which
+# tui/browse.sh falls back to. Installed with the package, not required.
+check_dep ntfs-3g  ntfs-3g          optional    "browsing a Windows guest's copy (NTFS) in the GUI where the kernel has no ntfs3"
 # REV-20261027-176: restore proves a mounted file system idle with fuser before an in-place
 # restore, and refuses without it. Installed here; the refusal stays as the runtime guard.
 check_dep fuser    psmisc           optional    "restore: proving a mounted file system idle (without it an in-place restore is refused)"
@@ -8193,6 +8219,23 @@ else
     mkdir -p "$RUNDIR"
     chown "$USERNAME:$USERNAME" "$RUNDIR"
     log "LOCKDIR for this account: $RUNDIR"
+    # U15 (first install, 2026-11-18): $HOMEDIR/cron.log was root:root 0644, so every job of
+    # this account failed to log ("Permission denied") and the GUI reported its run as
+    # rc=unknown. The logs the account's jobs append to are created here as the account's,
+    # and one left to root (by a root-run job, or by hand) is handed back -- only from root,
+    # never from another owner.
+    for _lf in "$HOMEDIR/cron.log" "$HOMEDIR/zfs-snapshot-stats.log"; do
+        if [ -L "$_lf" ]; then
+            warn "  $_lf is a symlink -- left alone; this account's jobs log through it"
+        elif [ ! -e "$_lf" ]; then
+            install -o "$USERNAME" -g "$USERNAME" -m 0644 /dev/null "$_lf" \
+                && log "  created $_lf (owner $USERNAME)" || warn "  could not create $_lf for $USERNAME"
+        elif [ "$(stat -c %U "$_lf" 2>/dev/null)" = root ]; then
+            chown "$USERNAME:$USERNAME" "$_lf" \
+                && log "  $_lf belonged to root -- handed to $USERNAME (its jobs could not log)" \
+                || warn "  $_lf belongs to root and could not be handed to $USERNAME -- its jobs cannot log"
+        fi
+    done
 
     # ------------------------------------------------------------------------------
     log "Phase 8c: SSH keypair"

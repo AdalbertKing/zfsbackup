@@ -46,6 +46,8 @@
 # Użycie: capacity-guard.sh [--plan]  -- --plan: co by poszło, nic nie usuwa (działa
 # także przy guard = off).
 # Działa na źródle i na kolektorze (właściciel 2026-10-20: "W źródle i w celu").
+# cron starts jobs with PATH=/usr/bin:/bin; ZFS before 2.1 has zfs/zpool only in /sbin and /usr/sbin (U18).
+for _u18 in /usr/local/sbin /usr/sbin /sbin; do case ":${PATH:-}:" in *":$_u18:"*) ;; *) PATH="${PATH:-/usr/bin:/bin}:$_u18" ;; esac; done; unset _u18; export PATH
 set -u
 PLAN=0
 case "${1:-}" in --plan) PLAN=1 ;; "") ;; *) echo "użycie: capacity-guard.sh [--plan]" >&2; exit 2 ;; esac

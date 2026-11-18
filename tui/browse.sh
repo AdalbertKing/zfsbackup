@@ -359,14 +359,21 @@ if ! [ -s "$TMPD/roots" ]; then
     wt --title "$TITLE" --msgbox "$_m" 8 "$W"
     exit 1
 fi
-# każdy korzeń z dziećmi; tylko te, które mają choć jedną migawkę
-sort -u "$TMPD/roots" | while IFS= read -r r; do
-    [ -n "$r" ] || continue
+# każdy korzeń z dziećmi; tylko te, które mają choć jedną migawkę.
+# Właściciel 2026-11-18 („.. za długo się wczytuje”): było `zfs list -r` na KAŻDY korzeń i
+# `zfs list -t snapshot` na KAŻDY dataset -- przy `..` korzeniem jest każdy dataset hosta
+# (pve10: 115 datasetów, ok. 230 wywołań, 12 s). Teraz korzeń leżący pod innym korzeniem
+# odpada, a na każdy pozostały idą dwa wywołania: datasety (-r) i migawki (-r).
+# Pomiar pve10 przy tych samych 93 kandydatach: 12,1 s -> ok. 4,2 s (głównie lista 3274 migawek).
+sort -u "$TMPD/roots" | awk 'NF { for (i = 1; i <= n; i++) if (index($0, k[i] "/") == 1) next; k[++n] = $0; print }' >"$TMPD/roots.top"
+while IFS= read -r r; do
     zfs list -H -o name,type -r -- "$r" 2>/dev/null | tr -d '\r'
-done | sort -u | while IFS=$'\t' read -r n t; do
-    [ -n "$n" ] || continue
-    zfs list -H -t snapshot -o name -d 1 -- "$n" 2>/dev/null | grep -q . && printf '%s\t%s\n' "$n" "$t"
-done >"$TMPD/cand.tsv"
+done <"$TMPD/roots.top" | sort -u >"$TMPD/all.tsv"
+while IFS= read -r r; do
+    zfs list -H -t snapshot -o name -r -- "$r" 2>/dev/null | tr -d '\r'
+done <"$TMPD/roots.top" | sed 's/@.*//' | sort -u >"$TMPD/hassnap"
+# getline, nie NR == FNR: przy pustym hassnap awk wziąłby all.tsv za pierwszy plik.
+awk -F'\t' -v hf="$TMPD/hassnap" 'BEGIN { while ((getline l < hf) > 0) h[l] = 1 } $1 != "" && ($1 in h)' "$TMPD/all.tsv" >"$TMPD/cand.tsv"
 if ! [ -s "$TMPD/cand.tsv" ]; then
     wt --title "$TITLE" --msgbox "$(T 'Kopie nie mają żadnej migawki -- nie ma czego przeglądać.')" 8 "$W"
     exit 1
@@ -498,21 +505,32 @@ browse_and_exit() {
 }
 
 step=1
-# Wskazany dataset (--dataset=, z F4 Kopie) -- drzewo pominiete, gdy jest na liscie.
+# Cofanie wraca do punktu wyjscia (wlasciciel 2026-11-18: po bledzie NTFS i Esc z migawki
+# otwartej w F4 dostal liste migawek, a potem drzewo wszystkich datasetow). Dokad prowadzi
+# Esc albo porazka: SNAP_BACK -- z menu migawek, DEV_BACK -- z montowania (krok 3/4);
+# 0 = wyjscie do GUI. Drzewo -> migawki -> partycja krok po kroku tylko tam, gdzie tak sie
+# weszlo (--any, relacja bez --dataset=).
+SNAP_BACK=1; DEV_BACK=2; NPARTS=0
+back_to() { [ "$1" -eq 0 ] && exit 0; step="$1"; }
+# Porazka po wyborze partycji: menu partycji, gdy bylo z czego wybierac; inaczej krok wstecz.
+back_from_part() { if [ "$NPARTS" -gt 1 ]; then step=3; else back_to "$DEV_BACK"; fi; }
+# Wskazany dataset (--dataset=, z F4 Kopie) -- drzewo pominiete, gdy jest na liscie; Esc w
+# menu migawek wraca do GUI, nie do drzewa.
 if [ -n "$PRE_DS" ]; then
     TYP="$(awk -F'\t' -v d="$PRE_DS" '$1 == d { print $2; exit }' "$TMPD/cand.tsv")"
-    if [ -n "$TYP" ]; then DS="$PRE_DS"; step=2; fi
+    if [ -n "$TYP" ]; then DS="$PRE_DS"; step=2; SNAP_BACK=0; fi
 fi
-# Wskazana migawka (--snapshot=, prawy panel F4): prosto do montowania. Migawka, ktorej juz
-# nie ma (przycieta miedzy odczytem a Enter), wraca do menu migawek jej datasetu.
+# Wskazana migawka (--snapshot=, dolny panel F4): prosto do montowania; kazde cofniecie i
+# kazda porazka koncza w GUI (F4), nigdy w menu migawek ani w drzewie. Migawka albo dataset,
+# ktorych juz nie ma (przyciete miedzy odczytem a Enter): komunikat i powrot do GUI.
 if [ -n "$PRE_SNAP" ]; then
-    DS="${PRE_SNAP%@*}"; SNAP="${PRE_SNAP#*@}"
+    DS="${PRE_SNAP%@*}"; SNAP="${PRE_SNAP#*@}"; SNAP_BACK=0; DEV_BACK=0
     TYP="$(zfs get -H -o value type -- "$DS" 2>/dev/null | tr -d '\r')"
     if [ -n "$TYP" ] && zfs list -H -o name -t snapshot -- "$PRE_SNAP" >/dev/null 2>&1; then
         if [ "$TYP" = volume ]; then step=3; else step=4; fi
     else
-        wt --title "$TITLE" --msgbox "$(Tv 'Migawki $SNAP już nie ma -- wybierz z listy.' '$SNAP' "$PRE_SNAP")" 8 "$W"
-        [ -n "$TYP" ] && step=2 || { DS=""; step=1; }
+        wt --title "$TITLE" --msgbox "$(Tv 'Migawki $SNAP już nie ma.' '$SNAP' "$PRE_SNAP")" 8 "$W"
+        exit 0
     fi
 fi
 while :; do
@@ -573,7 +591,7 @@ PYEOF
         done <"$TMPD/points.tsv"
         PRE_AT=""
         geom
-        wt --title "$(Tv '$TITLE: z kiedy?' '$TITLE' "$TITLE")" ${dflt:+--default-item "$dflt"} --menu "$(Tv '$DS -- migawka do przejrzenia (czas hosta, $(date +%Z)).' '$DS' "$DS" '$(date +%Z)' "$(date +%Z)")" "$H" "$W" "$(lhfit $i 1)" "${menu[@]}" || { step=1; continue; }
+        wt --title "$(Tv '$TITLE: z kiedy?' '$TITLE' "$TITLE")" ${dflt:+--default-item "$dflt"} --menu "$(Tv '$DS -- migawka do przejrzenia (czas hosta, $(date +%Z)).' '$DS' "$DS" '$(date +%Z)' "$(date +%Z)")" "$H" "$W" "$(lhfit $i 1)" "${menu[@]}" || { back_to "$SNAP_BACK"; continue; }
         k="${WT_OUT#p}"
         SNAP="$(sed -n "$((k + 1))p" "$TMPD/points.tsv" | cut -f2)"
         if [ "$TYP" = volume ]; then step=3; else step=4; fi ;;
@@ -584,7 +602,7 @@ PYEOF
             wt --title "$TITLE" --msgbox "$(Tv 'Nie udało się udostępnić dysku z migawki $DS@$SNAP do odczytu:
 $ERR' '$DS' "$DS" '$SNAP' "$SNAP" '$ERR' "$(head -2 "$TMPD/sd.err")")" 10 "$W"
             undo_or_warn ""
-            step=2; continue
+            back_to "$DEV_BACK"; continue
         fi
         DEV="$ZVDIR/$DS@$SNAP"
         for _w in 1 2 3 4 5 6 7 8 9 10; do
@@ -593,7 +611,7 @@ $ERR' '$DS' "$DS" '$SNAP' "$SNAP" '$ERR' "$(head -2 "$TMPD/sd.err")")" 10 "$W"
         done
         if ! [ -e "$DEV" ]; then
             undo_or_warn "$(Tv 'Urządzenie $DEV nie pojawiło się (udev). Nic nie zostało zmienione w kopii.' '$DEV' "$DEV")"
-            step=2; continue
+            back_to "$DEV_BACK"; continue
         fi
         sleep 1; command -v udevadm >/dev/null 2>&1 && udevadm settle 2>/dev/null
         # parts.tsv: urządzenie, system plików, rozmiar, etykieta -- rozdzielone \001, NIE tabulatorem:
@@ -612,7 +630,7 @@ def walk(ds):
         print("\x01".join([x.get("name") or "", x.get("fstype") or "", x.get("size") or "", x.get("label") or ""]))
         walk(x.get("children"))
 walk(d.get("blockdevices"))' | tr -d '\r' >"$TMPD/parts.tsv"
-        menu=(); i=0
+        menu=(); i=0; rm -f "$TMPD/pick.tsv"
         while IFS=$'\001' read -r pd pf ps pl; do
             [ -n "$pf" ] || continue
             case "$pf" in swap|LVM2_member|linux_raid_member|zfs_member) continue ;; esac
@@ -623,20 +641,21 @@ walk(d.get("blockdevices"))' | tr -d '\r' >"$TMPD/parts.tsv"
         done <"$TMPD/parts.tsv"
         if [ "$i" -eq 0 ]; then
             wt --title "$TITLE" --msgbox "$(Tv 'Na dysku $DS@$SNAP nie ma partycji z obsługiwanym systemem plików (NTFS, ext2/3/4, xfs, vfat, exfat, btrfs; BitLocker, LUKS). LVM i RAID -- jeszcze nie.' '$DS' "$DS" '$SNAP' "$SNAP")" 10 "$W"
-            undo_or_warn ""; step=2; continue
+            undo_or_warn ""; back_to "$DEV_BACK"; continue
         fi
+        NPARTS=$i
         # I-2 (kampania 2026-10-21): jedna partycja do wyboru = bez okna wyboru (o jeden klawisz mniej).
         if [ "$i" -eq 1 ]; then
             WT_OUT=q0
         else
-            wt --title "$(Tv '$TITLE: która partycja?' '$TITLE' "$TITLE")" --menu "$(Tv '$DS@$SNAP -- tylko do odczytu.' '$DS' "$DS" '$SNAP' "$SNAP")" "$H" "$W" "$(lhfit $i 1)" "${menu[@]}" || { rm -f "$TMPD/pick.tsv"; undo_or_warn ""; step=2; continue; }
+            wt --title "$(Tv '$TITLE: która partycja?' '$TITLE' "$TITLE")" --menu "$(Tv '$DS@$SNAP -- tylko do odczytu.' '$DS' "$DS" '$SNAP' "$SNAP")" "$H" "$W" "$(lhfit $i 1)" "${menu[@]}" || { rm -f "$TMPD/pick.tsv"; undo_or_warn ""; back_to "$DEV_BACK"; continue; }
         fi
         k="${WT_OUT#q}"
         PDEV="$(sed -n "$((k + 1))p" "$TMPD/pick.tsv" | cut -f1)"; PFS="$(sed -n "$((k + 1))p" "$TMPD/pick.tsv" | cut -f2)"
         rm -f "$TMPD/pick.tsv"
         case "$PFS" in
             BitLocker|crypto_LUKS)
-                command -v cryptsetup >/dev/null 2>&1 || { wt --title "$TITLE" --msgbox "$(T 'Partycja jest zaszyfrowana, a na tym hoście nie ma cryptsetup (apt install cryptsetup-bin).')" 9 "$W"; undo_or_warn ""; step=2; continue; }
+                command -v cryptsetup >/dev/null 2>&1 || { wt --title "$TITLE" --msgbox "$(T 'Partycja jest zaszyfrowana, a na tym hoście nie ma cryptsetup (apt install cryptsetup-bin).')" 9 "$W"; undo_or_warn ""; back_from_part; continue; }
                 _ty=luks; _hint="$(T 'hasło LUKS')"
                 [ "$PFS" = BitLocker ] && { _ty=bitlk; _hint="$(T 'hasło BitLocker albo 48-cyfrowy klucz odzyskiwania (z myślnikami)')"; }
                 _name="zbrowse-$$"
@@ -649,7 +668,7 @@ walk(d.get("blockdevices"))' | tr -d '\r' >"$TMPD/parts.tsv"
                     wt --title "$TITLE" --msgbox "$(Tv 'Nie udało się odblokować:\n$ERR\nSpróbuj jeszcze raz albo Anuluj.' '$ERR' "$(head -2 "$TMPD/cs.err")")" 11 "$W"
                 done
                 WT_OUT=""
-                [ "$_ok" -eq 1 ] || { undo_or_warn ""; step=2; continue; }
+                [ "$_ok" -eq 1 ] || { undo_or_warn ""; back_from_part; continue; }
                 MAPPED="$_name"
                 PDEV="$MAPDIR/$_name"
                 PFS="$(blkid -o value -s TYPE "$PDEV" 2>/dev/null)"
@@ -657,16 +676,16 @@ walk(d.get("blockdevices"))' | tr -d '\r' >"$TMPD/parts.tsv"
         esac
         if ! mount_ro "$PDEV" "$PFS"; then
             wt --title "$TITLE" --msgbox "$(Tv 'Nie udało się zamontować $PDEV ($PFS) tylko do odczytu:\n$ERR' '$PDEV' "$PDEV" '$PFS' "$PFS" '$ERR' "$(head -3 "$TMPD/mount.err")")" 11 "$W"
-            undo_or_warn ""; step=2; continue
+            undo_or_warn ""; back_from_part; continue
         fi
         browse_and_exit "$DS@$SNAP, $PDEV ($PFS)" ;;
-    4)  need_key "$DS" || { step=2; continue; }
+    4)  need_key "$DS" || { back_to "$DEV_BACK"; continue; }
         if ! mount_ro "$DS@$SNAP" zfs; then
             wt --title "$TITLE" --msgbox "$(Tv 'Nie udało się zamontować $DS@$SNAP:\n$ERR' '$DS' "$DS" '$SNAP' "$SNAP" '$ERR' "$(head -3 "$TMPD/mount.err")")" 10 "$W"
             # REV-20261028-178: klucz tej proby zdjety od razu, nie dopiero przy wyjsciu.
             RESIDUE=""
             unload_key || wt --title "$TITLE" --msgbox "$(Tv 'Nie wszystko udało się posprzątać:$RESIDUE' '$RESIDUE' "$RESIDUE")" 14 "$W"
-            step=2; continue
+            back_to "$DEV_BACK"; continue
         fi
         browse_and_exit "$DS@$SNAP" ;;
     esac

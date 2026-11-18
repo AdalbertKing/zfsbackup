@@ -33,6 +33,8 @@
 # wartość = nic, kod 1, alert z nazwą.
 # Użycie: growth-guard.sh [--plan]  -- --plan: wynik dla każdego datasetu, bez alertów
 # (działa także przy alert = off).
+# cron starts jobs with PATH=/usr/bin:/bin; ZFS before 2.1 has zfs/zpool only in /sbin and /usr/sbin (U18).
+for _u18 in /usr/local/sbin /usr/sbin /sbin; do case ":${PATH:-}:" in *":$_u18:"*) ;; *) PATH="${PATH:-/usr/bin:/bin}:$_u18" ;; esac; done; unset _u18; export PATH
 set -u
 PLAN=0
 case "${1:-}" in --plan) PLAN=1 ;; "") ;; *) echo "użycie: growth-guard.sh [--plan]" >&2; exit 2 ;; esac

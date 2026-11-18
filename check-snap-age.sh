@@ -1,4 +1,6 @@
 #!/bin/bash
+# cron starts jobs with PATH=/usr/bin:/bin; ZFS before 2.1 has zfs/zpool only in /sbin and /usr/sbin (U18).
+for _u18 in /usr/local/sbin /usr/sbin /sbin; do case ":${PATH:-}:" in *":$_u18:"*) ;; *) PATH="${PATH:-/usr/bin:/bin}:$_u18" ;; esac; done; unset _u18; export PATH
 set -o pipefail
 
 # check-snap-age.sh

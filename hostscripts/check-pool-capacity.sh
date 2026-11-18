@@ -11,6 +11,8 @@
 # The threshold is the host setting [capacity] threshold (settings.ini, F10 in the
 # GUI; env ZFS_CAPACITY_THRESHOLD wins) -- read through alert-env.sh beside this
 # script. It was a constant here, so changing it meant an edit the next update undid.
+# cron starts jobs with PATH=/usr/bin:/bin; ZFS before 2.1 has zfs/zpool only in /sbin and /usr/sbin (U18).
+for _u18 in /usr/local/sbin /usr/sbin /sbin; do case ":${PATH:-}:" in *":$_u18:"*) ;; *) PATH="${PATH:-/usr/bin:/bin}:$_u18" ;; esac; done; unset _u18; export PATH
 # shellcheck disable=SC1091
 . "$(dirname "$0")/alert-env.sh" 2>/dev/null || :
 THRESHOLD="${ZFS_CAPACITY_THRESHOLD:-90}"

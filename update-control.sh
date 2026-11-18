@@ -24,6 +24,8 @@
 # overrides them with REPO_DIR/UPDATE_STATE_DIR environment variables,
 # exactly like deploy.sh's own self-update test harness does -- see
 # test/selfupdate/run.sh.
+# cron starts jobs with PATH=/usr/bin:/bin; ZFS before 2.1 has zfs/zpool only in /sbin and /usr/sbin (U18).
+for _u18 in /usr/local/sbin /usr/sbin /sbin; do case ":${PATH:-}:" in *":$_u18:"*) ;; *) PATH="${PATH:-/usr/bin:/bin}:$_u18" ;; esac; done; unset _u18; export PATH
 set -uo pipefail
 
 # Not "$0": when test/selfupdate/run.sh `source`s this file from a differently

@@ -121,6 +121,17 @@ only warns). Name your own datasets then:
 
 The list is remembered: later runs and updates pick it up automatically.
 
+On an old system (Debian 10 / PVE 6) the stock `awk` is mawk 1.3.3, which does not know
+POSIX character classes; `deploy.sh` checks the awk itself and installs `gawk` when it
+fails. If you ran `deploy.sh` without `--backup-user`, the GUI wizard asks to create the
+account you chose in it (e.g. `zfsbackup`) before it shows the plan. Installing a local copy for
+the account also grants it guest freezing when the template freezes guests, and unmounts
+(`canmount=noauto`) a landing dataset an older job left mounted with no snapshots and
+under 1 MiB of data -- the account cannot unmount it for the first full receive. The plan says both.
+When copies of the same data already lie on the host (a reinstall, or disks brought in),
+the wizard proposes the target under which they continue incrementally, and for copies in
+another layout it shows the `zfs rename -p` that puts them where the relation copies to.
+
 Check that everything is clean:
 
 ```bash

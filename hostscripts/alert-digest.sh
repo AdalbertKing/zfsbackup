@@ -20,6 +20,8 @@
 # the repository, sourced here. Loud when absent: a run that cannot find its
 # precedence rule would silently read the production queue under a test env.
 # shellcheck disable=SC1091
+# cron starts jobs with PATH=/usr/bin:/bin; ZFS before 2.1 has zfs/zpool only in /sbin and /usr/sbin (U18).
+for _u18 in /usr/local/sbin /usr/sbin /sbin; do case ":${PATH:-}:" in *":$_u18:"*) ;; *) PATH="${PATH:-/usr/bin:/bin}:$_u18" ;; esac; done; unset _u18; export PATH
 . "$(dirname "$0")/alert-env.sh" || { echo "$0: cannot source alert-env.sh next to this script -- re-run deploy.sh" >&2; exit 1; }
 
 QUEUE="${ZFS_ALERT_QUEUE:-/var/lib/zfs-snapshot-all/alert-queue.log}"

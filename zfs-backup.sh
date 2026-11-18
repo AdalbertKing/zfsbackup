@@ -250,7 +250,7 @@ Usage:
                                     The cleanest source preset creates NOTHING: drop
                                     [dataset], keep [prune]. See profiles/README.md,
                                     "A profile that only prunes".
-                [--local-user=NAME] [--recursive=flat|atomic] [--install] [--yes|-y]
+                [--local-user=NAME] [--recursive=flat|atomic|no] [--install] [--yes|-y]
                 [--name=NAME] [--exclude-child=REGEX]... [--exclude-family=A,B]
                                     LOCAL backup ('local-backup ...' is an alias).
                                     --name=NAME:       a LOCAL RELATIONSHIP -- a record
@@ -261,7 +261,10 @@ Usage:
                                                        own landing prune <target>/<source>.
                                     --recursive=flat with a target: the tree is copied
                                                        to <target>/<source path>, children
-                                                       created later included.
+                                                       created later included. A source
+                                                       with children needs --recursive=
+                                                       flat, atomic or no (no = the source
+                                                       alone); without it: refused.
                                     --exclude-child / --exclude-family: as in the remote
                                                        form (-X / -E); --exclude-child
                                                        needs --recursive=flat.
@@ -6401,7 +6404,11 @@ quiesce_whitelist_gaps() {
     ef=$(mktemp) || { printf '? %s %s\n' "$blk" "mktemp failed"; return 0; }
     while IFS= read -r line; do
         case "$line" in *" -q "*) ;; *) continue ;; esac
-        case "$line" in *"/snapsend.sh "*|*"/snapget.sh -s "*) ;; *) continue ;; esac
+        # Every snapget.sh line, not only `-s`: a LOCAL copy is `snapget.sh -m ... "<sources>"
+        # "<target>"`, its sources are this host's, and it was skipped -- no warning and no
+        # grant for exactly the relationship U149-c was about (lab, 2026-11-18). A
+        # remote source carries host: and is dropped below.
+        case "$line" in *"/snapsend.sh "*|*"/snapget.sh "*) ;; *) continue ;; esac
         dss=$(printf '%s\n' "$line" | awk -F'"' '{ n = 0; for (i = 2; i <= NF; i += 2) if (++n == 3) { print $i; exit } }')
         # the 1st quoted string is the zfs-job label, the 2nd -m's prefix
         [ -n "$dss" ] || continue
@@ -6449,6 +6456,71 @@ quiesce_whitelist_gaps() {
         seen="$seen$w "
         printf '%s %s\n' "${w%%:*}" "${w#*:}"
     done
+}
+
+# lb_mounted_empty_landings <target> <root>... -> one per line: every MOUNTED file system
+# at or under <target>/<root> with no snapshot of its own and under 1 MiB referenced --
+# an empty container an older root job left mounted. The first copy into it is a full
+# `zfs recv -F`, which must unmount it, and on Linux a delegated account cannot (U16,
+# first install 2026-11-18: "cannot unmount ... unmount failed" on the parent only).
+#
+# REV-20261118-B01 F1: this answer makes --install run `zfs unmount` as root, so a read that
+# failed is never "empty". rc 0 = the list is complete; rc 1 = some read failed or answered
+# something unexpected, the reason on stderr, and the caller must not unmount anything.
+# A landing that does not exist yet (the first copy creates it) is the one non-zero answer
+# taken as "nothing here": rc 1 with zfs's own "dataset does not exist", read under LC_ALL=C.
+lb_mounted_empty_landings() {
+    local t="$1" r out rc err n ty m ref v; shift
+    [ -n "$t" ] || return 0
+    for r in "$@"; do
+        err=$(mktemp) || { echo "mktemp failed" >&2; return 1; }
+        out=$(LC_ALL=C zfs list -H -p -r -o name,type,mounted,referenced -- "$t/$r" 2>"$err"); rc=$?
+        if [ "$rc" -ne 0 ]; then
+            if [ "$rc" -eq 1 ] && [ -z "$out" ] && [ "$(cat "$err")" = "cannot open '$t/$r': dataset does not exist" ]; then
+                rm -f "$err"; continue
+            fi
+            echo "zfs list -r '$t/$r' failed (rc=$rc): $(head -c 300 "$err")" >&2; rm -f "$err"; return 1
+        fi
+        rm -f "$err"
+        while IFS=$'\t' read -r n ty m ref; do
+            [ -n "$n$ty$m$ref" ] || continue
+            case "$n" in "$t/$r"|"$t/$r"/*) ;; *) echo "zfs list -r '$t/$r' answered an unexpected row: '$n'" >&2; return 1 ;; esac
+            case "$ref" in ''|*[!0-9]*) echo "zfs list -r '$t/$r': unexpected referenced='$ref' for '$n'" >&2; return 1 ;; esac
+            # Only a row that could be a candidate is asked again, one by one.
+            [ "$ty" = filesystem ] && [ "$m" = yes ] && [ "$ref" -lt 1048576 ] || continue
+            lb_landing_state "$n"; v=$?
+            case "$v" in 0) printf '%s\n' "$n" ;; 1) ;; *) return 1 ;; esac
+        done <<<"$out"
+    done
+}
+
+# lb_landing_state <dataset> -> 0 = mounted file system, under 1 MiB referenced, no snapshot
+# of its own (an unmount candidate); 1 = not one; 2 = unreadable or unexpected (reason on
+# stderr). --install asks again right before it unmounts, so a dataset that changed after
+# the plan's listing is not touched on the old answer.
+lb_landing_state() {
+    local n="$1" row rc ty m ref snaps
+    row=$(LC_ALL=C zfs get -H -p -o value type,mounted,referenced -- "$n" 2>/dev/null); rc=$?
+    [ "$rc" -eq 0 ] || { echo "zfs get on '$n' failed (rc=$rc)" >&2; return 2; }
+    { IFS= read -r ty; IFS= read -r m; IFS= read -r ref; } <<<"$row"
+    case "$ty" in filesystem) ;; volume|snapshot|bookmark) return 1 ;; *) echo "zfs get on '$n': unexpected type '$ty'" >&2; return 2 ;; esac
+    case "$m" in yes) ;; no) return 1 ;; *) echo "zfs get on '$n': unexpected mounted='$m'" >&2; return 2 ;; esac
+    case "$ref" in ''|*[!0-9]*) echo "zfs get on '$n': unexpected referenced='$ref'" >&2; return 2 ;; esac
+    [ "$ref" -lt 1048576 ] || return 1
+    snaps=$(LC_ALL=C zfs list -H -t snapshot -o name -d 1 -- "$n" 2>/dev/null); rc=$?
+    [ "$rc" -eq 0 ] || { echo "zfs list -t snapshot on '$n' failed (rc=$rc)" >&2; return 2; }
+    [ -z "$snaps" ] || return 1
+    return 0
+}
+
+# lb_quiesce_gaps_here <account> <block file> <root>... -> the quiesce_whitelist_gaps rows
+# (and "?" rows) for guests at or under one of these roots: the block holds every
+# relation of the account, and only this relation's guests are its install's business.
+lb_quiesce_gaps_here() {
+    local acct="$1" blk="$2"; shift 2
+    quiesce_whitelist_gaps "$acct" "$blk" | awk -v roots="$*" '
+        BEGIN { n = split(roots, r, " ") }
+        { for (i = 1; i <= n; i++) if ($2 == r[i] || index($2, r[i] "/") == 1) { print; next } }'
 }
 
 # quiesce_whitelist_warn <account> <block file> -- the install-time warnings from
@@ -8714,7 +8786,7 @@ cmd_add_replica() {   # <name> --source=DS [--source=DS2 ...] --dst=POOL/BASE [.
                 [ "$_lk" = available ] && continue
                 _skip=0
                 for _x in ${xchild[@]+"${xchild[@]}"}; do
-                    printf '%s\n' "$_ln" | grep -Eq -- "$_x" && { _skip=1; break; }
+                    grep -Eq -- "$_x" <<<"$_ln" && { _skip=1; break; }
                 done
                 [ "$_skip" -eq 1 ] || _locked="$_locked $_ln"
             done <<<"$_zo"
@@ -9464,7 +9536,7 @@ cmd_local_backup() {
     # yesterday gets byte-identical behaviour today; installing is an explicit verb.
     local do_install=0 assume_yes=0 lb_no_copy=0
     local local_user="" local_user_given=0 resolver_user=""
-    local lb_recursion=""
+    local lb_recursion="" lb_recursion_given=0
     # --name (2026-10-09, owner: a copy on THIS host is a relationship like any
     # other -- on F3, paused, deleted the same way). With a name the sections
     # carry pair_label (so the engine lines carry -L and the pause gate reaches
@@ -9526,11 +9598,11 @@ cmd_local_backup() {
             # (pve10 <> pve9, dead from 2026-09-20). The generator already
             # scopes all three lines from one `recursive =` on the section;
             # this only lets the composer write it. Same grammar as add-client.
-            --recursive=*) lb_recursion="${a#*=}"
+            --recursive=*) lb_recursion="${a#*=}"; lb_recursion_given=1
                 case "$lb_recursion" in
                     flat|atomic) ;;
                     no) lb_recursion="" ;;
-                    *) die "local-backup: --recursive must be 'flat' (each descendant its own snapshot and prune) or 'atomic' (one zfs snapshot -r of the subtree), got '$lb_recursion'" ;;
+                    *) die "local-backup: --recursive must be 'flat' (each descendant its own snapshot and prune) or 'atomic' (one zfs snapshot -r of the subtree) or 'no' (the source alone), got '$lb_recursion'" ;;
                 esac ;;
             *) die "local-backup: unknown option $a" ;;
         esac
@@ -9582,11 +9654,33 @@ cmd_local_backup() {
     #               display something untrue.
     if [ -n "$LOCAL_USER" ] && ! id -u "$LOCAL_USER" >/dev/null 2>&1; then
         if [ "$do_install" -eq 1 ]; then
-            log "local-backup: account '$LOCAL_USER' does not exist -- creating it now (deploy.sh --backup-user=$LOCAL_USER)"
-            bash "$DEPLOY" --backup-user="$LOCAL_USER" \
+            # First install from zero (2026-11-18): without --grant-datasets deploy.sh grants
+            # its Proxmox default and dies on a host whose pools are named otherwise; the
+            # relation's own sources are what the account will snapshot. Only where deploy.sh
+            # has recorded no list yet: the record is host-wide, and on a host that has one
+            # (another account's) an explicit list would replace it (lab, 2026-11-18).
+            local -a _lb_gd=()
+            [ "${#source_flags[@]}" -gt 0 ] && [ ! -s "${UPDATE_STATE_DIR:-/root/.zfs-snapshot-all-update-state}/grant-datasets" ] \
+                && _lb_gd=(--grant-datasets="$(IFS=,; printf '%s' "${source_flags[*]}")")
+            log "local-backup: account '$LOCAL_USER' does not exist -- creating it now (deploy.sh --backup-user=$LOCAL_USER${_lb_gd[*]:+ ${_lb_gd[*]}})"
+            bash "$DEPLOY" --backup-user="$LOCAL_USER" ${_lb_gd[@]+"${_lb_gd[@]}"} \
                 || die "local-backup: deploy.sh --backup-user=$LOCAL_USER failed -- see above; nothing was installed"
         else
             die "local-backup: --local-user='$LOCAL_USER' names an account that does not exist on this host, so this plan cannot show you the block that would actually be installed -- gen-cron writes the running copy's paths into every line, and only that account's own checkout produces the right ones. Nothing was created. Either create it first (deploy.sh --backup-user=$LOCAL_USER) and re-run this plan, or run the same command with --install, which creates it as part of the deployment."
+        fi
+    elif [ -n "$LOCAL_USER" ] && [ "$do_install" -eq 1 ]; then
+        # The account exists but its own checkout does not: a first creation that died after
+        # useradd (git clone failed, lab 2026-11-18). Re-running --install only said "run
+        # deploy.sh --backup-user"; it now finishes that deployment itself, as for a missing
+        # account. deploy.sh is idempotent for an existing account.
+        local _lb_home; _lb_home="$(getent passwd "$LOCAL_USER" | cut -d: -f6)"
+        if [ -n "$_lb_home" ] && ! runuser_test_r "$LOCAL_USER" "$_lb_home/zfs-snapshot-all/gen-cron.sh"; then
+            local -a _lb_gd=()
+            [ "${#source_flags[@]}" -gt 0 ] && [ ! -s "${UPDATE_STATE_DIR:-/root/.zfs-snapshot-all-update-state}/grant-datasets" ] \
+                && _lb_gd=(--grant-datasets="$(IFS=,; printf '%s' "${source_flags[*]}")")
+            log "local-backup: account '$LOCAL_USER' has no checkout of its own ($_lb_home/zfs-snapshot-all) -- finishing its deployment now (deploy.sh --backup-user=$LOCAL_USER${_lb_gd[*]:+ ${_lb_gd[*]}})"
+            bash "$DEPLOY" --backup-user="$LOCAL_USER" ${_lb_gd[@]+"${_lb_gd[@]}"} \
+                || die "local-backup: deploy.sh --backup-user=$LOCAL_USER failed -- see above; nothing was installed"
         fi
     fi
 
@@ -9739,6 +9833,29 @@ cmd_local_backup() {
                 && die "local-backup: sources '${roots[i]}' and '${roots[j]}' overlap (equal or parent/child) -- refusing; the high-level path will not invent precedence between overlapping roots."
         done
     done
+    # A source with children and no --recursive copied the parent alone: rpool/data went
+    # without its VM disks, the plan said nothing, and every run ended rc 0 with only a
+    # WARNING in the account's log (clean Debian 12, lab 2026-11-18). Recursion is a
+    # choice the operator has to make, not a default this path may guess: refuse, and
+    # name the three answers. --recursive=no keeps the old behaviour on purpose.
+    # REV-20261118-B02 F1: an unreadable listing is not "no children" -- that was the old
+    # silent partial copy again. rc != 0, a listing without the source's own row, or a row
+    # that is neither the source nor a direct child refuses; no pipeline, so no pipefail
+    # status to lose.
+    if [ "$lb_recursion_given" -eq 0 ]; then
+        local _kids _r _kl _krc _kbad
+        for _r in "${roots[@]}"; do
+            _kl="$(zfs list -H -o name -t filesystem,volume -r -d 1 -- "$_r" 2>/dev/null)"; _krc=$?
+            _kbad=$(awk -v s="$_r" '$0 == s { self = 1; next } index($0, s "/") != 1 || index(substr($0, length(s) + 2), "/") { bad = 1 }
+                END { print (self && !bad) ? "" : "x" }' <<<"$_kl")
+            if [ "$_krc" -ne 0 ] || [ -n "$_kbad" ]; then
+                die "local-backup: could not read whether source '$_r' has children (zfs list -r -d 1: rc=$_krc$([ "$_krc" -eq 0 ] && printf ', unexpected listing')) -- without knowing, the copy could leave its children out. Fix the read, or say it yourself: --recursive=flat, --recursive=atomic, or --recursive=no (only '$_r' itself). The relation was not created."
+            fi
+            _kids=$(awk -v s="$_r" 'index($0, s "/") == 1 && n < 5 { print; n++ }' <<<"$_kl")
+            [ -n "$_kids" ] || continue
+            die "local-backup: source '$_r' has children (for example: $(printf '%s' "$_kids" | tr '\n' ' ')) and no --recursive was given -- without it only '$_r' itself is copied, not its children. Choose: --recursive=flat (each child its own snapshot, copy and prune; what the wizard uses), --recursive=atomic (one zfs snapshot -r of the subtree), or --recursive=no (only '$_r' itself). The relation was not created."
+        done
+    fi
 
     # Choose the preset. load_active_profile calls profile_validate_file, which
     # refuses a profile carrying any relationship-owned field before it can reach
@@ -10311,6 +10428,25 @@ Taking over older jobs (a v4 config written manually): remove their sections fir
     echo "--- generated cron block (gen-cron.sh -c, full) ---"
     gencron_as_target -c "$cand"
     if [ "$do_install" -ne 1 ]; then
+        # U16/U13: what --install will do as root for the account, said in the plan.
+        if [ -n "$LOCAL_USER" ]; then
+            local _pm _pq _pl _plerr
+            if [ "$no_copy" -eq 0 ]; then
+                _plerr=$(mktemp)
+                if _pl=$(lb_mounted_empty_landings "$target" "${roots[@]}" 2>"$_plerr"); then
+                    while IFS= read -r _pm; do
+                        [ -n "$_pm" ] && echo "  Landing dataset:  $_pm is mounted, empty, without snapshots -- --install unmounts it and sets canmount=noauto ('$LOCAL_USER' cannot unmount it for the first full receive; zfs unmount itself refuses a busy file system, this is no proof that nothing uses the mount)"
+                    done <<<"$_pl"
+                else
+                    echo "  Landing dataset:  could not be read under '$target' ($(cat "$_plerr")) -- --install will refuse until it can, rather than unmount on a guess"
+                fi
+                rm -f "$_plerr"
+            fi
+            _pq=$(mktemp) && gencron_as_target -c "$cand" > "$_pq" 2>/dev/null \
+                && [ -n "$(lb_quiesce_gaps_here "$LOCAL_USER" "$_pq" "${roots[@]}")" ] \
+                && echo "  Guest freeze:     the template freezes guests and '$LOCAL_USER' has no grant for them -- --install adds it (deploy.sh --add-quiesce)"
+            rm -f "$_pq"
+        fi
         echo
         echo "This is a plan only -- nothing was installed."
         # U162 (customer site 2026-11-04): edit-relation reaches this plan through --replace and
@@ -10448,6 +10584,45 @@ Taking over older jobs (a v4 config written manually): remove their sections fir
             log "local-backup: delegated ($ZFS_PERMS_LOCAL_RECEIVE) to '$LOCAL_USER' on ${#roots[@]} source(s) and on '$target'"
         else
             log "local-backup: delegated ($ZFS_PERMS_LOCAL_RECEIVE) to '$LOCAL_USER' on ${#roots[@]} source(s); no target -- nothing is copied"
+        fi
+        # U16 (first install, 2026-11-18): a landing dataset an older root job created and
+        # mounted, with no snapshot of its own, gets a FULL `zfs recv -F` on the first run --
+        # and on Linux only root can unmount it, so the account's receive failed with
+        # "cannot unmount". Root does it here, once, and only on an empty container.
+        if [ "$no_copy" -eq 0 ]; then
+            local _um _uml _umerr _umv
+            _umerr=$(mktemp) || { rm -f "$cand"; die "mktemp failed for the landing check"; }
+            _uml=$(lb_mounted_empty_landings "$target" "${roots[@]}" 2>"$_umerr") \
+                || { _umv=$(cat "$_umerr"); rm -f "$_umerr" "$cand"; die "local-backup: could not read the landing datasets under '$target' ($_umv) -- an unreadable answer is not 'empty', so nothing is unmounted on a guess. NOTHING was installed and $config is untouched; fix the read and run again."; }
+            rm -f "$_umerr"
+            while IFS= read -r _um; do
+                [ -n "$_um" ] || continue
+                # Asked again right before the unmount: the answer above may be stale.
+                lb_landing_state "$_um" 2>/dev/null; _umv=$?
+                [ "$_umv" -eq 0 ] \
+                    || { rm -f "$cand"; die "local-backup: '$_um' is no longer a mounted, empty landing without snapshots (or could not be read again, state $_umv) -- not unmounting it. NOTHING was installed and $config is untouched; run again."; }
+                # No `--` after `zfs set`: it reads it as a second dataset name and fails
+                # having set the first (lab, 2026-11-18). A listed name never starts with -.
+                zfs unmount -- "$_um" && zfs set canmount=noauto "$_um" \
+                    || { rm -f "$cand"; die "local-backup: could not unmount the empty landing dataset '$_um' (or set canmount=noauto) -- '$LOCAL_USER' cannot receive into it while it is mounted. NOTHING was installed and $config is untouched."; }
+                log "local-backup: unmounted '$_um' and set canmount=noauto (empty, no snapshots, mounted: '$LOCAL_USER' could not have received into it)"
+            done <<<"$_uml"
+        fi
+        # U13 (first install, 2026-11-18): a template that freezes guests (-q) on an account
+        # without the freeze grant failed every frozen tier (exit 3) or took them unfrozen.
+        # The grant is merged (--add-quiesce) over this relation's sources plus the list
+        # deploy.sh recorded, so the hourly self-update keeps granting what it granted before.
+        local _qblk _qgap _rec _gd
+        _qblk=$(mktemp) || { rm -f "$cand"; die "mktemp failed for the quiesce grant check"; }
+        gencron_as_target -c "$cand" > "$_qblk" 2>/dev/null
+        _qgap=$(lb_quiesce_gaps_here "$LOCAL_USER" "$_qblk" "${roots[@]}")
+        rm -f "$_qblk"
+        if [ -n "$_qgap" ]; then
+            _rec=$(cat "${UPDATE_STATE_DIR:-/root/.zfs-snapshot-all-update-state}/grant-datasets" 2>/dev/null)
+            _gd=$(printf '%s\n' $_rec "${roots[@]}" | awk 'NF && !s[$0]++' | paste -sd, -)
+            log "local-backup: the template freezes guests and '$LOCAL_USER' has no freeze grant for them -- granting it (deploy.sh --backup-user=$LOCAL_USER --add-quiesce --grant-datasets=$_gd)"
+            bash "$DEPLOY" --backup-user="$LOCAL_USER" --add-quiesce --grant-datasets="$_gd" \
+                || { rm -f "$cand"; die "local-backup: deploy.sh --add-quiesce for '$LOCAL_USER' failed -- see above. NOTHING was installed and $config is untouched; without the grant every frozen tier fails or runs unfrozen."; }
         fi
     fi
 
@@ -11897,6 +12072,96 @@ Dropping --yes shows you the list and lets you consent to it deliberately."
 # alias, and resolves the CURRENTLY ACTIVE endpoint's host/port. Sets:
 # label, mpath (unused after sourcing), account, keyfile, alias, alias_kh,
 # host, port, flags.
+# restore_dispatch_connection <restore args...>: the connection the restore dispatch
+# hands to zfs-restore.sh (RESTORE_SSH_OPTS, RESTORE_ENGINE_SSH, RESTORE_DEST_PEER).
+restore_dispatch_connection() {
+    # (Moved into this function 2026-11-18 so a suite can drive it; the variables stay
+    # global on purpose -- the exports below are read by the exec'd zfs-restore.sh.)
+    # NOT `local` (history): this dispatch was at top level, not inside a
+    # function, and bash refuses `local` there -- "can only be used in a
+    # function", printed on every restore run. It did not break the
+    # connection resolution (the assignments below still happened), so
+    # the only symptom was a line of noise in front of a recovery, which
+    # is exactly where noise costs the most.
+    _rc_conn=""; _rc_a=""; _rc_ctl=0
+    for _rc_a in "$@"; do
+        case "$_rc_a" in
+            # A PLAN reads the installed config and this host's copies; it
+            # needs the connection (key, host, account), never the source's
+            # signed scope. Resolving the scope cost three ssh calls per load,
+            # and this dispatch loads twice (probe + real): six calls, 1.9 s of
+            # the 2.5 s F9 Restore took to open for a pull relation (pve10 ->
+            # pve9b, measured 2026-11-18). Control-only load for --plan, exactly
+            # as disable-client/status do; a real restore still resolves it.
+            --plan|--plan=*) _rc_ctl=1; continue ;;
+            -*) continue ;;
+        esac
+        [ -r "$CLIENTS_DIR/${_rc_a%%:*}.conf" ] && _rc_conn="$_rc_a"
+    done
+    # A LOCAL relationship (RUX_MODE=local) has no peer and needs no
+    # connection -- and load_client_and_connection DIES on it. That die is
+    # an exit in THIS shell with its output thrown away below, so
+    # `restore <local relation> --plan` ended rc=1 without a word (measured
+    # on pve9b, 2026-10-15). Local ones are skipped; for the rest the load
+    # is probed first in a subshell with die_confine_to_subshell (the same
+    # opt-out cmd_status uses: with die_arm_fatal a plain subshell die
+    # still TERMs this shell), so a refusal inside it can no longer end
+    # the dispatch silently -- zfs-restore.sh then speaks for itself.
+    if [ -n "$_rc_conn" ] \
+       && [ "$(record_get "$CLIENTS_DIR/${_rc_conn%%:*}.conf" RUX_MODE 2>/dev/null)" != local ] \
+       && ( die_confine_to_subshell; PAIR_CONTROL_ONLY="$_rc_ctl" load_client_and_connection "$CLIENTS_DIR/${_rc_conn%%:*}.conf" ) >/dev/null 2>&1; then
+        if PAIR_CONTROL_ONLY="$_rc_ctl" load_client_and_connection "$CLIENTS_DIR/${_rc_conn%%:*}.conf" >/dev/null 2>&1; then
+            # The same pinning the engines get, spelled as raw ssh
+            # flags because zfs-restore.sh calls ssh directly rather than
+            # through an engine -- and BUILT BY THE ONE BUILDER, not by
+            # a second hand-written copy of the same option set.
+            #
+            # This WAS a hand-written string, and it shipped without
+            # ConnectTimeout or ServerAlive* -- so a restore aimed at a
+            # peer that never answers the SYN would have sat ~130s per
+            # call, which is the hang this estate already paid for
+            # (#44/#45/#46) and built a counting assertion against.
+            # test/zfsbackup counts those options against the BatchMode
+            # groups, and that count is what caught it.
+            #
+            # Adding the three missing options would have fixed the
+            # instance. Using load_ssh_opts removes the class: there is
+            # one place that decides how this host reaches a peer, every
+            # other caller already uses it, and a fourth opinion about
+            # ssh flags cannot drift from the other three if it does not
+            # exist.
+            #
+            # Joined with "*" rather than passed as an array because it
+            # crosses an exec boundary into zfs-restore.sh, which
+            # word-splits it back -- see that file's own note on why
+            # that is safe here (these are flags and paths, and neither
+            # carries a space by this installer's own rules).
+            load_ssh_opts
+            RESTORE_SSH_OPTS="${LOAD_SSH_OPTS[*]}"
+            # The engine speaks its OWN flags for the same pinning
+            # (-K/-k/-O), not raw ssh flags. Both forms are exported from
+            # the one place that knows the paths, so they cannot disagree
+            # about which key reaches which host.
+            RESTORE_ENGINE_SSH="-K ${LOAD_KEYFILE:-} -k ${LOAD_ALIAS_KH:-} -O HostKeyAlias=${LOAD_ALIAS:-} -O GlobalKnownHostsFile=/dev/null -O CheckHostIP=no"
+            [ -n "${LOAD_PORT:-}" ] && RESTORE_ENGINE_SSH="$RESTORE_ENGINE_SSH -p $LOAD_PORT"
+            # AND WHO IT IS. A destination relationship only has to be
+            # PAIRED, not activated: it contributes a machine to write
+            # to, and that is in its client record, not in the config.
+            #
+            # Reading it from the config instead would force the twin to
+            # be activated first -- and an activated twin owns its own
+            # (empty) copy sections, so after move-to-client it would own
+            # two sets: the real copy it took over and the empty one it
+            # was born with, both pulling the same source into different
+            # places. Found by walking the lab setup on paper before
+            # running it.
+            RESTORE_DEST_PEER="${LOAD_ACCOUNT:-}@${LOAD_HOST:-}"
+            [ "$RESTORE_DEST_PEER" = "@" ] && RESTORE_DEST_PEER=""
+            export RESTORE_SSH_OPTS RESTORE_ENGINE_SSH RESTORE_DEST_PEER
+        fi
+    fi
+}
+
 load_client_and_connection() {
     local cpath="$1"
     # Reset before sourcing: records predating a field must not inherit the
@@ -23889,81 +24154,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
             # MEAN. If this picks a connection the parser then disagrees with,
             # the failure is a refused ssh against a named host, not a silent
             # recovery aimed somewhere else.
-            # NOT `local`: this dispatch is at top level, not inside a
-            # function, and bash refuses `local` there -- "can only be used in a
-            # function", printed on every restore run. It did not break the
-            # connection resolution (the assignments below still happened), so
-            # the only symptom was a line of noise in front of a recovery, which
-            # is exactly where noise costs the most.
-            _rc_conn=""; _rc_a=""
-            for _rc_a in "$@"; do
-                case "$_rc_a" in
-                    -*) continue ;;
-                esac
-                [ -r "$CLIENTS_DIR/${_rc_a%%:*}.conf" ] && _rc_conn="$_rc_a"
-            done
-            # A LOCAL relationship (RUX_MODE=local) has no peer and needs no
-            # connection -- and load_client_and_connection DIES on it. That die is
-            # an exit in THIS shell with its output thrown away below, so
-            # `restore <local relation> --plan` ended rc=1 without a word (measured
-            # on pve9b, 2026-10-15). Local ones are skipped; for the rest the load
-            # is probed first in a subshell with die_confine_to_subshell (the same
-            # opt-out cmd_status uses: with die_arm_fatal a plain subshell die
-            # still TERMs this shell), so a refusal inside it can no longer end
-            # the dispatch silently -- zfs-restore.sh then speaks for itself.
-            if [ -n "$_rc_conn" ] \
-               && [ "$(record_get "$CLIENTS_DIR/${_rc_conn%%:*}.conf" RUX_MODE 2>/dev/null)" != local ] \
-               && ( die_confine_to_subshell; load_client_and_connection "$CLIENTS_DIR/${_rc_conn%%:*}.conf" ) >/dev/null 2>&1; then
-                if load_client_and_connection "$CLIENTS_DIR/${_rc_conn%%:*}.conf" >/dev/null 2>&1; then
-                    # The same pinning the engines get, spelled as raw ssh
-                    # flags because zfs-restore.sh calls ssh directly rather than
-                    # through an engine -- and BUILT BY THE ONE BUILDER, not by
-                    # a second hand-written copy of the same option set.
-                    #
-                    # This WAS a hand-written string, and it shipped without
-                    # ConnectTimeout or ServerAlive* -- so a restore aimed at a
-                    # peer that never answers the SYN would have sat ~130s per
-                    # call, which is the hang this estate already paid for
-                    # (#44/#45/#46) and built a counting assertion against.
-                    # test/zfsbackup counts those options against the BatchMode
-                    # groups, and that count is what caught it.
-                    #
-                    # Adding the three missing options would have fixed the
-                    # instance. Using load_ssh_opts removes the class: there is
-                    # one place that decides how this host reaches a peer, every
-                    # other caller already uses it, and a fourth opinion about
-                    # ssh flags cannot drift from the other three if it does not
-                    # exist.
-                    #
-                    # Joined with "*" rather than passed as an array because it
-                    # crosses an exec boundary into zfs-restore.sh, which
-                    # word-splits it back -- see that file's own note on why
-                    # that is safe here (these are flags and paths, and neither
-                    # carries a space by this installer's own rules).
-                    load_ssh_opts
-                    RESTORE_SSH_OPTS="${LOAD_SSH_OPTS[*]}"
-                    # The engine speaks its OWN flags for the same pinning
-                    # (-K/-k/-O), not raw ssh flags. Both forms are exported from
-                    # the one place that knows the paths, so they cannot disagree
-                    # about which key reaches which host.
-                    RESTORE_ENGINE_SSH="-K ${LOAD_KEYFILE:-} -k ${LOAD_ALIAS_KH:-} -O HostKeyAlias=${LOAD_ALIAS:-} -O GlobalKnownHostsFile=/dev/null -O CheckHostIP=no"
-                    [ -n "${LOAD_PORT:-}" ] && RESTORE_ENGINE_SSH="$RESTORE_ENGINE_SSH -p $LOAD_PORT"
-                    # AND WHO IT IS. A destination relationship only has to be
-                    # PAIRED, not activated: it contributes a machine to write
-                    # to, and that is in its client record, not in the config.
-                    #
-                    # Reading it from the config instead would force the twin to
-                    # be activated first -- and an activated twin owns its own
-                    # (empty) copy sections, so after move-to-client it would own
-                    # two sets: the real copy it took over and the empty one it
-                    # was born with, both pulling the same source into different
-                    # places. Found by walking the lab setup on paper before
-                    # running it.
-                    RESTORE_DEST_PEER="${LOAD_ACCOUNT:-}@${LOAD_HOST:-}"
-                    [ "$RESTORE_DEST_PEER" = "@" ] && RESTORE_DEST_PEER=""
-                    export RESTORE_SSH_OPTS RESTORE_ENGINE_SSH RESTORE_DEST_PEER
-                fi
-            fi
+            restore_dispatch_connection "$@"
             exec bash "$SCRIPT_DIR/zfs-restore.sh" "$@" ;;
         add-client)       shift; cmd_add_client "$@" ;;
         seed)             shift; cmd_seed "$@" ;;

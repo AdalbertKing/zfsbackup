@@ -53,7 +53,7 @@ argumenty i robią jedną rzecz.
 `zfs-backup gui` otwiera ekran w terminalu (whiptail), obsługiwany klawiszami
 funkcyjnymi: F2 Przebiegi (od najnowszych: na górze najbliższe 6 godzin, pod spodem biegi zakończone),
 F3 Relacje (Ins nowa, Enter okno, `e` zmień), F4 Kopie (F7 albo Enter na migawce przegląda pliki, F9 przywraca;
-wiersz „z innego dysku” bierze dysk repliki podłączony do tego hosta), F5 Szablony, F6 Replika (czy dysk jest
+wiersz „.. [przegląd]”, przypięty na górze listy, bierze pulę spoza relacji i replik, np. dysk repliki podłączony do tego hosta), F5 Szablony, F6 Replika (czy dysk jest
 podłączony, jak jest pełny, czy kopia trwa), F10 Ustawienia, F12 wyjście. To te same operacje co w CLI `zfs-backup.sh`, tylko w oknach —
 GUI woła te same czasowniki, więc config i crontab wychodzą identyczne.
 

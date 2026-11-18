@@ -361,8 +361,10 @@ json.dump(anyd, open(sys.argv[1] + ".any", "w", encoding="utf-8"))' "$TMPD/fs.al
         if [ -s "$TMPD/fs.all" ]; then
             browse_target; rc=$?
             case "$rc" in
-                0) target_ok && return 0; continue ;;
-                2) new_target_name "$NEW_UNDER" || continue; target_ok && return 0; continue ;;
+                0|2) if [ "$rc" = 2 ]; then new_target_name "$NEW_UNDER" || continue; fi
+                   target_ok || continue
+                   check_target_hints
+                   case "$?" in 0) return 0 ;; 2) rm -f "$TMPD/snaps.all"; return 1 ;; *) continue ;; esac ;;
                 *) return 1 ;;
             esac
         fi
@@ -372,7 +374,9 @@ json.dump(anyd, open(sys.argv[1] + ".any", "w", encoding="utf-8"))' "$TMPD/fs.al
            --inputbox "$(Tv 'Dataset na TYM hoście, pod którym mają lądować kopie (np. hdd/backups).\nKopie trafią pod:  <to>$lv/<dataset źródła>' '$lv' "$lv")" 11 "$W" "$TARGET" || return 1
         t="${WT_OUT// /}"
         case "$t" in ''|/*|*/|*[!A-Za-z0-9._:/-]*) wt --title "$(T 'Zła ścieżka')" --msgbox "$(Tv ''\''$WT_OUT'\'' nie wygląda na nazwę datasetu (pula/nazwa, bez / na początku i końcu).' '$WT_OUT' "$WT_OUT")" 9 "$W"; continue ;; esac
-        TARGET="$t"; target_ok && return 0
+        TARGET="$t"; target_ok || continue
+        check_target_hints
+        case "$?" in 0) return 0 ;; 2) rm -f "$TMPD/snaps.all"; return 1 ;; esac
     done
 }
 # Ins w drzewie „Dokąd”: nowy dataset pod podświetlonym (powstanie przy instalacji). 0 = TARGET.
@@ -385,6 +389,46 @@ new_target_name() {   # <rodzic>
     case "$t" in ''|*[!A-Za-z0-9._:/-]*) wt --title "$(T 'Zła nazwa')" --msgbox "$(Tv ''\''$WT_OUT'\'' nie wygląda na nazwę datasetu.' '$WT_OUT' "$WT_OUT")" 8 "$W"; return 1 ;; esac
     TARGET="$1/$t"
     return 0
+}
+# Zastane kopie (właściciel 2026-11-18: „GUI musi prowadzić admina za rękę” -- reinstalacja
+# pakietu, dyski przyniesione z dużymi kopiami). Panel faktów drzewa „Dokąd” jest tylko w oknie
+# od 110 kolumn; w PuTTY 80x24 admin wybierał cel bez słowa o pełnej kopii. Tu, po wyborze, w
+# każdej szerokości: (1) jest cel z kopiami tych danych ze wspólną migawką -> pytanie, czy tam;
+# (2) kopie leżą w innym układzie niż <cel>/<źródło> -> komendy `zfs rename`, które je
+# podstawiają. 0 = cel zostaje (albo zamieniony), 1 = wybór jeszcze raz, 2 = wstecz z kroku.
+check_target_hints() {
+    [ "$MODE" = local ] && [ -s "$TMPD/target-hints.json" ] || return 0
+    local h b sz mv
+    h="$("$PY" - "$TMPD/target-hints.json" "$TARGET" <<'PYEOF' | tr -d '\r'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8")); t = sys.argv[2]
+b = d.get("best") or ""
+inc = d.get("inc", {})
+if b and b != t and inc.get(t, 0) < inc.get(b, 0):
+    print("best\t%s\t%s" % (b, d.get("human", {}).get(t) or d.get("all", "?")))
+for s, nc in sorted(d.get("moved", {}).items()):
+    print("moved\t%s\t%s\t%s" % (s, nc[0], nc[1]))
+PYEOF
+)"
+    b="$(printf '%s\n' "$h" | awk -F'\t' '$1 == "best" { print $2 }')"
+    sz="$(printf '%s\n' "$h" | awk -F'\t' '$1 == "best" { print $3 }')"
+    if [ -n "$b" ]; then
+        geom
+        if wt --title "$(title 5 "$(T 'Zastane kopie')")" --yes-button "$(Tv 'Do $B' '$B' "$b")" --no-button "$(Tv 'Do $T' '$T' "$TARGET")" \
+              --yesno "$(Tv 'Pod $B leżą już kopie tych danych ze wspólną migawką: tam pierwsza kopia pójdzie PRZYROSTOWO.\n\nDo $T pójdzie PEŁNA kopia (ok. $SZ).\n\nGdzie kopiować?' '$B' "$b" '$T' "$TARGET" '$SZ' "$sz")" 14 "$W"; then
+            TARGET="$b"
+        fi
+    fi
+    mv="$(printf '%s\n' "$h" | awk -F'\t' -v t="$TARGET" -v w="$(T 'wspólna')" '$1 == "moved" { printf "  %s\n     %s (%s %s)\n     zfs rename -p %s %s/%s\n", $2, $3, w, $4, $3, t, $2 }')"
+    [ -n "$mv" ] || return 0
+    geom
+    wt --title "$(title 5 "$(T 'Kopie w innym układzie')")" --yes-button "$(T 'Dalej: pełna kopia')" --no-button "$(T Wstecz)" \
+       --yesno "$(T 'Na tym hoście są kopie tych danych ze wspólną migawką, ale nie na ścieżce, w którą trafia relacja. Pakiet ich nie użyje: pójdzie pełna kopia.')
+
+$mv
+
+$(T 'Żeby iść przyrostowo: wykonaj te komendy jako root (drugi terminal), potem Wstecz i wybierz cel jeszcze raz.')" "$H" "$W" && return 0
+    return 2
 }
 # Kampania 2026-10-22 (pve10): kopia lokalna hdd/archive -> hdd/archive/kopie przeszła cały
 # kreator i odmówił dopiero plan czasownika ("overlaps source"). Ta sama reguła tutaj: cel
@@ -485,11 +529,38 @@ def plan(t):
     return out
 def size(sname):
     return (anyd.get(sname) or [None, None])[1]
+# USED rodzica zawiera dzieci: sumuj tylko źródła bez przodka w tym samym zbiorze.
+def fullsize(srcs):
+    srcs = set(srcs)
+    return sum(float(size(s) or 0) for s in srcs
+               if not any(s.startswith(p + "/") for p in srcs))
 plans = dict((t, plan(t)) for t in names)
 inc_count = dict((t, sum(1 for x in plans[t] if x[2] == "inc")) for t in names)
 best = max(names, key=lambda t: (inc_count[t], t.count("/"))) if names else ""
 if best and inc_count.get(best, 0) == 0:
     best = ""
+# Kopie w INNYM układzie (właściciel 2026-11-18: dyski przyniesione z dużymi kopiami, reinstalacja
+# pakietu): dataset o tej samej końcówce nazwy co źródło, ze wspólną migawką, ale nie na ścieżce
+# <cel>/<źródło> żadnego kandydata. Silnik w nie nie trafi; trafi po `zfs rename` na tę ścieżkę.
+def elsewhere(sname):
+    if mode != "local":
+        return None
+    mine = set(snaps.get(sname, []))
+    if not mine:
+        return None
+    leaf = sname.rsplit("/", 1)[-1]
+    for n in sorted(anyd):
+        if n == sname or any(under(n, r) for r in roots):
+            continue
+        if not (n == leaf or n.endswith("/" + leaf)):
+            continue
+        common = [x for x in snaps.get(n, []) if x in mine]
+        if common:
+            return (n, common[-1])
+    return None
+covered = set(x[0] for t in names for x in plans[t] if x[2] == "inc")
+moved = dict((s, elsewhere(s)) for s in srcs if s not in covered)
+moved = dict((s, v) for s, v in moved.items() if v)
 copiers = {}
 for r in rels:
     if len(r) > 2 and r[2] not in ("", "-"):
@@ -535,7 +606,7 @@ for t in names:
             elif inc:
                 f.append(["g", _("Tryb      PRZYROSTOWO, %d z %d") % (len(inc), len(pl))])
             else:
-                tot = sum(float(size(x[0]) or 0) for x in full)
+                tot = fullsize(x[0] for x in full)
                 f.append(["w", _("Tryb      PEŁNA, ok. %s") % human(tot)])
             if inc:
                 f.append(["", _("Wspólna   %s") % inc[0][3]])
@@ -544,6 +615,12 @@ for t in names:
             if best and best != t and not inc:
                 f += [["", ""], ["h", _("Uwaga")],
                       ["w", _("Pod %s leżą już kopie tych danych ze wspólną migawką -- tam pójdzie przyrostowo.") % best]]
+            mv = [(x, moved[x[0]]) for x in full if x[0] in moved]
+            if mv:
+                f += [["", ""], ["h", _("Kopie w innym układzie")]]
+                for x, (n, c) in mv[:3]:
+                    f += [["w", _("%s leży w %s (wspólna %s)") % (x[0], n, c)],
+                          ["", "zfs rename -p %s %s" % (n, x[1])]]
         if t in copiers:
             f += [["", ""], ["h", _("Kto tu kopiuje")]] + [["", _("Relacja   %s") % r] for r in copiers[t]]
     facts[t] = f
@@ -570,6 +647,14 @@ spec = {"title": title, "single": True, "selectable": names, "fit": True, "curso
         "facts": facts, "tab": {"title": _("Źródło → cel"), "heads": [_("Źródło"), _("Cel"), _("Pierwsza kopia")], "rows": tabrows},
         "allow_new": True, "legend": _(" Kopie trafią pod:  <wybrany>%s/<dataset źródła>") % lv}
 json.dump(spec, open(os.path.join(D, "tree-spec.json"), "w", encoding="utf-8"), ensure_ascii=False)
+# Dla potwierdzenia po wyborze (check_target_hints): panel faktów jest tylko w szerokim oknie.
+hints = {"best": best, "inc": inc_count,
+         "full": dict((t, fullsize(x[0] for x in plans[t] if x[2] != "inc")) for t in names),
+         "human": dict((t, human(fullsize(x[0] for x in plans[t] if x[2] != "inc"))) for t in names),
+         "moved": dict((s, [n, c]) for s, (n, c) in moved.items()),
+         # nowy dataset (Ins) nie ma planu: pełna kopia wszystkich źródeł
+         "all": human(fullsize(x[0] for t in names for x in plans[t]))}
+json.dump(hints, open(os.path.join(D, "target-hints.json"), "w", encoding="utf-8"), ensure_ascii=False)
 PYEOF
     ${ZFS_TREE:-$PY $HERE/tui/tree.py} --spec "$TMPD/tree-spec.json" --out "$TMPD/tree-out.json" || return 1
     act="$("$PY" -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); r=d.get("roots") or [""]; print(d.get("action","") + "\t" + r[0])' "$TMPD/tree-out.json" | tr -d '\r')"
@@ -1418,6 +1503,24 @@ step_summary() {    # 0 = wykonano (RC_RUN), 1 = wstecz, 2 = do datasetów, 3 = 
         check_pruners; rc=$?
         case "$rc" in 0) ;; 1) return 1 ;; *) return "$rc" ;; esac     # Wstecz = karta (okna podsumowania już nie ma)
         build_argv
+        # U9 (pierwsza instalacja, 2026-11-18): domyślne konto zfsbackup nie istniało, plan
+        # czasownika odmawiał (bez konta nie pokaże jego linii crona), a okno odmowy nie dawało
+        # Uruchom. Konto zakłada się tutaj, na jedno pytanie, i dopiero potem plan.
+        local _acct; _acct="$(account_name)"
+        if [ -n "$_acct" ] && ! id -u "$_acct" >/dev/null 2>&1; then
+            wt --title "$(title 10 "$(T 'Konto')")" --yesno "$(Tv 'Konta $ACCT nie ma na tym hoście, a bez niego plan nie pokaże linii crona. Założyć je teraz (deploy.sh --backup-user=$ACCT)?' '$ACCT' "$_acct")" "$H" "$W" || return 4
+            local -a _dargs=("--backup-user=$_acct")
+            # Źródła relacji jako lista zgód tylko na czystym hoście: lista zapisana przez deploy.sh
+            # jest wspólna dla hosta i jawna lista by ją zastąpiła (lab, 2026-11-18).
+            [ "$MODE" = local ] && [ ! -s /root/.zfs-snapshot-all-update-state/grant-datasets ] \
+                && _dargs+=("--grant-datasets=$(IFS=,; printf '%s' "${B_ROOT[*]}")")
+            info "$(title 10 "$(T 'Konto')")" "$(Tv 'Zakładam konto $ACCT...' '$ACCT' "$_acct")"
+            if ! bash "$(dirname "$ZB")/deploy.sh" "${_dargs[@]}" </dev/null >"$TMPD/account.log" 2>&1 || ! id -u "$_acct" >/dev/null 2>&1; then
+                wt --title "$(title 10 "$(T 'Konto')")" --scrolltext --msgbox "$(T 'Nie udało się założyć konta. Koniec dziennika deploy.sh:')
+$(tail -n 15 "$TMPD/account.log")" "$H" "$W"
+                return 4
+            fi
+        fi
         info "$(title 10 "$(T 'Plan')")" "$(T 'Pytam polecenie o plan (nic nie zmienia)...')"
         "${ARGV[@]}" >"$TMPD/plan.txt" 2>&1; rc=$?
         # R2-2 (właściciel, 2026-09-24): to okno ma pokazać, CO się wykona po Uruchom -- pełną

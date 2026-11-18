@@ -2206,7 +2206,7 @@ def table_fit(heads, rows, inner, ch, prio=None, flex=0):
 
 
 def render_tabbed(data, width, height, now, ch, screen, title, heads, cells, cursor, list_foot,
-                  det_title, det_pairs, child, focus, pair_cursor, actions, empty_lines=(), prio=None, flex=0):
+                  det_title, det_pairs, child, focus, pair_cursor, actions, empty_lines=(), prio=None, flex=0, pinned=()):
     """Ekran wg reguly U21: u gory lista (lewo) i szczegoly (prawo), na dole
     zakladki z dziecmi wiersza. `child` = None: bez dolnego panelu (F4) -- wtedy
     ponizej 150 kolumn panel idzie pod liste, jak dotad."""
@@ -2228,26 +2228,42 @@ def render_tabbed(data, width, height, now, ch, screen, title, heads, cells, cur
         # zostawialo szczeblom jedna linie).
         # "rows" (U97): dol o stalej wysokosci -- wiecej pozycji przewija sie po Tab.
         need_child = (child.get("rows") or max(1, len(items))) + 4
-        top_h = max(len(cells) + 4, 7, min(panel_need, avail - need_child))
+        top_h = max(len(cells) + len(pinned) + 4, 7, min(panel_need, avail - need_child))
         top_h = min(top_h, avail - min(need_child, max(5, avail // 3)))
     inner = lbw - 4
-    hdr, lines = table_fit(heads, cells, inner, ch, prio, flex)
+    hdr, rest = table_fit(heads, cells, inner, ch, prio, flex)
     list_h = max(1, top_h - 4)
-    first = max(0, cursor - list_h + 1)
+    # pinned (F4, wlasciciel 2026-11-18: ".. [przegląd]" zawsze na gorze, nie przewija sie):
+    # cale linie pod naglowkiem, poza kolumnami tabeli (nie obcina ich szerokosc kolumny i nie
+    # poszerzaja kolumn). Kursor 0..len(pinned)-1 = one, dalej wiersze `cells`. () = jak dotad.
+    # Za niskie okno (lista bez miejsca na przypiete i choc jeden wiersz): przypiete znikaja,
+    # a kursor na nich pokazuje tylko je.
+    npin = len(pinned)
+    pin = npin if list_h > npin else 0
+    rc, sh_h = cursor - npin, list_h - pin
+    first = max(0, rc - sh_h + 1)
     # Ostatni wiersz okna zajmuje "... jeszcze N", gdy nizej sa dalsze -- kursor na nim
     # znikal (F2 otwarte przy "teraz": panel mowil o biegu, ktorego lista nie pokazywala).
-    if list_h > 1 and cursor == first + list_h - 1 and len(lines) > first + list_h:
+    if sh_h > 1 and rc == first + sh_h - 1 and len(rest) > first + sh_h:
         first += 1
     body = [hdr, ch.dash * inner]
     cur_y = None
-    for i in range(first, min(len(lines), first + list_h)):
+    for i in range(pin):
         if i == cursor:
             cur_y = len(body)
-        body.append(lines[i])
+        body.append(fit(pinned[i], inner))
+    if rc < 0 and not pin:
+        cur_y = len(body)
+        body.append(fit(pinned[cursor], inner))
+    else:
+        for i in range(first, min(len(rest), first + sh_h)):
+            if i + npin == cursor:
+                cur_y = len(body)
+            body.append(rest[i])
+        if len(rest) > first + sh_h and sh_h > 1:
+            body[-1] = fit(_(u"... jeszcze %d") % (len(rest) - first - sh_h + 1), inner)
     if not cells:
         body += list(empty_lines)
-    if len(lines) > first + list_h and list_h > 1:
-        body[-1] = fit(_(u"... jeszcze %d") % (len(lines) - first - list_h + 1), inner)
     while len(body) < list_h + 2:
         body.append("")
     body = body[:list_h + 2]
@@ -3289,7 +3305,10 @@ def render_zadania(data, rows, cursor, width, height, now, ch, message="", show_
                  "empty": _(u"brak datasetów tego zadania")}
     empty = [_(u"Brak zadań zfs-backup na tym hoście (nie ma relacji albo jej config jest nieczytelny)."),
              _(u"Nową relację zakładasz na F3 Relacje: Ins.")]
-    foot = (_(u"Enter pełne okno zadania   Tab do źródło → cel")) if n_runs else ""
+    # Wlasciciel 2026-11-18: przelaczniki WIDOKU listy (wykonane, grupowanie) nie sa akcjami
+    # okna -- schodza z paska F na ramke listy, Ctrl-W i Ctrl-G (jak Ctrl-R, Ctrl-O).
+    foot = (_(u"Enter pełne okno zadania  Tab do źródło → cel") + u"  Ctrl-G " + (_(u"oś czasu") if grouped else _(u"grupuj"))
+            + u"  Ctrl-W " + (_(u"ukryj wykonane") if show_done else _(u"pokaż wykonane"))) if n_runs else ""
     return render_tabbed(data, width, height, now, ch, "zadania", title,
                          [_(u"Kiedy"), _(u"Zadanie") if grouped else _(u"Relacja"), _(u"Co"), _(u"Wynik"), _(u"Czas"), _(u"Dane")], cells, cursor, foot,
                          det_title, det, child, focus, pair_cursor, acts, empty, prio=[0, 1, 3, 2, 5, 4], flex=1)
@@ -3455,8 +3474,7 @@ def screen_actions(active, hide_gone=False, paused=False, show_done=True, groupe
     Na F3 podpis F7 mowi, co klawisz ZROBI z zaznaczona relacja: na
     wstrzymanej -- Wznow (tester R4, B6: listwa mowila Pauza, a F7 wznawial)."""
     if active == "zadania":
-        return [("F7", u"Uruchom teraz", u"Uruchom"), ("F8", u"Schowaj wykonane" if show_done else u"Pokaż wykonane", u"Wykonane"),
-                ("F9", u"Jedna oś czasu" if grouped else u"Grupuj po relacji", u"Grupuj")]
+        return [("F7", u"Uruchom teraz", u"Uruchom")]
     if active == "relacje":
         # JEDNOLICIE (wlasciciel 2026-10-17): F7 to wszedzie "Uruchom teraz" -- na F3
         # kopia kazdego datasetu relacji jej najdrobniejszym zadaniem (run-relation).
@@ -3467,8 +3485,7 @@ def screen_actions(active, hide_gone=False, paused=False, show_done=True, groupe
         # KOPIE (U82): Enter przeglada (migawka RO + mc), F9 przywraca -- ten sam wybor zrodla.
         # F8 grupuje po relacji jak F9 na F2 (wlasciciel 2026-10-29: „tak jak F2 -- wszystkie
         # mozliwosci”); F9 zostaje Przywroc, wiec grupowanie jest tu pod F8.
-        return [("F7", u"Przeglądaj", u"Przeglądaj"), ("F8", u"Jedna lista" if grouped else u"Grupuj po relacji", u"Grupuj"),
-                ("F9", u"Przywróć", u"Przywróć")]
+        return [("F7", u"Przeglądaj", u"Przeglądaj"), ("F9", u"Przywróć", u"Przywróć")]
     if active == "nosniki":
         # Krótkie (3. pole) tylko, gdy pasek się nie mieści: przy 80 kolumnach F9 wypychał F10.
         # "Przywróć z dysku" przeszedł na F11 Odzysk (właściciel 2026-10-18).
@@ -4860,7 +4877,7 @@ def odzysk_rows(rows, data=None, now=None):
                 newest = e if newest is None or e > newest else newest
         out.append({"kind": "relation", "name": r["name"], "typ": r.get("typ") or "?", "dir": r.get("dir") or "?",
                     "stan": state_word(rel), "rel": rel, "newest": newest})
-    out.append({"kind": "disk", "name": _(u"z innego dysku"), "typ": _(u"nośnik"), "dir": _(u"dysk podłączony do tego hosta"), "stan": "",
+    out.append({"kind": "disk", "name": _(u".. [przegląd]"), "typ": _(u"nośnik"), "dir": _(u"dysk podłączony do tego hosta"), "stan": "",
                 "newest": None})
     return out
 
@@ -5014,9 +5031,10 @@ def kopie_copy_state(it, long=False):
 
 
 def kopie_items(groups, tree):
-    """Wiersze lewego panelu: naglowki grup (nie do wyboru), datasety (do wyboru) i na
-    koncu 'inny dysk' -- pula spoza relacji i replik (stare okna wyboru)."""
-    out = []
+    """Wiersze lewego panelu: NA POCZATKU '.. [przegląd]' -- pula spoza relacji i replik
+    (stare okna wyboru; wlasciciel 2026-11-18: na gorze, przypiety, jak '..' w mc), potem
+    naglowki grup (nie do wyboru) i datasety (do wyboru)."""
+    out = [{"any": True, "label": _(u".. [przegląd]")}]
     for g in groups:
         base = common_base(g["roots"])
         out.append({"hdr": True, "g": g, "base": base})
@@ -5036,7 +5054,6 @@ def kopie_items(groups, tree):
                             "resume": bool(d.get("resume"))})
         if len(out) == n0:
             out.append({"g": g, "note": g.get("note") or _(u"brak datasetów kopii na tym hoście")})
-    out.append({"any": True, "label": _(u"inny dysk -- pula spoza relacji i replik")})
     return out
 
 
@@ -5059,26 +5076,29 @@ def render_kopie_tab(data, items, selix, cursor, focus, scur, snaps, snaps_err, 
     (render_tabbed): u gory TABELA kopii -- jeden wiersz = jeden dataset kopii -- z prawej
     fakty o wierszu, na dole zakladka Migawki (kolumny jak `zfs list -t snapshot`). Stan i
     klawisze bez zmian: Tab/Enter do migawek, Enter na migawce przeglada, F9 przywraca."""
-    cells, rows = [], []
+    cells, rows, pinned = [], [], []
     bar = u"|" if ch.ascii else u"│"
     last_g, ccur = None, 0
     for i in selix:
         it = items[i]
         g = it.get("g")
+        # ".. [przegląd]" (wlasciciel 2026-11-18, dawniej "inny dysk" na KONCU listy): pierwsza
+        # pozycja, przypieta nad tabela -- cala linia, nie komorki (kolumna Relacja ucinala nazwe).
+        if it.get("any"):
+            if len(rows) == cursor:
+                ccur = len(pinned)
+            rows.append(it)
+            pinned.append(_(u".. [przegląd]") + u"  " + _(u"pula spoza relacji i replik"))
+            continue
         # GRUPY jak F2 po F9: naglowek relacji z rodzajem i kierunkiem (tylko do czytania),
-        # pod nim jej kopie z wcieciem. Kursor chodzi po kopiach; ccur = jego wiersz w tabeli.
+        # pod nim jej kopie z wcieciem. Kursor chodzi po kopiach; ccur = jego wiersz w tabeli
+        # (po przypietych liniach).
         if grouped and g is not None and g is not last_g:
             cells.append([u"%s%s  %s  %s" % (u"> " if ch.ascii else u"▸ ", g["name"], g.get("typ") or u"", g.get("dir") or u""), u" ", u" "])
             last_g = g
         if len(rows) == cursor:
-            ccur = len(cells)
+            ccur = len(pinned) + len(cells)
         rows.append(it)
-        if it.get("any"):
-            # U170: w ukladzie plaskim pusta kolumna Relacja czytala sie jak ciag dalszy repliki
-            # nad nim ("nosnik repliki nazwany obca pula") -- wiersz ma wlasna nazwe.
-            cells.append([_(u"inny dysk -- pula spoza relacji i replik"), u" ", u" "] if grouped
-                         else [_(u"inny dysk"), u" ", _(u"pula spoza relacji i replik -- Enter wybiera"), u" ", u" "])
-            continue
         if it.get("note"):
             cells.append([u"  %s %s" % (bar, it["note"]), u" ", u" "] if grouped
                          else [g["name"], g.get("typ") or u" ", it["note"], u" ", u" "])
@@ -5131,15 +5151,16 @@ def render_kopie_tab(data, items, selix, cursor, focus, scur, snaps, snaps_err, 
         det = [(_(u"Relacja"), u"%s  %s" % (g["name"], g.get("typ") or u"")), (_(u"Kierunek"), g.get("dir") or u"-"),
                (_(u"Uwaga"), cur["note"])]
     elif cur.get("any"):
-        det_title = _(u"inny dysk")
-        det = [(_(u"Inny dysk"), _(u"najpierw zaimportuj pulę (zpool import), potem Enter"))]
+        det_title = _(u".. [przegląd]")
+        det = [(_(u"Pula"), _(u"spoza relacji i replik (np. dysk przyniesiony po awarii); najpierw zaimportuj ją (zpool import)"))]
     host = (data.jobs or {}).get("host") if data is not None and data.jobs else ""
     title = (_(u"Kopie na %s") % (host or u"")).strip() + (_(u", po relacjach") if grouped else u"")
     heads = ([_(u"Kopia"), _(u"Migawek"), _(u"Najnowsza")] if grouped
              else [_(u"Relacja"), _(u"Rodzaj"), _(u"Kopia"), _(u"Migawek"), _(u"Najnowsza")])
     return render_tabbed(data, width, height, now, ch, "odzysk", title, heads, cells, ccur,
-                         _(u"Enter/Tab do migawek"), det_title, det, child, focus, scur, screen_actions("odzysk", grouped=grouped),
-                         prio=([0, 2, 1] if grouped else [0, 2, 4, 3, 1]))
+                         _(u"Enter/Tab do migawek") + u"  Ctrl-G " + (_(u"jedna lista") if grouped else _(u"grupuj")), det_title, det, child, focus, scur, screen_actions("odzysk", grouped=grouped),
+                         prio=([0, 2, 1] if grouped else [0, 2, 4, 3, 1]),
+                         pinned=pinned)
 
 
 def render_kopie(data, items, sel, focus, scur, snaps, snaps_err, width, height, now, ch, ctx=None):
@@ -5261,8 +5282,8 @@ HELP = [
     u"                 nadchodzące (6 h), pod nią wykonane z 72 h (wynik, błąd).",
     u"                 Panel: ten bieg i ustawienia zadania (kierunek, źródło i cel,",
     u"                 kiedy, ile trzyma, czasy, strażnik); na dole źródło → cel.",
-    u"                 F7 uruchamia zadanie z wiersza nadchodzącego, F8 chowa wykonane,",
-    u"                 F9 grupuje po relacji. F4 tu = Kopie od razu na tym biegu.",
+    u"                 F7 uruchamia zadanie z wiersza nadchodzącego, Ctrl-W chowa wykonane,",
+    u"                 Ctrl-G grupuje po relacji. F4 tu = Kopie od razu na tym biegu.",
     u"  F3  Relacje    zarządzanie: Enter szczegóły (opis, CONFIG i CRON; tam 'e'",
     u"                 = Zmień relację: adres hosta, datasety, szablon, retencja",
     u"                 ile trzyma źródło, program kopiujący; 's' zapisuje ustawienia",
@@ -5285,8 +5306,8 @@ HELP = [
     u"  F4  Kopie      kopie relacji i dysk z repliką: Enter przegląda (migawka",
     u"                 tylko do odczytu, mc, potem odmontowanie; dysk VM: partycja),",
     u"                 F9 przywraca (okna Przywróć -- dataset, cel, migawka, plan,",
-    u"                 Uruchom). Z Przebiegów albo z datasetu relacji F4 otwiera od",
-    u"                 razu tę kopię i tę chwilę.",
+    u"                 Uruchom), Ctrl-G grupuje po relacji. Z Przebiegów albo",
+    u"                 z datasetu relacji F4 otwiera od razu tę kopię i tę chwilę.",
     u"  F5  Szablony   szablony retencji: Ins nowy na podstawie zaznaczonego,",
     u"                 Enter szczegóły ('e' zmienia własny), Del usuwa własny",
     u"  F6  Replika    repliki i 4 stany nośnika; Ins/Del/F7 uruchom/F8 klucz,",
@@ -5324,6 +5345,7 @@ HELP = [
     u"  F1-F6             główne okna (F4 Kopie: przeglądanie i odzysk); F12 wyjście",
     u"  F7 F8 F9          akcje BIEŻĄCEGO okna -- podpisane TYLKO na pasku na dole",
     u"                    (wąski terminal: zapis skrócony, cyfra = klawisz F)",
+    u"  Ctrl-G Ctrl-W     widok listy (F2, F4): grupuj po relacji, ukryj wykonane -- na ramce listy",
     "",
     u"  strzałki          ruch po liście     PgUp PgDn Home End   szybciej",
     u"  Ctrl-R            odśwież źródła (monitor liczy na żywo, to chwilę trwa)",
@@ -5363,7 +5385,7 @@ class UI(object):
         self.now_fixed = now
         self.exec_log = exec_log   # testy: zamiast uruchamiac, zapisz komende tutaj
         self.screen = "zadania"
-        self.cursor = {"zadania": 0, "relacje": 0, "monitor": 0, "szablony": 0, "nosniki": 0, "odzysk": 0}
+        self.cursor = {"zadania": 0, "relacje": 0, "monitor": 0, "szablony": 0, "nosniki": 0, "odzysk": 1}   # F4: 0 = ".. [przegląd]", start na pierwszej kopii
         self.window = None        # ("relacja", row) | ("pomoc", None) | ("prompt"|"confirm"|"output", dict)
         self.scroll = 0
         self.message = ""
@@ -5813,7 +5835,13 @@ class UI(object):
             # 2026-10-29). Drzewo czyta prefetch_kopie w tle, kursor F4 przycina kopie_state.
             if k == "odzysk" and self.screen != "odzysk":
                 continue
-            self.cursor[k] = min(self.cursor[k], max(0, self.count(k) - 1))
+            n_ = self.count(k)
+            # F4: sam ".. [przegląd]" (pierwszy etap odczytu, relacji jeszcze nie ma) nie przycina
+            # kursora -- inaczej po kazdym oknie stal na '..' i F9/Enter szly w pule spoza
+            # relacji (wlasciciel 2026-11-18).
+            if k == "odzysk" and n_ <= 1:
+                continue
+            self.cursor[k] = min(self.cursor[k], max(0, n_ - 1))
         if full:
             self.prefetch_kopie()
 
@@ -6133,7 +6161,7 @@ class UI(object):
 
     def kopie_current(self):
         items, selix = self.kopie_state()
-        c = self.cursor.get("odzysk", 0)
+        c = min(self.cursor.get("odzysk", 0), max(0, len(selix) - 1))   # jak w rysowaniu: akcja = to, co widac
         return items[selix[c]] if 0 <= c < len(selix) else {}
 
     def kopie_snaps(self, it):
@@ -7019,13 +7047,13 @@ class UI(object):
         if k == "F7" and self.screen == "zadania":
             self.run_job_now()
             return "stay"
-        if k == "F8" and self.screen == "odzysk":
+        if k == "ctrl-g" and self.screen == "odzysk":
             self.kopie_group = not self.kopie_group    # kursor zostaje na tej samej kopii
             return "stay"
-        if k in ("F8", "F9") and self.screen == "zadania":
+        if k in ("ctrl-w", "ctrl-g") and self.screen == "zadania":
             c0 = self.cursor["zadania"]
             cur_row = self.runrows[c0] if 0 <= c0 < len(self.runrows) else None
-            if k == "F8":
+            if k == "ctrl-w":
                 self.prz_done = not self.prz_done
             else:
                 self.prz_group = not self.prz_group
@@ -7046,7 +7074,7 @@ class UI(object):
             return "stay"
         # Klawisz F dziala takze przy tekscie w linii -- nie jest tekstem. Ctrl-R
         # (odswiez, od 2026-10-09 jedyny -- F5 to Szablony) tez: przy F5 dzialalo.
-        FKEYS = ("F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12", "ctrl-r")
+        FKEYS = ("F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12", "ctrl-r", "ctrl-g", "ctrl-w")
         if self.focus == "cmd" and not self.cmd and k not in FKEYS:
             if k in ("esc", "tab"):
                 self.focus = "list"
@@ -7322,7 +7350,10 @@ def _ui_render(self, width, height):
     elif self.screen == "odzysk":
         items, selix = self.kopie_state()
         # przyciecie tutaj, nie w apply_data (tam drzewa kopii nie czytamy poza F4)
-        c = self.cursor["odzysk"] = min(self.cursor["odzysk"], max(0, len(selix) - 1))
+        # Sam '..' (odczyt w toku albo brak kopii): pokazany na nim, ale zapamietany kursor zostaje.
+        c = min(self.cursor["odzysk"], max(0, len(selix) - 1))
+        if len(selix) > 1:
+            self.cursor["odzysk"] = c
         it = items[selix[c]] if 0 <= c < len(selix) else {}
         snaps, serr = self.kopie_snaps(it) if it.get("ds") else ([], None)
         base = render_kopie_tab(self.data, items, selix, c, self.focus, self.pair_cursor,
@@ -7569,7 +7600,7 @@ def curses_loop(ui):
                        curses.KEY_F7: "F7", curses.KEY_F8: "F8", curses.KEY_IC: "ins", curses.KEY_DC: "del",
                        curses.KEY_BACKSPACE: "bs", 127: "bs", 8: "bs", curses.KEY_ENTER: "enter",
                        10: "enter", 13: "enter", 27: "esc", curses.KEY_F10: "F10", curses.KEY_F9: "F9", curses.KEY_F11: "F11", curses.KEY_F12: "F12", 9: "tab",
-                       21: "ctrl-u", 18: "ctrl-r", 15: "ctrl-o"})
+                       21: "ctrl-u", 18: "ctrl-r", 15: "ctrl-o", 7: "ctrl-g", 23: "ctrl-w"})
         stdscr.keypad(True)
         # OBA DIALEKTY STRZALEK I F-KLAWISZY, CZYTANE WPROST. keypad() wlacza w
         # terminalu tryb aplikacyjny (ESC O B), a terminal, ktory go nie honoruje

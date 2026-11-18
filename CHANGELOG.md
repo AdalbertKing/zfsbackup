@@ -6,6 +6,81 @@ when they change how the tool is used.
 
 ## [Unreleased]
 
+## [1.0.27] — 2026-11-18
+
+- GUI, browsing a copy: Esc and failures go back to where the browse was started. Enter on
+  a snapshot in F4 Copies returns to F4 on Esc, after a failed mount and when the snapshot
+  is gone; it never opens the snapshot list or the tree of all datasets. A failed mount
+  returns to the partition list when the VM disk has more than one partition. Opened for a
+  given copy (F4 from Runs or a relation), Esc in the snapshot list returns to F4. The row
+  "from another disk" keeps the full chain (tree, snapshot, partition), one step back at a
+  time.
+- GUI, F4 Copies: the row for a pool outside relations and replicas (was "other disk", the
+  last row, visible only after scrolling to the end) is now `.. [browse]`, the first row,
+  pinned above the list: it stays in place while the list scrolls. F4 still opens on the
+  first copy; Up or Home reaches `..`. Enter, F7 and F9 on it work as before.
+- GUI, F4 Copies: a reload that first showed only `..` (the two-stage read) left the cursor
+  on `..`, so F9 offered the restore of a different row; the cursor now stays on its copy.
+- GUI, list view keys: grouping by relation is Ctrl-G on F2 Runs and F4 Copies (was F9 on
+  F2, F8 on F4), hiding past runs is Ctrl-W on F2 (was F8). Both are labelled on the list's
+  bottom frame; the F-key bar keeps only windows and actions on the selected row. F8 and F9
+  on F2, and F8 on F4, now do nothing.
+- GUI, F4 `.. [browse]` opens about three times faster: the list of datasets with snapshots
+  is read with two `zfs list -r` calls per pool instead of two calls per dataset (pve10, 115
+  datasets: 12 s -> 4 s; the rest is listing the host's snapshots).
+- GUI, F9 Restore opens faster for a relation with another host: `restore --plan` loads the
+  connection without reading the source's signed scope (six ssh calls before; pve10 ->
+  pve9b: 2.5 s -> 0.5 s, the same plan). A real restore still reads and verifies the scope.
+
+First install from zero (a PVE 6.4 / Debian 10 host, 2026-11-18):
+
+- `deploy.sh` checks that `awk` matches POSIX character classes and installs `gawk` when it
+  does not. Debian 10's mawk 1.3.3 matched no `[[:space:]]`, and gen-cron refused every
+  relation ("has no 'tiers'") while the dependency table said `[ok] awk`.
+- New relation wizard: when the chosen account does not exist, it asks to create it
+  (`deploy.sh --backup-user`) before the plan, instead of a rejected plan without Run.
+- New relation wizard, local copy, existing copies (a reinstall, or disks brought in with
+  large copies): choosing a target where the first copy would be full while copies of the
+  same data with a common snapshot lie under another dataset asks "To <that one> / To
+  <chosen>"; copies with a common snapshot in another layout than `<target>/<source>` are
+  listed with the `zfs rename -p` that makes them usable. Before, this showed only in the
+  side panel, which appears from 110 columns. The same question is asked after Ins
+  (a new dataset as the target). The full-copy estimate no longer counts a child dataset twice (its parent's USED
+  already holds it).
+- `deploy.sh` installs `ntfs-3g` (optional): browsing a Windows guest's copy refused "no
+  NTFS driver" on a kernel without `ntfs3` (PVE 6.4).
+- Local copy for an account (`--local-user`, `--install`): the guest-freeze grant is added
+  when the template freezes guests the account may not freeze; a mounted landing dataset
+  with no snapshots and under 1 MiB of its own data is unmounted and set `canmount=noauto` (the account cannot
+  unmount it for the first full receive). If any read of the landing fails, `--install`
+  refuses instead of unmounting, and it reads each dataset again right before the unmount.
+  The plan names both. The install-time freeze
+  check now reads local copies too (it read only `snapsend.sh` and `snapget.sh -s`).
+- `deploy.sh` creates the account's `cron.log` and stats log as the account's and hands a
+  root-owned one back; `zfs-job.sh` says in words (stderr, syslog) when it cannot write the
+  first line of its log -- before, bash printed only "Permission denied" and the GUI
+  showed rc=unknown.
+
+Clean Debian 12 from zero (2026-11-18):
+
+- `local-backup` refuses a source with children when `--recursive` is not given. Before,
+  `--source=rpool/data` copied the container alone, without its VM disks; the plan said
+  nothing and every run ended rc 0 with only a warning in the log. The refusal names
+  `--recursive=flat` (what the wizard uses), `atomic` (one recursive snapshot of the
+  subtree) and `no` (the source alone, the old behaviour). The wizard always passes `--recursive=flat` and is not affected.
+  A children listing that cannot be read is refused too; it no longer counts as "no children".
+- `local-backup --install` for an account that exists but has no checkout of its own (its
+  first creation died after `useradd`, e.g. at `git clone`) finishes its deployment
+  (`deploy.sh --backup-user`) instead of refusing with "run deploy.sh --backup-user".
+- ZFS before 2.1 (PVE 6.4, Debian 10): every job started by cron failed with
+  `zfs: command not found`, because cron gives `PATH=/usr/bin:/bin` and those ZFS versions
+  have `zfs` and `zpool` only in `/sbin` and `/usr/sbin` (ZFS 2.1+ adds `/usr/bin/zfs`).
+  The delegated account's jobs all failed. Root's pool check sent "the pool probe failed"
+  every day. A manual `run-relation` worked because it inherits the login shell's PATH.
+  Each script that a crontab line starts directly now adds `/usr/local/sbin`, `/usr/sbin`
+  and `/sbin` to its PATH. An installed host is repaired by its ordinary update; no crontab
+  edit is needed.
+
 ## [1.0.26] — 2026-11-17
 
 - `add-replica` refuses a source with an encrypted dataset whose key is not loaded unless

@@ -79,7 +79,7 @@ zero.
 
 ## 4c. The same from the GUI
 
-After `attach` (section 2): **F4 Kopie** (copies), the row "from another disk" (a disk attached to this host). Enter
+After `attach` (section 2): **F4 Kopie** (copies), the row ".. [browse]" at the top of the list (a pool outside relations and replicas, e.g. a disk attached to this host). Enter
 browses it (a snapshot mounted read-only, mc), F9 restores through the same windows as for a relation's copy
 (dataset, target, snapshot, plan, Run). The row says "import the pool first" until the pool is imported.
 

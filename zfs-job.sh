@@ -55,6 +55,8 @@
 # wrapper exit with the command's status; cron never sets it, so cron's contract
 # above is unchanged.
 # ------------------------------------------------------------------------------
+# cron starts jobs with PATH=/usr/bin:/bin; ZFS before 2.1 has zfs/zpool only in /sbin and /usr/sbin (U18).
+for _u18 in /usr/local/sbin /usr/sbin /sbin; do case ":${PATH:-}:" in *":$_u18:"*) ;; *) PATH="${PATH:-/usr/bin:/bin}:$_u18" ;; esac; done; unset _u18; export PATH
 set -u
 
 VERSION='v1.2'
@@ -126,7 +128,17 @@ case "$DETAIL" in ''|*[!0-9]*) echo "zfs-job: --detail takes a count" >&2; usage
 # fallback exists to prevent, and it is kept here for the same reason.
 e=$(mktemp 2>/dev/null) || e="$LOG.err.$$"
 
-printf '%s ZFS-JOB BEGIN %s\n' "$(date -Is)" "$LABEL" >>"$LOG" 2>/dev/null
+printf '%s ZFS-JOB BEGIN %s\n' "$(date -Is)" "$LABEL" >>"$LOG" 2>/dev/null \
+    || {
+        # U15 (first install, 2026-11-18): the account's cron.log belonged to root:root, every
+        # write here failed with "Permission denied" from bash, and the GUI, which reads this
+        # log, reported the whole run as rc=unknown although the job ran. The job still runs;
+        # the cause is said once, in words, where cron and syslog keep it.
+        _lw="zfs-job: cannot write the log $LOG as $(id -un 2>/dev/null) ($(stat -c '%U:%G %a' "$LOG" 2>/dev/null || echo 'its directory is not writable')) -- '$LABEL' runs, but nothing records its result. Fix as root: re-run deploy.sh (it hands a root-owned log back), or chown $(id -un 2>/dev/null) $LOG"
+        echo "$_lw" >&2
+        command -v logger >/dev/null 2>&1 && logger -t zfs-job -p user.err -- "$_lw" 2>/dev/null
+        :
+    }
 
 # PVE GUEST GUARD (owner 2026-10-28; gen-cron.sh job_cron_line has the why).
 # Where a guest runs is a fact of the cluster file system: its config sits under

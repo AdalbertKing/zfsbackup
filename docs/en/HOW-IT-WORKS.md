@@ -53,8 +53,8 @@ arguments and do one thing.
 
 `zfs-backup gui` opens a screen in the terminal (whiptail), driven by function
 keys: F2 Runs (newest first: the next 6 hours on top, finished runs below), F3 Relations (Ins new, Enter window,
-`e` edit), F4 Copies (F7 or Enter on a snapshot browses files, F9 restores; the row "from another disk" takes a
-replica disk plugged into this host), F5 Templates, F6 Replica (is the disk connected, how full, is a copy
+`e` edit), F4 Copies (F7 or Enter on a snapshot browses files, F9 restores; the row ".. [browse]", pinned at the top of the
+list, takes a pool outside relations and replicas, e.g. a replica disk plugged into this host), F5 Templates, F6 Replica (is the disk connected, how full, is a copy
 running), F10 Settings, F12 quit. These are the same operations as in the `zfs-backup.sh` CLI, only in windows —
 the GUI calls the same verbs, so the config and the crontab come out identical.
 

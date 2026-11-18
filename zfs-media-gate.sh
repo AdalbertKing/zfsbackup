@@ -38,6 +38,8 @@
 # import would yank the floor out from under whoever did. Same discipline as the
 # restore's pause, and for the same reason.
 # ------------------------------------------------------------------------------
+# cron starts jobs with PATH=/usr/bin:/bin; ZFS before 2.1 has zfs/zpool only in /sbin and /usr/sbin (U18).
+for _u18 in /usr/local/sbin /usr/sbin /sbin; do case ":${PATH:-}:" in *":$_u18:"*) ;; *) PATH="${PATH:-/usr/bin:/bin}:$_u18" ;; esac; done; unset _u18; export PATH
 set -uo pipefail
 
 VERSION='v1.1'

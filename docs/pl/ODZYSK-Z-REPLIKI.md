@@ -77,7 +77,7 @@ kolektora ma wtedy historię i retencja nie zaczyna się od zera.
 
 ## 4c. To samo z GUI
 
-Po `attach` (sekcja 2): **F4 Kopie**, wiersz „z innego dysku” (dysk podłączony do tego hosta). Enter przegląda
+Po `attach` (sekcja 2): **F4 Kopie**, wiersz „.. [przegląd]” na górze listy (pula spoza relacji i replik, np. dysk podłączony do tego hosta). Enter przegląda
 go (migawka zamontowana tylko do odczytu, mc), F9 przywraca w tych samych oknach co kopię relacji (dataset, cel,
 migawka, plan, Uruchom). Dopóki pula nie jest zaimportowana, wiersz mówi, żeby ją najpierw zaimportować.
 

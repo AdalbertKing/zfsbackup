@@ -121,6 +121,17 @@ swoje datasety:
 
 Lista jest zapamiętywana: kolejne uruchomienia i aktualizacje używają jej automatycznie.
 
+Na starym systemie (Debian 10 / PVE 6) domyślny `awk` to mawk 1.3.3, który nie zna klas
+znaków POSIX; `deploy.sh` sprawdza sam awk i przy błędzie instaluje `gawk`. Jeśli
+`deploy.sh` uruchomiono bez `--backup-user`, kreator GUI przed pokazaniem planu proponuje
+założenie wybranego w nim konta (np. `zfsbackup`). Instalacja kopii lokalnej dla konta nadaje mu
+też zgodę na zamrażanie gości, gdy szablon zamraża, i odmontowuje (`canmount=noauto`)
+zamontowany przez dawne zadanie dataset celu bez migawek i z mniej niż 1 MiB danych -- konto nie odmontuje go
+przy pierwszym pełnym odbiorze. Plan mówi o obu.
+Gdy na hoście leżą już kopie tych danych (reinstalacja, przyniesione dyski), kreator
+proponuje cel, pod którym pójdą przyrostowo, a dla kopii w innym układzie pokazuje
+`zfs rename -p`, które przenosi je tam, dokąd kopiuje relacja.
+
 Sprawdź, że jest czysto:
 
 ```bash

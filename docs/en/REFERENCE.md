@@ -112,7 +112,7 @@ window for it. See [snapsend.sh](#snapsendsh-push-replication).
 
 | Purpose | Verbs |
 |---|---|
-| Create | `--source=HOST:DATASET --target=DATASET [--install]` (remote backup; without `--install` it only plans), `--mode=sync` (mirror), `--source=DATASET --target=DATASET` (local copy), `--target=''` (local snapshots), `new-relation` (wizard), `add-client`, `seed`, `activate` |
+| Create | `--source=HOST:DATASET --target=DATASET [--install]` (remote backup; without `--install` it only plans), `--mode=sync` (mirror), `--source=DATASET --target=DATASET` (local copy; a source with children needs `--recursive=flat`, `atomic` or `no`), `--target=''` (local snapshots), `new-relation` (wizard), `add-client`, `seed`, `activate` |
 | Change | `edit-relation`, `set-tiers`, `show-tiers`, `set-transfer`, `set-bandwidth`, `add-source`, `remove-source`, `save-profile`, `list-profiles`, `delete-profile`, `edit-config` |
 | State | `pause-client` / `resume-client` (logical pause, `-L` on the job lines), `disable-client` / `enable-client` (the peer refuses the relation), `move-to-client`, `set-endpoint`, `verify-endpoint`, `final-catchup` |
 | Remove | `remove-client`, `delete-relation` (the whole removal as one command) |
@@ -141,8 +141,10 @@ run: `ZFS_TUI_LANG=pl zfs-backup gui` or `--lang=pl`.
 | F5 | Templates (Szablony) |
 | F6 | Replica (Replika) |
 | F7 | Run now (F2, F3, F6), Browse (F4) |
-| F8 | Show/hide past runs (F2), pause/resume a relation (F3), group by relation (F4), Key (F6) |
-| F9 | Group by relation (F2), File export/import (F3), Restore (F4) |
+| F8 | pause/resume a relation (F3), Key (F6) |
+| F9 | File export/import (F3), Restore (F4) |
+| Ctrl-G | Group by relation / one list (F2, F4); labelled on the list's bottom frame |
+| Ctrl-W | Hide/show past runs (F2); labelled on the list's bottom frame |
 | F10 | Settings (Ustawienia): host settings (`settings.ini`, see [Alerting](#alerting)) |
 | F12 | Quit (Wyjście) |
 
@@ -151,7 +153,7 @@ Restore from a disk (the former F11 Restore window) has been inside F4 Copies si
 Details of the windows:
 
 - The title bar shows the package version, read from the first version heading of the `CHANGELOG.md` shipped next to the program.
-- F2 lists finished runs of the last 72 hours and always lists a running one, also after F8 and when it started before that window. It opens on the newest finished run once the run history has arrived. A run with no end record whose `zfs-job.sh` process is gone is shown as INTERRUPTED (`job-stats --runs` gives it rc `-2`); where other users' processes cannot be read (`hidepid`) it stays "running". An engine killed by TERM/INT/HUP closes its own progress records as interrupted. A row finds its runs by the label of its own cron line, so the snapshot rows of a snapshot-only relation and a local prune row made of several datasets show their own runs. Idle, the screen is redrawn whole once a minute, so a console broadcast leaves no garbage.
+- F2 lists finished runs of the last 72 hours and always lists a running one, also after Ctrl-W and when it started before that window. It opens on the newest finished run once the run history has arrived. A run with no end record whose `zfs-job.sh` process is gone is shown as INTERRUPTED (`job-stats --runs` gives it rc `-2`); where other users' processes cannot be read (`hidepid`) it stays "running". An engine killed by TERM/INT/HUP closes its own progress records as interrupted. A row finds its runs by the label of its own cron line, so the snapshot rows of a snapshot-only relation and a local prune row made of several datasets show their own runs. Idle, the screen is redrawn whole once a minute, so a console broadcast leaves no garbage.
 - F4 describes a replica dataset that has no snapshot yet as `copy running` while the copy runs and as `interrupted, will resume` when a cut-off receive left a resume token (`zfs-tree --json` carries `resume`). It lists the guest disks of a snapshot-only relation that `pvesr` replicates, and shows a replica's medium in F6's words (WRONG DISK, or CONNECTED when the pool is not imported).
 - On WRONG DISK of a removable replica, F6 says why when a pool with the replica's pool name has an ID that is not one of its disks (re-formatted, or another disk): it gives both IDs and the way to assign the disk (change replica, step removable disk, the pool marked (current) -- adds the ID, no formatting). `list-replicas --json` carries `wrong_why` (`guid`, or `dataset` for the gate's other refusals) and `wrong_guid` (the pool's ID); both are empty in every other state.
 - F6 has a `Used` column and a medium line `used N% (X of Y)` while the disk's pool is imported. A running copy reads `copy running since ...` instead of the last finished run, and a disk just inserted whose copy is waiting reads `disk connected, copy in ~N s` instead of `disconnected`. The replica list is re-read every 15 s while F6 is open.
