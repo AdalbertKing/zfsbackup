@@ -72,6 +72,14 @@ cd /root/scripts/zfs-snapshot-all
 zfs-backup gui          # F3 Relations, Ins: the wizard creates the first relation
 ```
 
+Or the same in one script (git, the clone, `deploy.sh --backup-user=zfsbackup`):
+
+```bash
+wget -O install.sh https://raw.githubusercontent.com/AdalbertKing/zfsbackup/main/install.sh
+bash install.sh --check     # changes nothing: dependencies and what is still missing
+bash install.sh             # the install; --move-old moves old scripts without .git aside and repoints root's crontab at them
+```
+
 For the setup the collector needs root SSH access to the source host; the wizard installs the package
 there itself. The GUI starts in English; `zfs-backup gui --lang=pl` (or `[gui] language = pl` in
 F10 Settings) switches it to Polish. Command output is always English.

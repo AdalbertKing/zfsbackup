@@ -34,6 +34,12 @@ server console.
    `mv /root/scripts/zfs-snapshot-all /root/scripts/zfs-snapshot-all.old-YYYYMMDD`. On the source the wizard checks
    the same and refuses before changing anything; it installs git on the source itself.
 
+   One script does the same, also on a host with old scripts in that directory:
+   `bash install.sh --check` (changes nothing), then `bash install.sh --move-old`
+   (moves the old directory aside, saves root's crontab and repoints its lines at the moved directory).
+   Fetch it with `wget -O install.sh https://raw.githubusercontent.com/AdalbertKing/zfsbackup/main/install.sh`.
+   Options it does not know (`--allow-quiesce`, `--grant-datasets=...`) go to `deploy.sh`.
+
    Without options `deploy.sh` delegates `rpool/data` and `rpool/ROOT/pve-1` (the Proxmox default datasets) to
    the account. On a host with other pools name your own: `./deploy.sh --backup-user=zfsbackup --grant-datasets=hdd`
    (several, comma-separated). `zfs list -H -o name` lists the datasets.
@@ -49,7 +55,7 @@ server console.
 
    The collector needs SSH access to the source host as root; the wizard installs the package on the source by itself.
 
-   The title bar shows the package version (e.g. `zfs-snapshot-all 1.0.27`).
+   The title bar shows the package version (e.g. `zfs-snapshot-all 1.0.28`).
 
    The GUI starts in English. For Polish: **F10** (host settings), item `language` = `pl`, or
 

@@ -46,6 +46,14 @@ cd /root/scripts/zfs-snapshot-all
 zfs-backup gui --lang=pl    # F3 Relacje, Ins: kreator zakłada pierwszą relację
 ```
 
+Albo to samo jednym skryptem (git, klon, `deploy.sh --backup-user=zfsbackup`):
+
+```bash
+wget -O install.sh https://raw.githubusercontent.com/AdalbertKing/zfsbackup/main/install.sh
+bash install.sh --check     # niczego nie zmienia: zależności i czego jeszcze brakuje
+bash install.sh             # instalacja; --move-old odsuwa stare skrypty bez .git i przepina na nie crontab roota
+```
+
 Do przygotowania kolektor potrzebuje dostępu SSH roota do źródła; kreator sam instaluje tam pakiet.
 GUI startuje po angielsku; `--lang=pl` (albo `[gui] language = pl` w F10 Ustawienia) przełącza je na
 polski. Wyjście poleceń jest zawsze po angielsku.

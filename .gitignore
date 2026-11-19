@@ -46,6 +46,7 @@
 !/hostscripts/growth-guard.sh
 !/hostscripts/notify-fail.sh
 !/hostscripts/notify-warn.sh
+!/install.sh
 !/lib-backup-common.sh
 !/lib-cron.sh
 !/lib-pairing.sh

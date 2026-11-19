@@ -6,6 +6,22 @@ when they change how the tool is used.
 
 ## [Unreleased]
 
+## [1.0.28] — 2026-11-19
+
+- `install.sh`: the first install in one command. It installs git when missing, clones the
+  release repository into `/root/scripts/zfs-snapshot-all` and runs `deploy.sh
+  --backup-user=zfsbackup` (other options go to `deploy.sh`). `--check` changes nothing: a
+  temporary clone and `deploy.sh --check-only`. Old scripts without `.git` in that directory are
+  refused; `--move-old` saves root's crontab, moves the directory aside and points every root
+  crontab line that names the directory (`<dir>/x` or `cd <dir> && ./x`) at the moved one, so
+  those jobs do not start the new package's scripts of the same name. A crontab that cannot be
+  read (anything but "no crontab for root") stops it before the move; a failed install or
+  read-back of the repointed crontab puts the crontab and the directory back and stops before
+  the clone. At the end it lists root's
+  crontab lines outside the package that mention zfs, snapsend, snapget, syncoid or zrep.
+- README.md of the development repository: the clone command uses the release repository's
+  address, `zfsbackup.git` (it named the development repository).
+
 ## [1.0.27] — 2026-11-18
 
 - GUI, browsing a copy: Esc and failures go back to where the browse was started. Enter on
