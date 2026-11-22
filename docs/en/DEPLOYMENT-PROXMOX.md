@@ -454,23 +454,54 @@ ALERTING IS NOT WIRED UP: 'mail' exists but no MTA provides sendmail(8)
 mail transport present (postfix) but 3 message(s) are STUCK IN THE QUEUE
 ```
 
-If you see either of the last two — alerts from this host do not work. The
-minimal fix:
+If you see either of the last two, alerts from this host do not work. When mail
+is stuck, the verdict also prints the reason postfix recorded and the remedy, e.g.:
 
-```bash
-apt-get install postfix
+```
+why: connect to mx.example.com[192.0.2.25]:25: Connection refused
+fix: outbound port 25 is blocked or unreachable from here -- send through your mail provider instead: deploy.sh --smtp-relay=SMTP-SERVER:587 --smtp-user=ACCOUNT
 ```
 
-At the installer prompt choose **"Local only"** if alerts are to go to the
-local root (this package's default address), or **"Internet Site"** /
-**"Satellite system"** if they are to go to an external address.
+You can also install and configure an MTA yourself (`apt-get install postfix`,
+**"Local only"** at the installer prompt for mail to the local root).
 
-> **`deploy.sh` deliberately does NOT configure postfix.** It is a host-wide
-> change: when the host already has working mail (exim4, a configured relay,
-> msmtp), overwriting `main.cf` would break someone else's configuration. The
-> choice of smarthost and SMTP credentials is also a per-installation decision,
-> and the password would have to live somewhere. The same principle keeps
-> `--commit-scope` away from other people's ZFS grants.
+### Sending through your mail provider (`--smtp-relay`)
+
+Many networks block outbound port 25, and many mail servers refuse mail from
+`root@<host>.lan`. Then the host has to send through the mailbox account of your
+provider, like a mail program does:
+
+```bash
+./deploy.sh --email=you@example.com --smtp-relay=smtp.example.com:587 --smtp-user=you@example.com
+```
+
+The password is asked for on the terminal before anything changes (without a
+terminal: `--smtp-password-file=FILE`, its first line); it is never passed on the
+command line. `deploy.sh` then:
+
+- installs postfix on a host with no MTA at all (before Phase 1, so `mailutils`
+  does not pull exim4 in) and `libsasl2-modules` for the login; installed packages
+  stay even if a later step fails. A host whose mail goes through another MTA
+  (exim4, msmtp) is refused before anything changes, with the command to switch;
+- copies `main.cf`, `sasl_passwd`, `sasl_passwd.db` and `smtp_generic` to
+  `/etc/postfix/zfs-backup-relay.bak-<time>/` and only then sets the relay, TLS
+  (STARTTLS on 587, TLS from the first byte on 465), the login (`sasl_passwd`,
+  mode 600) and the sender: the addresses of this host (`myhostname`,
+  `myorigin`) leave as `--smtp-from` (default: `--smtp-user` when it is an
+  address). An `smtp_generic_maps` set by someone else is left alone, and so is a
+  host domain equal to the alert recipient's;
+- reads the result back from `postconf`; on any failure it puts the saved files
+  back and says so;
+- sends the test mail with its own Message-ID and reads postfix's log for that
+  message only: `status=sent` is shown; a refusal by the server (for example
+  DMARC) is reported with the server's own words and the remedy. With no log
+  line of that message (journald keeping only warnings, no `/var/log/mail.log`)
+  the result is "UNKNOWN" -- check the inbox.
+
+Without `--smtp-relay` the mail configuration is left exactly as found, so a host
+with working mail of its own keeps it. `--check-only --smtp-relay=HOST:PORT` changes nothing: it
+tests whether the server answers on that port and warns when the host's mail goes
+through another MTA (a real run would then refuse).
 
 **Checking after the fact** — the simplest proof that mail really leaves:
 
@@ -479,8 +510,9 @@ local root (this package's default address), or **"Internet Site"** /
 mailq
 ```
 
-An empty queue after sending means the MTA accepted the message and sent it
-on. Messages lingering in `mailq` mean alerts are being produced and not
+An empty queue after sending means the message left this host; the test mail
+also reads postfix's log, because a message the server refused leaves the queue
+too (as a bounce). Messages lingering in `mailq` mean alerts are being produced and not
 arriving — a state to fix, not a cosmetic issue.
 
 ---

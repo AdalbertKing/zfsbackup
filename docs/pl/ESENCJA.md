@@ -38,6 +38,9 @@ Wszystko w bashu, zadania chodzą z crona, a do codziennej pracy jest tekstowe G
    (odsuwa stary katalog, zapisuje kopię crontaba roota i przepina jego linie na odsunięty katalog).
    Skrypt pobierzesz: `wget -O install.sh https://raw.githubusercontent.com/AdalbertKing/zfsbackup/main/install.sh`.
    Opcje, których nie zna (`--allow-quiesce`, `--grant-datasets=...`), przekazuje do `deploy.sh`.
+   Adres alertów i wysyłka przez skrzynkę dostawcy, gdy port 25 jest zablokowany:
+   `bash install.sh --email=ty@example.com --smtp-relay=smtp.example.com:587 --smtp-user=ty@example.com`
+   (hasło pytane w terminalu; szczegóły: WDROZENIE-PROXMOX.md, „Wysyłka przez skrzynkę dostawcy poczty”).
 
    Bez opcji `deploy.sh` nadaje kontu uprawnienia na `rpool/data` i `rpool/ROOT/pve-1` (domyślne datasety
    Proxmoksa). Na hoście z innymi pulami podaj własne: `./deploy.sh --backup-user=zfsbackup --grant-datasets=hdd`
@@ -54,7 +57,7 @@ Wszystko w bashu, zadania chodzą z crona, a do codziennej pracy jest tekstowe G
 
    Do hosta źródłowego kolektor potrzebuje wstępu SSH jako root; pakiet na źródle kreator zainstaluje sam.
 
-   Pasek tytułowy pokazuje wersję pakietu (np. `zfs-snapshot-all 1.0.28`).
+   Pasek tytułowy pokazuje wersję pakietu (np. `zfs-snapshot-all 1.0.29`).
 
    GUI startuje po angielsku. Po polsku: **F10** (ustawienia hosta), pozycja `language` = `pl`, albo
 

@@ -281,6 +281,43 @@ die() { echo "FATAL: $*" >&2; exit 1; }
 
 CHECK_ONLY=0
 SEND_TEST_MAIL=0
+# --smtp-relay (first install 2026-11-18, U3): send this host's mail through the operator's
+# mail provider. Empty: postfix/exim are left exactly as found, as before.
+SMTP_RELAY=""
+SMTP_USER=""
+SMTP_FROM=""
+SMTP_PASSWORD_FILE=""
+SMTP_PASSWORD=""
+# Seconds the test mail waits for the local queue to drain (a relay login takes longer).
+MAIL_PROBE_WAIT=3
+NOTIFY_EMAIL_GIVEN=0
+
+# smtp_relay_args_check RELAY USER FROM -- prints why the values are unusable, rc 1.
+# They end up in postfix maps and main.cf, so they are checked as data before anything
+# runs: a host name, a port, an account and an address, no spaces, no control characters.
+smtp_relay_args_check() {
+    local relay="$1" user="$2" from="$3" host port
+    host="${relay%%:*}"; port=587
+    case "$relay" in *:*) port="${relay#*:}" ;; esac
+    case "$host" in
+        ''|-*|*[!A-Za-z0-9.-]*) echo "--smtp-relay: '$host' is not a host name (letters, digits, dots, hyphens)"; return 1 ;;
+    esac
+    case "$port" in
+        ''|*[!0-9]*) echo "--smtp-relay: port '$port' is not a number"; return 1 ;;
+    esac
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { echo "--smtp-relay: port $port is out of range"; return 1; }
+    case "$user" in
+        *[[:space:]]*|*[[:cntrl:]]*|-*) echo "--smtp-user: '$user' contains a space or control character, or starts with '-'"; return 1 ;;
+    esac
+    if [ -n "$from" ]; then
+        case "$from" in
+            *[[:space:]]*|*[[:cntrl:]]*|*[\<\>\"\']*) echo "--smtp-from: '$from' is not a plain address"; return 1 ;;
+            ?*@?*.?*) ;;
+            *) echo "--smtp-from: '$from' is not an address (name@domain)"; return 1 ;;
+        esac
+    fi
+    return 0
+}
 # Set when THIS run creates the alert config, i.e. the host is being set up for
 # the first time -- the only moment a delivery smoke test proves anything new.
 FIRST_TIME_SETUP=0
@@ -472,8 +509,18 @@ while [ "$#" -gt 0 ]; do
         # outward. Both parse; internally the space form flows on unchanged.
         --grant-datasets=*|--datasets=*) BACKUP_USER_DATASETS="$(dataset_list_split "${1#*=}" | tr '\n' ' ')"; BACKUP_USER_DATASETS="${BACKUP_USER_DATASETS% }"; BACKUP_USER_DATASETS_GIVEN=1; shift ;;
         --grant-datasets|--datasets)     BACKUP_USER_DATASETS="$(dataset_list_split "${2:-}" | tr '\n' ' ')"; BACKUP_USER_DATASETS="${BACKUP_USER_DATASETS% }"; BACKUP_USER_DATASETS_GIVEN=1; shift 2 ;;
-        --email=*)      NOTIFY_EMAIL="${1#*=}"; shift ;;
-        --email)        NOTIFY_EMAIL="${2:-}"; shift 2 ;;
+        --email=*)      NOTIFY_EMAIL="${1#*=}"; NOTIFY_EMAIL_GIVEN=1; shift ;;
+        --email)        NOTIFY_EMAIL="${2:-}"; NOTIFY_EMAIL_GIVEN=1; shift 2 ;;
+        --smtp-relay=*) SMTP_RELAY="${1#*=}"; shift ;;
+        --smtp-relay)   SMTP_RELAY="${2:-}"; shift 2 ;;
+        --smtp-user=*)  SMTP_USER="${1#*=}"; shift ;;
+        --smtp-user)    SMTP_USER="${2:-}"; shift 2 ;;
+        --smtp-from=*)  SMTP_FROM="${1#*=}"; shift ;;
+        --smtp-from)    SMTP_FROM="${2:-}"; shift 2 ;;
+        # No --smtp-password=: a password on the command line is visible to every
+        # user in `ps` and stays in the shell history.
+        --smtp-password-file=*) SMTP_PASSWORD_FILE="${1#*=}"; shift ;;
+        --smtp-password-file)   SMTP_PASSWORD_FILE="${2:-}"; shift 2 ;;
         --pair)         PAIR_MODE=1; shift ;;
         --join=*)       JOIN_MODE=1; JOIN_PACKAGE="${1#*=}"; shift ;;
         --join)         JOIN_MODE=1; JOIN_PACKAGE="${2:-}"; shift 2 ;;
@@ -579,6 +626,20 @@ Usage: deploy.sh [options]
                           removes it. The whitelist is the --datasets list, so
                           naming a PARENT makes every guest under it freezable.
   --email=ADDR            where alerts are mailed
+  --smtp-relay=HOST[:PORT]  send this host's mail through your mail provider's
+                          SMTP server (port 587 by default; 465 = TLS from the
+                          first byte). For hosts whose provider blocks port 25.
+                          Configures postfix: installs it on a host with no MTA,
+                          refuses a host whose mail goes through another MTA
+                          (exim4, msmtp) before changing anything. The postfix
+                          files it changes are saved first and put back on
+                          failure (installed packages stay). Then a test mail.
+    --smtp-user=ACCOUNT     login at that server; the password is asked for on
+                            the terminal (never on the command line)
+    --smtp-password-file=F  read it from the first line of F instead (for runs
+                            without a terminal)
+    --smtp-from=ADDR        sender the server accepts for root@<this host>
+                            (default: --smtp-user when it is an address)
 Defaults are the config block at the top of this script -- edit them there to
 make them permanent for a host.
 
@@ -791,6 +852,15 @@ case "$ALERT_MODE" in
     daily|immediate) ;;
     *) echo "--alerts must be 'daily' or 'immediate', got '$ALERT_MODE'" >&2; exit 2 ;;
 esac
+# The relay belongs to a plain deploy: the pairing, join, self-update and uninstall
+# modes end before the mail phase and would drop it without a word.
+if [ -n "$SMTP_RELAY$SMTP_USER$SMTP_FROM$SMTP_PASSWORD_FILE" ]; then
+    [ -n "$SMTP_RELAY" ] || { echo "--smtp-user/--smtp-from/--smtp-password-file need --smtp-relay=HOST[:PORT]" >&2; exit 2; }
+    [ "$PAIR_MODE$JOIN_MODE$UNINSTALL_MODE$SELF_UPDATE" = 0000 ] \
+        || { echo "--smtp-relay goes with a plain deploy.sh run, not with --pair/--join/--self-update/--uninstall" >&2; exit 2; }
+    smtp_err=$(smtp_relay_args_check "$SMTP_RELAY" "$SMTP_USER" "$SMTP_FROM") \
+        || { echo "$smtp_err" >&2; exit 2; }
+fi
 case "$PEER_ROLE" in
     pull|push) ;;
     *) echo "--role must be 'pull' or 'push', got '$PEER_ROLE'" >&2; exit 2 ;;
@@ -3614,7 +3684,8 @@ alert_delivery_verdict() {
     fi
     if ! mta_present; then
         warn "  ALERTING IS NOT WIRED UP: 'mail' exists but no MTA provides sendmail(8), so nothing can leave this host."
-        warn "    fix: apt-get install postfix   (or exim4 / msmtp-mta -- this script deliberately does not choose or configure one for you)"
+        warn "    fix: deploy.sh --smtp-relay=SMTP-SERVER:587 --smtp-user=ACCOUNT   (installs and configures postfix for your mail provider),"
+        warn "         or apt-get install postfix / exim4 / msmtp-mta and configure it yourself"
         return 1
     fi
     local q; q=$(mail_queue_depth)
@@ -3632,6 +3703,7 @@ alert_delivery_verdict() {
     ;; esac
     if [ "$q" -gt 0 ]; then
         warn "  mail transport present ($(mta_name)) but $q message(s) are STUCK IN THE QUEUE -- alerts are being written and not delivered."
+        mail_queue_explain
         warn "    look: mailq   and   tail -20 /var/log/mail.log"
         return 1
     fi
@@ -3658,8 +3730,20 @@ alert_delivery_probe() {
     # Sent directly, NOT through notify-fail.sh: since v4 that only queues, so
     # routing the delivery smoke test through it would prove nothing about mail.
     q_before=$(mail_queue_depth)
-    if ! echo "deploy.sh: test delivery from $(hostname -f 2>/dev/null || hostname) at $(date '+%Y-%m-%d %H:%M:%S')" \
-        | mail -s "[ZFS BACKUP] test na $(hostname -f 2>/dev/null || hostname)" "$email"; then
+    local sent_at h body msgid
+    sent_at=$(date '+%Y-%m-%d %H:%M:%S')
+    h=$(hostname -f 2>/dev/null || hostname)
+    body="deploy.sh: test delivery from $h at $sent_at"
+    # REV-20261122-B01 F2: the message carries its own Message-ID, so the log line about
+    # ITS hand-over can be found (postfix logs "QID: message-id=<...>"). mail(1) on Debian
+    # (bsd-mailx, mailutils) takes -a as a header -- measured on pve14, pve10, pve13. A
+    # mail(1) that refuses it is retried without; the result is then UNKNOWN, not guessed.
+    msgid="zfs-backup-probe-$(date +%s)-$$@$h"
+    if ! printf '%s\n' "$body" | mail -a "Message-ID: <$msgid>" -s "[ZFS BACKUP] test na $h" "$email" 2>/dev/null; then
+        msgid=""
+        printf '%s\n' "$body" | mail -s "[ZFS BACKUP] test na $h" "$email"
+    fi
+    if [ "$?" -ne 0 ]; then
         # Until REV-046 the submission was fire-and-forget: mail(1) could exit
         # non-zero and the run still told the operator to go check an inbox.
         warn "  the test message was NOT ACCEPTED: mail(1) exited non-zero -- nothing was submitted, so nothing can arrive"
@@ -3672,8 +3756,15 @@ alert_delivery_probe() {
     # later has not been delivered -- that is not proof of permanent failure
     # (a deferred retry may still succeed), but it is proof that "the mail was
     # sent" is not yet true, and saying so beats implying it is.
-    sleep 3
-    q_after=$(mail_queue_depth)
+    # Polled, not one fixed look: a relay login (U3) takes a few seconds, and a drained
+    # queue ends the wait at once.
+    local waited=0
+    while :; do
+        sleep 1; waited=$((waited + 1))
+        q_after=$(mail_queue_depth)
+        [ "$q_after" = 0 ] && break
+        [ "$waited" -ge "${MAIL_PROBE_WAIT:-3}" ] && break
+    done
     case "$q_after" in
     ''|*[!0-9]*)
         log "check the target inbox ($email) and/or 'tail -20 /var/log/mail.log' to confirm delivery."
@@ -3681,15 +3772,305 @@ alert_delivery_probe() {
         ;;
     0)
         log "  local queue empty after the submission -- the message LEFT THIS MTA; recipient delivery is NOT independently verified. Confirm arrival at $email."
+        mail_dispatch_result "$msgid" "$sent_at" || return 1
         ;;
     *)
         warn "  the test message is STILL QUEUED ($q_after in the queue, ${q_before:-?} before the send) -- it has not been delivered yet"
+        mail_queue_explain
         warn "    this host can hold mail but has not shown it can send it. Look: mailq / tail -20 /var/log/mail.log"
-        warn "    a relayhost/smarthost is the usual missing piece; which relay and whose credentials is a per-host decision this script does not make"
         return 1
         ;;
     esac
     return 0
+}
+
+# --- why mail waits, and how to get it out (first install 2026-11-18, U2/U3) ---------------
+# U2: deploy saw the test mail stuck in the queue and said only "look: mailq". postfix
+# writes WHY next to every deferred message; that line is the answer, so it is shown,
+# with the one remedy each known cause has. Explanation lines carry four spaces, so
+# they do not count as extra problems in warn().
+
+# mail_queue_reasons -- distinct deferral reasons from the postfix queue, at most 3.
+# Empty when the queue cannot be read or the MTA is not postfix.
+mail_queue_reasons() {
+    command -v postqueue >/dev/null 2>&1 || return 0
+    postqueue -p 2>/dev/null \
+        | sed -n 's/^[[:space:]]*(\(.*\))[[:space:]]*$/\1/p' | sort -u | head -3
+}
+
+# mail_reason_hint REASON -- the remedy for a known cause, or nothing.
+mail_reason_hint() {
+    case "$1" in
+        *"connect to "*":25: "*|*"connect to "*":25:"*)
+            echo "outbound port 25 is blocked or unreachable from here -- send through your mail provider instead: deploy.sh --smtp-relay=SMTP-SERVER:587 --smtp-user=ACCOUNT" ;;
+        *"Sender address rejected"*|*"sender address rejected"*|*"5.7.1"*[Ss]"ender"*)
+            echo "the server refuses the sender address of this host (root@<host>) -- give it one it accepts: deploy.sh --smtp-relay=... --smtp-from=ACCOUNT@DOMAIN" ;;
+        *"DMARC"*|*"SPF"*|*"not authorized to send"*)
+            echo "the server will not accept mail from this host's domain -- log in with your account and send as it: deploy.sh --smtp-relay=SERVER:587 --smtp-user=ACCOUNT --smtp-from=ACCOUNT@DOMAIN" ;;
+        *"Relay access denied"*|*"relay access denied"*|*"Authentication required"*|*"authentication required"*|*"5.7.0"*|*"not permitted to relay"*)
+            echo "the server relays only for logged-in users -- add --smtp-user=ACCOUNT (the password is asked for)" ;;
+        *"SASL authentication failed"*|*"authentication failed"*|*" 535 "*|*" 535-"*)
+            echo "the mail server rejected the login -- run deploy.sh --smtp-relay=... --smtp-user=... again and retype the password" ;;
+        *"must issue a STARTTLS"*|*"TLS is required"*|*"Cannot start TLS"*|*"TLS handshake"*)
+            echo "TLS with the mail server failed -- port 465 needs TLS from the first byte (--smtp-relay=SERVER:465), 587 uses STARTTLS" ;;
+        *"Host or domain name not found"*|*"Name service error"*|*"No address associated"*)
+            echo "a host name in the route does not resolve -- check DNS on this host (getent hosts NAME)" ;;
+        *"Connection timed out"*|*"Connection refused"*|*"Network is unreachable"*|*"No route to host"*)
+            echo "this host cannot reach the mail server -- a firewall, a wrong port, or no route; test: deploy.sh --check-only --smtp-relay=SERVER:PORT" ;;
+    esac
+}
+
+mail_queue_explain() {
+    local r h shown=0
+    while IFS= read -r r; do
+        [ -n "$r" ] || continue
+        warn "    why: $r"
+        h=$(mail_reason_hint "$r"); [ -n "$h" ] && warn "    fix: $h"
+        shown=1
+    done <<EOF
+$(mail_queue_reasons)
+EOF
+    if [ "$shown" = 0 ] && command -v exim4 >/dev/null 2>&1; then
+        warn "    why: exim4 keeps it in its log -- tail -20 /var/log/exim4/mainlog"
+    fi
+}
+
+# mail_dispatch_result MSGID SINCE -- after a drained queue, what postfix logged for THIS
+# message: its queue id from the cleanup line "QID: message-id=<MSGID>", then the last
+# delivery line of that queue id. A drained queue is not a sent message: live, pve14
+# 2026-11-22, the relay answered "550 5.7.1 rejected by DMARC", postfix bounced the
+# message, the queue emptied, and the probe used to say "LEFT THIS MTA".
+# REV-20261122-B01 F2: only a line of THIS message's queue id counts. No such line
+# (journald keeping only warnings, no /var/log/mail.log, not postfix, no Message-ID)
+# is UNKNOWN and said so -- never another message's result.
+#   rc 1 only for status=bounced of this message; otherwise rc 0.
+mail_dispatch_result() {
+    local msgid="$1" since="$2" src="" qid="" line="" why h ml="${ZFS_MAIL_LOG:-/var/log/mail.log}"
+    if [ -z "$msgid" ]; then
+        log "  hand-over UNKNOWN: mail(1) did not take the Message-ID header, so no log line can be tied to this message -- confirm arrival at the inbox"
+        return 0
+    fi
+    if ! command -v postconf >/dev/null 2>&1; then
+        log "  hand-over UNKNOWN: only postfix logs are read here, this host runs $(mta_name) -- confirm arrival at the inbox"
+        return 0
+    fi
+    if command -v journalctl >/dev/null 2>&1; then
+        src=$(journalctl --since "$since" -o cat 2>/dev/null)
+        qid=$(printf '%s\n' "$src" | grep -F "message-id=<$msgid>" | head -1 | sed -n 's/^\([0-9A-Za-z]*\): message-id=.*/\1/p')
+        [ -n "$qid" ] && line=$(printf '%s\n' "$src" | grep "^$qid: .*status=" | tail -1)
+    fi
+    if [ -z "$qid" ] && [ -r "$ml" ]; then
+        qid=$(grep -F "message-id=<$msgid>" "$ml" 2>/dev/null | head -1 \
+              | sed -n 's/.*postfix\/cleanup\[[0-9]*\]: \([0-9A-Za-z]*\): message-id=.*/\1/p')
+        if [ -n "$qid" ]; then
+            line=$(grep " $qid: .*status=" "$ml" 2>/dev/null | tail -1)
+            line="${line#*]: }"
+        fi
+    fi
+    case "$line" in
+        *status=bounced*)
+            warn "  the mail server REFUSED the test message (queue id $qid) -- it will never arrive:"
+            why="${line#*status=bounced }"; why="${why#(}"; why="${why%)}"
+            warn "    why: $why"
+            h=$(mail_reason_hint "$why"); [ -n "$h" ] && warn "    fix: $h"
+            return 1 ;;
+        *relay=local*status=sent*)
+            log "  postfix log: $line"
+            log "  delivered on this host (local delivery); a forward from there is another message, not followed here" ;;
+        "")
+            if [ -n "$qid" ]; then
+                log "  hand-over UNKNOWN: no delivery line for this message (queue id $qid) -- cannot verify; confirm arrival at the inbox"
+            else
+                log "  hand-over UNKNOWN: postfix's record of this message (Message-ID <$msgid>) is in neither the journal nor /var/log/mail.log -- journald may keep only warnings (MaxLevelStore); cannot verify, confirm arrival at the inbox"
+            fi ;;
+        *)
+            log "  postfix log: $line" ;;
+    esac
+    return 0
+}
+
+# smtp_port_open HOST PORT -- a TCP connection can be opened, within 8 seconds.
+smtp_port_open() {
+    timeout 8 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$1" "$2" 2>/dev/null
+}
+
+# smtp_read_password -- into SMTP_PASSWORD: the file's first line, or the terminal
+# without echo. Before Phase 1, so a missing password stops the run before it changes
+# anything.
+smtp_read_password() {
+    if [ -n "$SMTP_PASSWORD_FILE" ]; then
+        [ -r "$SMTP_PASSWORD_FILE" ] || die "--smtp-password-file: cannot read '$SMTP_PASSWORD_FILE'"
+        IFS= read -r SMTP_PASSWORD < "$SMTP_PASSWORD_FILE" || [ -n "$SMTP_PASSWORD" ] \
+            || die "--smtp-password-file: '$SMTP_PASSWORD_FILE' is empty"
+    elif { : < /dev/tty; } 2>/dev/null; then
+        printf 'SMTP password for %s at %s: ' "$SMTP_USER" "${SMTP_RELAY%%:*}" > /dev/tty
+        IFS= read -rs SMTP_PASSWORD < /dev/tty
+        echo > /dev/tty
+    else
+        die "--smtp-user needs a password and there is no terminal to ask on -- use --smtp-password-file=FILE"
+    fi
+    [ -n "$SMTP_PASSWORD" ] || die "the SMTP password is empty"
+    case "$SMTP_PASSWORD" in *[[:cntrl:]]*) die "the SMTP password contains a control character" ;; esac
+}
+
+# smtp_relay_preflight -- before Phase 1 (REV-20261122-B01 F1). --smtp-relay configures
+# postfix; it never replaces another MTA. Replacing exim4/msmtp is a package swap with no
+# way back inside this run (the reviewer: "outside the claimed rollback transaction"), so
+# a host whose mail already goes through another MTA is refused before anything changes,
+# with the command that converts it. A host with NO MTA gets postfix now, BEFORE Phase 1
+# installs mailutils: on Debian mailutils pulls exim4 in as the default MTA (pve14,
+# 2026-11-18), and installing postfix after it would be exactly that swap. This install is
+# not undone if a later step fails, and the run says so.
+smtp_relay_preflight() {
+    command -v postconf >/dev/null 2>&1 && return 0
+    if mta_present; then
+        die "--smtp-relay configures postfix, and this host's mail goes through $(mta_name) -- it does not replace another mail transport; nothing was changed.
+    To switch to postfix: apt-get install postfix (apt removes $(mta_name); choose \"Local only\"), then run deploy.sh with --smtp-relay again."
+    fi
+    log "no mail transport on this host: installing postfix for --smtp-relay (\"Local only\"); this install is NOT undone if a later step fails"
+    printf '%s\n' "postfix postfix/main_mailer_type select Local only" \
+                  "postfix postfix/mailname string $(hostname -f 2>/dev/null || hostname)" \
+        | debconf-set-selections 2>/dev/null || true
+    ( export DEBIAN_FRONTEND=noninteractive; apt_install_with_fallback postfix ) \
+        || die "postfix could not be installed${APT_LAST_ERR:+: $APT_LAST_ERR} -- nothing else was changed"
+    command -v postconf >/dev/null 2>&1 || die "postfix was installed but postconf is not on PATH -- stopping before Phase 1"
+}
+
+# smtp_relay_setup -- U3: postfix sends through RELAY (host[:port], 587 default) with
+# the account's login, TLS required, and the sender of this host rewritten to an
+# address the server accepts (a provider answered "553 5.7.1 Sender address rejected" for
+# root@pve.<site>.lan). A working configuration of that install, 2026-11-18, is the model.
+#
+# Before any change, main.cf, sasl_passwd(.db) and smtp_generic are copied to one
+# backup directory; any failure puts them back (or removes what did not exist) and
+# returns 1. Success is read back from postconf, not assumed from rc 0.
+smtp_relay_setup() {
+    local pd="${SMTP_POSTFIX_DIR:-/etc/postfix}" host port hp from old ts bak f rc=0
+    host="${SMTP_RELAY%%:*}"; port=587
+    case "$SMTP_RELAY" in *:*) port="${SMTP_RELAY#*:}" ;; esac
+    hp="[$host]:$port"
+    from="$SMTP_FROM"
+    [ -z "$from" ] && case "$SMTP_USER" in ?*@?*.?*) from="$SMTP_USER" ;; esac
+
+    log "  mail relay: $hp${SMTP_USER:+, login $SMTP_USER}${from:+, sender $from}"
+    if ! smtp_port_open "$host" "$port"; then
+        warn "  cannot open a connection to $host:$port from this host -- nothing was changed (firewall, wrong port or name?)"
+        return 1
+    fi
+
+    # postfix comes from smtp_relay_preflight, before Phase 1 (REV-20261122-B01 F1).
+    if ! command -v postconf >/dev/null 2>&1; then
+        warn "  postfix is not installed -- the mail relay was not configured; nothing was changed"
+        return 1
+    fi
+    if [ -n "$SMTP_USER" ] && command -v dpkg >/dev/null 2>&1 && ! dpkg -s libsasl2-modules >/dev/null 2>&1; then
+        # Without it postfix has no SASL mechanism and every login fails ("no mechanism available").
+        # Adds a library and replaces nothing; it stays if a later step fails, and that is said.
+        log "  installing libsasl2-modules (postfix's login mechanisms; stays installed even if a later step fails)"
+        ( export DEBIAN_FRONTEND=noninteractive; apt_install_with_fallback libsasl2-modules ) \
+            || { warn "  libsasl2-modules could not be installed -- postfix could not log in; the mail configuration is unchanged"; return 1; }
+    fi
+
+    ts=$(date +%Y%m%d-%H%M%S)
+    bak="$pd/zfs-backup-relay.bak-$ts"
+    ( umask 077; mkdir -p "$bak" ) || { warn "  cannot create $bak -- mail is unchanged"; return 1; }
+    for f in main.cf sasl_passwd sasl_passwd.db smtp_generic; do
+        if [ -e "$pd/$f" ]; then cp -p "$pd/$f" "$bak/$f" || { warn "  cannot save $pd/$f -- mail is unchanged"; return 1; }
+        else : > "$bak/$f.absent"; fi
+    done
+    old=$(postconf -h relayhost 2>/dev/null)
+    [ -n "$old" ] && [ "$old" != "$hp" ] && log "  replacing relayhost $old (saved in $bak)"
+
+    # A subshell: the first failing step ends it with rc 1, and the restore below runs.
+    (
+        postconf -e "relayhost = $hp" \
+                    "smtp_tls_security_level = encrypt" \
+                    "smtp_tls_wrappermode = $([ "$port" = 465 ] && echo yes || echo no)" || exit 1
+        # A "Local only" profile routes everything to error:; the relay needs smtp.
+        [ "$(postconf -h default_transport 2>/dev/null)" = error ] && { postconf -e "default_transport = smtp" || exit 1; }
+        [ "$(postconf -h relay_transport 2>/dev/null)" = error ] && { postconf -e "relay_transport = smtp" || exit 1; }
+        if [ -n "$SMTP_USER" ]; then
+            ( umask 077; printf '%s %s:%s\n' "$hp" "$SMTP_USER" "$SMTP_PASSWORD" > "$pd/sasl_passwd" ) || exit 1
+            postmap "hash:$pd/sasl_passwd" || exit 1
+            chmod 600 "$pd/sasl_passwd" "$pd/sasl_passwd.db" 2>/dev/null
+            postconf -e "smtp_sasl_auth_enable = yes" \
+                        "smtp_sasl_password_maps = hash:$pd/sasl_passwd" \
+                        "smtp_sasl_security_options = noanonymous" \
+                        "smtp_sasl_tls_security_options = noanonymous" || exit 1
+        else
+            postconf -e "smtp_sasl_auth_enable = no" || exit 1
+        fi
+        exit 0
+    ) || rc=1
+    [ "$rc" = 0 ] && [ -n "$from" ] && { smtp_sender_rewrite "$pd" "$from" || rc=1; }
+    if [ "$rc" = 0 ]; then
+        postfix check >/dev/null 2>&1 || { warn "  'postfix check' failed on the new configuration"; rc=1; }
+    fi
+    if [ "$rc" = 0 ]; then
+        systemctl reload-or-restart postfix >/dev/null 2>&1 || postfix reload >/dev/null 2>&1 \
+            || { warn "  postfix did not reload"; rc=1; }
+    fi
+    if [ "$rc" = 0 ] && [ "$(postconf -h relayhost 2>/dev/null)" != "$hp" ]; then
+        warn "  postconf reads relayhost as '$(postconf -h relayhost 2>/dev/null)', not $hp"; rc=1
+    fi
+    if [ "$rc" != 0 ]; then
+        for f in main.cf sasl_passwd sasl_passwd.db smtp_generic; do
+            if [ -e "$bak/$f.absent" ]; then rm -f "$pd/$f"; else cp -p "$bak/$f" "$pd/$f"; fi
+        done
+        systemctl reload-or-restart postfix >/dev/null 2>&1 || postfix reload >/dev/null 2>&1 || true
+        warn "  the mail relay was NOT configured; the postfix files are put back from $bak (packages installed by this run stay installed)"
+        return 1
+    fi
+    log "  postfix now sends through $hp (previous files in $bak)"
+    return 0
+}
+
+# mail_effective_recipient -- where this host's alerts really go: --email when given,
+# else the host setting alerts.email as zfs-backup.sh resolves it (an existing host keeps
+# its address in /etc/zfs-alert.conf or settings.conf, which a re-run never overwrites;
+# the test mail used to go to the built-in default instead).
+mail_effective_recipient() {
+    local v=""
+    if [ "$NOTIFY_EMAIL_GIVEN" = 0 ] && [ -x "${REPO_DIR:-}/zfs-backup.sh" ]; then
+        v=$("$REPO_DIR/zfs-backup.sh" settings get alerts.email 2>/dev/null | tail -1)
+    fi
+    case "$v" in ''|*[[:space:]]*) v="$NOTIFY_EMAIL" ;; esac
+    printf '%s
+' "$v"
+}
+
+# smtp_sender_rewrite DIR FROM -- smtp_generic_maps: every address of THIS host
+# (myhostname, myorigin) leaves as FROM. Exact-domain regexps, so a recipient's address
+# is never rewritten; a domain equal to the alert recipient's is skipped for the same
+# reason. An smtp_generic_maps someone else set is left alone.
+smtp_sender_rewrite() {
+    local pd="$1" from="$2" cur want map d o seen="" rdom
+    want="regexp:$pd/smtp_generic"
+    cur=$(postconf -h smtp_generic_maps 2>/dev/null)
+    if [ -n "$cur" ] && [ "$cur" != "$want" ]; then
+        warn "  smtp_generic_maps is already '$cur' -- left alone; if the server refuses root@<host>, add $from there"
+        return 0
+    fi
+    local to; to=$(mail_effective_recipient)
+    rdom="${to##*@}"; [ "$rdom" = "$to" ] && rdom=""
+    map=""
+    o=$(postconf -xh myorigin 2>/dev/null)
+    case "$o" in /*) o=$(head -1 "$o" 2>/dev/null) ;; esac
+    for d in "$(postconf -xh myhostname 2>/dev/null)" "$o"; do
+        case "$d" in ''|*'$'*) continue ;; esac
+        case " $seen " in *" $d "*) continue ;; esac
+        seen="$seen $d"
+        if [ -n "$rdom" ] && [ "$d" = "$rdom" ]; then
+            warn "  not rewriting @$d: it is the alert recipient's domain too"
+            continue
+        fi
+        map="$map/@$(printf '%s' "$d" | sed 's/[].[^$*+?(){}|\\]/\\&/g')\$/ $from
+"
+    done
+    [ -n "$map" ] || { warn "  no host domain to rewrite to $from -- the server may refuse root@<host>"; return 0; }
+    printf '%s' "$map" > "$pd/smtp_generic" || return 1
+    chmod 644 "$pd/smtp_generic" 2>/dev/null   # addresses only; readable like main.cf, as on a working install
+    postconf -e "smtp_generic_maps = $want" || return 1
 }
 
 # ==============================================================================
@@ -5181,6 +5562,14 @@ if [ "${DEPLOY_PHASES_QUIET:-0}" = 1 ] && [ -z "$(trap -p EXIT)" ]; then
         trap 'phases_unquiet tail' EXIT
     fi
 fi
+# --smtp-relay: the password is asked for now, before anything on the host changes.
+if [ -n "$SMTP_RELAY" ] && [ -n "$SMTP_USER" ] && [ "$CHECK_ONLY" -eq 0 ]; then
+    smtp_read_password
+fi
+if [ -n "$SMTP_RELAY" ] && [ "$CHECK_ONLY" -eq 0 ]; then
+    smtp_relay_preflight
+fi
+
 log "Phase 1: dependencies"
 # ------------------------------------------------------------------------------
 # The list below is derived from what the package's scripts ACTUALLY invoke, not
@@ -5912,6 +6301,24 @@ host_script_ensure notify-fail.sh "$NOTIFY_SCRIPT" 0755 \
 # belongs in that answer even though nothing is being installed. It is also the
 # only report a host gets on a re-run, where the test mail is deliberately
 # skipped.
+if [ -n "$SMTP_RELAY" ]; then
+    if [ "$CHECK_ONLY" -eq 1 ]; then
+        if smtp_port_open "${SMTP_RELAY%%:*}" "$(case "$SMTP_RELAY" in *:*) echo "${SMTP_RELAY#*:}" ;; *) echo 587 ;; esac)"; then
+            log "  mail relay $SMTP_RELAY answers on its port -- a run without --check-only would configure postfix for it"
+        else
+            warn "  mail relay $SMTP_RELAY: no connection from this host (firewall, wrong port or name?)"
+        fi
+        if ! command -v postconf >/dev/null 2>&1 && mta_present; then
+            warn "  this host's mail goes through $(mta_name): a run without --check-only would refuse --smtp-relay (it configures postfix and does not replace another MTA)"
+        fi
+    elif smtp_relay_setup; then
+        # A new route is exactly what the test mail is for, set up or not.
+        SEND_TEST_MAIL=1
+        MAIL_PROBE_WAIT=20
+    fi
+fi
+SMTP_PASSWORD=""
+
 alert_delivery_verdict || true
 
 if [ "$CHECK_ONLY" -eq 1 ]; then
@@ -5919,7 +6326,7 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
 elif [ "$SEND_TEST_MAIL" -eq 0 ] && [ "$FIRST_TIME_SETUP" -eq 0 ]; then
     log "skipping the test email (host already set up -- pass --test-mail to force one)"
 elif command -v mail >/dev/null; then
-    alert_delivery_probe "$NOTIFY_EMAIL" || true
+    alert_delivery_probe "$(mail_effective_recipient)" || true
 else
     warn "no 'mail' command -- install mailutils/postfix, then re-run this script, or create $NOTIFY_SCRIPT manually"
 fi

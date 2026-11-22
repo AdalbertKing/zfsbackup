@@ -6,6 +6,24 @@ when they change how the tool is used.
 
 ## [Unreleased]
 
+## [1.0.29] — 2026-11-22
+
+- `deploy.sh --smtp-relay=HOST[:PORT] --smtp-user=ACCOUNT`: the host sends its mail through
+  your mail provider's SMTP server, for networks that block port 25 and servers that refuse
+  `root@<host>.lan`. The password is asked for on the terminal before anything changes
+  (`--smtp-password-file=FILE` without one), never on the command line. postfix is installed
+  on a host with no mail transport (before Phase 1, so mailutils does not pull exim4 in); a
+  host whose mail goes through another MTA (exim4, msmtp) is refused before anything changes.
+  `main.cf`, `sasl_passwd(.db)` and `smtp_generic` are saved first and put back on any failure
+  (installed packages stay, and the run says so), the addresses of this host leave as `--smtp-from`
+  (default: `--smtp-user` when it is an address), and the result is read back. Without the option the mail configuration is untouched.
+- `deploy.sh`, mail stuck in the queue: the verdict and the test mail show the reason postfix
+  recorded and the remedy (blocked port 25, refused sender, failed login, DMARC, TLS, DNS).
+- The test mail carries its own Message-ID and reads postfix's log for that message only: a
+  message the server refused (bounced) is a failure with the server's reason, and without a
+  log line of that message the result is "UNKNOWN", never another message's line. An emptied queue alone (still logged as "LEFT THIS MTA") is no longer the verdict. Without
+  `--email` it goes to the host's configured alert address instead of the built-in default.
+
 ## [1.0.28] — 2026-11-19
 
 - `install.sh`: the first install in one command. It installs git when missing, clones the

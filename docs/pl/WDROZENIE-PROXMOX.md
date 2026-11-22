@@ -448,22 +448,56 @@ ALERTING IS NOT WIRED UP: 'mail' exists but no MTA provides sendmail(8)
 mail transport present (postfix) but 3 message(s) are STUCK IN THE QUEUE
 ```
 
-Jeśli zobaczysz którykolwiek z dwóch ostatnich — alerty z tego hosta nie
-działają. Minimalna naprawa:
+Jeśli zobaczysz którykolwiek z dwóch ostatnich, alerty z tego hosta nie
+działają. Gdy poczta stoi w kolejce, werdykt pokazuje też przyczynę zapisaną przez
+postfiksa i sposób naprawy, np.:
 
-```bash
-apt-get install postfix
+```
+why: connect to mx.example.com[192.0.2.25]:25: Connection refused
+fix: outbound port 25 is blocked or unreachable from here -- send through your mail provider instead: deploy.sh --smtp-relay=SMTP-SERVER:587 --smtp-user=ACCOUNT
 ```
 
-Przy pytaniu instalatora wybierz **„Local only"**, jeśli alerty mają iść do
-lokalnego roota (domyślny adres tego pakietu), albo **„Internet Site"** /
-**„Satellite system"**, jeśli mają wychodzić na zewnętrzny adres.
+Można też samemu zainstalować i skonfigurować MTA (`apt-get install postfix`,
+przy pytaniu instalatora **„Local only"** dla poczty do lokalnego roota).
 
-> **`deploy.sh` celowo NIE konfiguruje postfiksa.** To zmiana ogólnohostowa: gdy
-> host ma już działającą pocztę (exim4, ustawiony relay, msmtp), nadpisanie
-> `main.cf` zepsułoby cudzą konfigurację. Wybór smarthosta i poświadczeń SMTP
-> to też decyzja per instalacja, a hasło musiałoby gdzieś zamieszkać. Ta sama
-> zasada, dla której `--commit-scope` nie rusza cudzych grantów ZFS.
+### Wysyłka przez skrzynkę dostawcy poczty (`--smtp-relay`)
+
+Wiele sieci blokuje wychodzący port 25, a wiele serwerów pocztowych odrzuca
+pocztę od `root@<host>.lan`. Wtedy host musi wysyłać przez konto pocztowe u
+dostawcy, tak jak program pocztowy:
+
+```bash
+./deploy.sh --email=ty@example.com --smtp-relay=smtp.example.com:587 --smtp-user=ty@example.com
+```
+
+Hasło jest pytane w terminalu, zanim cokolwiek się zmieni (bez terminala:
+`--smtp-password-file=PLIK`, pierwsza linia); nigdy nie idzie w linii poleceń.
+Następnie `deploy.sh`:
+
+- na hoście bez żadnego MTA instaluje postfiksa (przed fazą 1, żeby `mailutils`
+  nie ściągnął exim4), a do logowania `libsasl2-modules`; zainstalowane pakiety
+  zostają także po nieudanym dalszym kroku. Hosta, którego poczta idzie przez inny
+  MTA (exim4, msmtp), odmawia, zanim cokolwiek zmieni, i podaje polecenie zamiany;
+- kopiuje `main.cf`, `sasl_passwd`, `sasl_passwd.db` i `smtp_generic` do
+  `/etc/postfix/zfs-backup-relay.bak-<czas>/` i dopiero potem ustawia relay, TLS
+  (STARTTLS na 587, TLS od pierwszego bajtu na 465), logowanie (`sasl_passwd`,
+  prawa 600) i nadawcę: adresy tego hosta (`myhostname`, `myorigin`) wychodzą
+  jako `--smtp-from` (domyślnie `--smtp-user`, gdy jest adresem). Cudze
+  `smtp_generic_maps` zostaje nietknięte; domeny hosta nie przepisuje, gdy jest
+  równa domenie odbiorcy alertów;
+- odczytuje wynik z `postconf`; przy każdym błędzie przywraca zapisane pliki i
+  mówi to wprost;
+- wysyła mail testowy z własnym Message-ID i czyta log postfiksa tylko dla tej
+  wiadomości: pokazuje `status=sent`; odmowę serwera (np. DMARC) podaje słowami
+  serwera i dopisuje sposób naprawy. Gdy w logu nie ma linii tej wiadomości
+  (journald trzyma tylko ostrzeżenia, brak `/var/log/mail.log`), wynik brzmi
+  „UNKNOWN” -- sprawdź skrzynkę.
+
+Bez `--smtp-relay` konfiguracja poczty zostaje dokładnie taka, jaka była, więc
+host z własną działającą pocztą ją zachowuje. `--check-only
+--smtp-relay=HOST:PORT` niczego nie zmienia: sprawdza, czy serwer odpowiada na tym
+porcie, i ostrzega, gdy poczta hosta idzie przez inny MTA (wtedy prawdziwy przebieg
+odmówi).
 
 **Sprawdzenie po fakcie** — najprostszy dowód, że poczta faktycznie wychodzi:
 
@@ -472,7 +506,9 @@ lokalnego roota (domyślny adres tego pakietu), albo **„Internet Site"** /
 mailq
 ```
 
-Pusta kolejka po wysyłce znaczy, że MTA przyjął i wyprawił wiadomość.
+Pusta kolejka po wysyłce znaczy, że wiadomość wyszła z hosta; mail testowy czyta
+dodatkowo log postfiksa, bo wiadomość odrzucona przez serwer też znika z kolejki
+(jako zwrot).
 Wiadomości zalegające w `mailq` znaczą, że alerty są produkowane i nie
 docierają — to stan do naprawy, nie kosmetyka.
 

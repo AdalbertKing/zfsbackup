@@ -39,6 +39,9 @@ server console.
    (moves the old directory aside, saves root's crontab and repoints its lines at the moved directory).
    Fetch it with `wget -O install.sh https://raw.githubusercontent.com/AdalbertKing/zfsbackup/main/install.sh`.
    Options it does not know (`--allow-quiesce`, `--grant-datasets=...`) go to `deploy.sh`.
+   The alert address, and sending through your mail provider when port 25 is blocked:
+   `bash install.sh --email=you@example.com --smtp-relay=smtp.example.com:587 --smtp-user=you@example.com`
+   (the password is asked for on the terminal; details: DEPLOYMENT-PROXMOX.md, "Sending through your mail provider").
 
    Without options `deploy.sh` delegates `rpool/data` and `rpool/ROOT/pve-1` (the Proxmox default datasets) to
    the account. On a host with other pools name your own: `./deploy.sh --backup-user=zfsbackup --grant-datasets=hdd`
@@ -55,7 +58,7 @@ server console.
 
    The collector needs SSH access to the source host as root; the wizard installs the package on the source by itself.
 
-   The title bar shows the package version (e.g. `zfs-snapshot-all 1.0.28`).
+   The title bar shows the package version (e.g. `zfs-snapshot-all 1.0.29`).
 
    The GUI starts in English. For Polish: **F10** (host settings), item `language` = `pl`, or
 
