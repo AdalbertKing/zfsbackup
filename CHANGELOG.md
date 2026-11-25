@@ -6,6 +6,12 @@ when they change how the tool is used.
 
 ## [Unreleased]
 
+## [1.0.31] — 2026-11-25
+
+- F2 and the relation's Tasks tab name a snapshot-only run by where the snapshot is taken:
+  "remote snapshot" (`[snaponly:]`, taken on the source by the collector) and "local snapshot"
+  (a `[dataset:]` section with neither source nor target), instead of "snapshot" / "only snapshot".
+
 ## [1.0.30] — 2026-11-25
 
 - Mail identity: the daily report and the alert mails carry the installation name and the

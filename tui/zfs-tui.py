@@ -1893,8 +1893,8 @@ def build_jobs(data, now):
             _d = j.get("direction", "")
             # U143 (wlasciciel 2026-11-01: "wystarczy only snapshot"): zadanie bez zrodla i celu
             # (list-jobs: direction=snapshot) robi same migawki -- nie "transfer".
-            task = {"pull": _(u"pobranie"), "push": _(u"wysyłka"), "local": _(u"kopia"), "snaponly": _(u"migawka"),
-                    "snapshot": _(u"tylko migawka")}.get(_d, _(u"transfer"))
+            task = {"pull": _(u"pobranie"), "push": _(u"wysyłka"), "local": _(u"kopia"), "snaponly": _(u"migawka zdalna"),
+                    "snapshot": _(u"migawka lokalna")}.get(_d, _(u"transfer"))
             if _d == "pull" and job_is_mirror(j):
                 keep = _(u"lustro")
         mode = (rels_by_name.get(j.get("label") or "") or {}).get("mode")
