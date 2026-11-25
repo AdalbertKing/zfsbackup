@@ -459,7 +459,8 @@ while :; do
         fi
         # U175 (lab pve11 2026-11-09): pasywna replika kopiuje tylko istniejące migawki --
         # dataset bez żadnej nie trafia na dysk, a okno tego nie mówiło.
-        if ! BASKET_NO_CLOSE=1 BASKET_ZERO_NOTE="$(T 'bez migawek -- pasywna replika go nie skopiuje')" basket_step; then
+        if ! BASKET_NO_CLOSE=1 BASKET_ZERO_NOTE="$(T 'bez migawek -- pasywna replika go nie skopiuje')" \
+            BASKET_ZERO_KIDS_NOTE="$(T 'bez migawek -- pójdą tylko potomne')" basket_step; then
             [ "$MENU" -eq 1 ] && { step=0; continue; }
             [ "$EDIT" -eq 1 ] && { clear 2>/dev/null; wt_end_nochange "$(T 'Replika: przerwane, nic nie zmieniono')"; exit 1; }
             step=1; continue
@@ -477,18 +478,22 @@ while :; do
         # Tylko dla NOWEJ repliki -- w istniejącej tryb zostaje (zmiana = nowa kopia od zera).
         if [ "$EDIT" -eq 0 ]; then
             RAW=no
-            "$PY" - "$TMPD/ds.json" "${B_ROOT[@]}" <<'PYEOF' && RAW=yes
+            # Lab L8 (pve10, 2026-11-25): one encrypted child made the plan say "source
+            # is encrypted". The file lists the topmost encrypted datasets, and the plan
+            # names them when they are not the whole selection.
+            "$PY" - "$TMPD/ds.json" "$TMPD/enc" "${B_ROOT[@]}" <<'PYEOF' && RAW=yes
 import sys, json
 try:
     d = json.load(open(sys.argv[1], encoding="utf-8"))
 except Exception:
     sys.exit(1)
-roots = sys.argv[2:]
-for x in d.get("datasets") or []:
-    n, e = x.get("name") or "", (x.get("encryption") or "-")
-    if e not in ("off", "-", "") and any(n == r or n.startswith(r + "/") for r in roots):
-        sys.exit(0)
-sys.exit(1)
+roots = sys.argv[3:]
+enc = sorted(x.get("name") or "" for x in d.get("datasets") or []
+             if (x.get("encryption") or "-") not in ("off", "-", "")
+             and any((x.get("name") or "") == r or (x.get("name") or "").startswith(r + "/") for r in roots))
+top = [n for n in enc if not any(n.startswith(p + "/") for p in enc)]
+open(sys.argv[2], "w", encoding="utf-8").write("" if sorted(top) == sorted(roots) else ", ".join(top))
+sys.exit(0 if top else 1)
 PYEOF
         fi
         step=25 ;;
@@ -744,7 +749,12 @@ PYEOF
             [ "$PASSIVE" = yes ] && echo "$(T 'Pasywnie = istniejące migawki źródła: idzie stan z ostatniej z nich, nie bieżący; dataset bez migawek nie jest kopiowany.')"
             [ "$PASSIVE" = yes ] && [ -n "$EXFAM" ] && echo "$(T 'Pomijane migawki z prefiksami:') ${EXFAM//,/, }."
             [ "$PASSIVE" = yes ] || echo "$(T 'Na dysku:   ')$([ -n "$KEEP" ] && T '%s ostatnich kopii, niezależnie od kolektora' "$KEEP" || T 'odbicie kolektora')"
-            [ "$RAW" = yes ] && echo "$(T 'Szyfrowane: źródło jest zaszyfrowane -- kopia idzie zaszyfrowana (raw), kolektor nie potrzebuje klucza')"
+            _enc=""; [ -s "$TMPD/enc" ] && _enc=$(cat "$TMPD/enc")
+            if [ "$RAW" = yes ] && [ -n "$_enc" ]; then
+                echo "$(T 'Szyfrowane: %s -- idą zaszyfrowane (raw), kolektor nie potrzebuje klucza; reszta idzie zwykle' "$_enc")"
+            elif [ "$RAW" = yes ]; then
+                echo "$(T 'Szyfrowane: źródło jest zaszyfrowane -- kopia idzie zaszyfrowana (raw), kolektor nie potrzebuje klucza')"
+            fi
             # X10: przy "cała historia" i przy "N ostatnich" Historia nie jest wyborem -- plan mówi,
             # co naprawdę idzie, a nie wartość, której silnik nie użyje.
             if [ "$PASSIVE" = yes ]; then echo "$(T 'Historia:   wszystkie istniejące migawki (lustro kolektora)')"

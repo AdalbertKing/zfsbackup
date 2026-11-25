@@ -135,7 +135,7 @@ run: `ZFS_TUI_LANG=pl zfs-backup gui` or `--lang=pl`.
 | Key | Window or action |
 |---|---|
 | F1 | Help (Pomoc) |
-| F2 | Runs (Przebiegi): the next 6 h on top, the "now" line, past runs below it; one relation's cron lines of one task and tier starting at most 5 min apart (the wizard spreads them over free minutes) are one row "N datasets" (Enter expands it) |
+| F2 | Runs (Przebiegi), two views read downward from the "now" line: QUEUE (F2 opens on it): running runs above the line, upcoming runs of the next 6 h below it, nearest first; HISTORY: running runs above the line, finished runs of the last 72 h below it, newest first; a running copy or replica shows in Time how long it runs and in Data what has arrived and at what rate; an upcoming replica run while its copy is still running reads "will skip"; one relation's cron lines of one task and tier starting at most 5 min apart (the wizard spreads them over free minutes) are one row "N datasets" (Enter expands it) |
 | F3 | Relations (Relacje): Ins = new, Del = delete, Enter = open, `e` = edit inside a relation window |
 | F4 | Copies (Kopie): Enter/Tab to the snapshots, Enter on a snapshot or F7 browses files, F9 restores |
 | F5 | Templates (Szablony) |
@@ -143,8 +143,8 @@ run: `ZFS_TUI_LANG=pl zfs-backup gui` or `--lang=pl`.
 | F7 | Run now (F2, F3, F6), Browse (F4) |
 | F8 | pause/resume a relation (F3), Key (F6) |
 | F9 | File export/import (F3), Restore (F4) |
-| Ctrl-G | Group by relation / one list (F2, F4); labelled on the list's bottom frame |
-| Ctrl-W | Hide/show past runs (F2); labelled on the list's bottom frame |
+| Ctrl-G | Group by relation (F2, F4; the frame then offers "one timeline" in F2, "one list" in F4); in F2 the groups lie on the same axis and groups with a running run come first; labelled on the list's bottom frame |
+| Ctrl-W | Switch queue / history (F2); the frame says "Ctrl-W history" or "Ctrl-W queue" and the title names the view; after switching, the cursor is on the first running run, or, when there is none, on the first row under the line |
 | F10 | Settings (Ustawienia): host settings (`settings.ini`, see [Alerting](#alerting)) |
 | F12 | Quit (Wyjście) |
 
@@ -153,11 +153,11 @@ Restore from a disk (the former F11 Restore window) has been inside F4 Copies si
 Details of the windows:
 
 - The title bar shows the package version, read from the first version heading of the `CHANGELOG.md` shipped next to the program.
-- F2 lists finished runs of the last 72 hours and always lists a running one, also after Ctrl-W and when it started before that window. It opens on the newest finished run once the run history has arrived. A run with no end record whose `zfs-job.sh` process is gone is shown as INTERRUPTED (`job-stats --runs` gives it rc `-2`); where other users' processes cannot be read (`hidepid`) it stays "running". An engine killed by TERM/INT/HUP closes its own progress records as interrupted. A row finds its runs by the label of its own cron line, so the snapshot rows of a snapshot-only relation and a local prune row made of several datasets show their own runs. Idle, the screen is redrawn whole once a minute, so a console broadcast leaves no garbage.
+- In the history view F2 lists finished runs of the last 72 hours, and in both views it always lists a running one, also after Ctrl-W and when it started before that window. A run with no end record whose `zfs-job.sh` process is gone is shown as INTERRUPTED (`job-stats --runs` gives it rc `-2`); where other users' processes cannot be read (`hidepid`) it stays "running". An engine killed by TERM/INT/HUP closes its own progress records as interrupted. A row finds its runs by the label of its own cron line, so the snapshot rows of a snapshot-only relation and a local prune row made of several datasets show their own runs. Idle, the screen is redrawn whole once a minute, so a console broadcast leaves no garbage.
 - F4 describes a replica dataset that has no snapshot yet as `copy running` while the copy runs and as `interrupted, will resume` when a cut-off receive left a resume token (`zfs-tree --json` carries `resume`). It lists the guest disks of a snapshot-only relation that `pvesr` replicates, and shows a replica's medium in F6's words (WRONG DISK, or CONNECTED when the pool is not imported).
 - On WRONG DISK of a removable replica, F6 says why when a pool with the replica's pool name has an ID that is not one of its disks (re-formatted, or another disk): it gives both IDs and the way to assign the disk (change replica, step removable disk, the pool marked (current) -- adds the ID, no formatting). `list-replicas --json` carries `wrong_why` (`guid`, or `dataset` for the gate's other refusals) and `wrong_guid` (the pool's ID); both are empty in every other state.
 - F6 has a `Used` column and a medium line `used N% (X of Y)` while the disk's pool is imported. A running copy reads `copy running since ...` instead of the last finished run, and a disk just inserted whose copy is waiting reads `disk connected, copy in ~N s` instead of `disconnected`. The replica list is re-read every 15 s while F6 is open.
-- The replica wizard shows each dataset's snapshot count in the dataset tree (every family; `list-datasets --own-snapshots` gives it as `snapshots`) and, at zero, the note that a passive replica will not copy it. Its plan says how big the first copy is and, when the medium's pool is imported, how much is free, with `!!!` when it cannot fit. With a disk already attached it asks whether to start the first copy now (in the background, as F7).
+- The replica wizard shows each dataset's snapshot count in the dataset tree (every family; `list-datasets --own-snapshots` gives it as `snapshots`) and, at zero, the note that a passive replica will not copy it (when its descendants have snapshots: "only descendants go" -- a recursive replica copies the descendants). The panel of the dataset under the cursor shows, besides the snapshot count, the newest snapshot: "Newest <YYYY-MM-DD HH:MM>  USED <size>  REFER <size>" (the columns named as `zfs list` names them). Its plan says how big the first copy is and how long it takes at 3 MB/s (the middle of 2.5-4 MB/s measured on an SMR disk over USB), e.g. "about 74 h (3 days)" for 800 GB, and, when the medium's pool is imported, how much is free, with `!!!` when it cannot fit. With a disk already attached it asks whether to start the first copy now (in the background, as F7).
 
 ### Replicas onto removable media
 
@@ -171,9 +171,15 @@ another pool, usually a disk that gets unplugged. Every run is bracketed by `zfs
   and leaves the medium alone; its detach does not export the disk under the running copy. If the
   gate cannot create or lock its run record, or write and read it back, `attach` stops with rc 2 before
   any import; a detach that finds a record it cannot read does not export the pool (it says DO NOT
-  UNPLUG when the pool is imported). `zfs-job.sh` reports rc 75 as a warning. The age monitor
-  (`zfs-media-gate.sh age`) reports a running copy as OK, and as WARNING once that copy has itself run
-  longer than the critical age.
+  UNPLUG when the pool is imported). rc 75 is
+  information: `zfs-job.sh` sends no mail of its own for it. While a copy runs, the age monitor
+  (`zfs-media-gate.sh age`) counts the age from the last COMPLETED copy (a running copy does not make
+  the medium current): OK / WARNING / CRITICAL by the same warn/crit as otherwise, and the line names the
+  running copy and its progress. The FIRST copy (nothing completed yet) reads "first copy: a copy is
+  running since ..., now <dataset>: NG of MG at XM/s, dataset ends ~<time>" and is OK. The alarm
+  STALLED (the copy has stopped): the copy's progress (bytes written, from the engines' progress records)
+  unchanged for 1 h gives WARNING, for 6 h CRITICAL; no visible progress record is not counted as
+  stalled.
 - **A first copy that cannot fit is refused.** Before writing, the gate adds up the sources that have
   no copy on the medium yet (`zfs used` on the source) and compares that with the free space; when it
   is short it refuses with rc 2 (an alert) and exports the disk. A number that cannot be read skips
@@ -202,7 +208,11 @@ another pool, usually a disk that gets unplugged. Every run is bracketed by `zfs
   `zpool create`. The setting is lost at every unplug, so it is set at every attach.
 - **`prepare-media`** creates the pool with `ashift=12` (USB bridges report 512-byte sectors on 4 KiB
   disks) and warns when the kernel's `physical_block_size` is smaller than what `smartctl` reports, i.e.
-  a bridge hides the sector size. A freshly formatted disk is checked before it is called ready: it
+  a bridge hides the sector size. The plan also warns when the disk is SMR: `smartctl -i` then reports
+  "Zoned Device: Device managed zones" (checked with `-d sat`, also through a USB bridge). On such a 2.5"
+  disk over USB 2.5-4 MB/s was measured on a long copy, so a first copy of 800 GB takes about 3 days; a
+  CMR disk avoids it. The USB bridge of that disk (0480:b301) offers only Bulk-Only transport (no UAS), so
+  `usb-storage` is not the host's choice. A freshly formatted disk is checked before it is called ready: it
   waits until a plain `zpool import` lists the new pool and refuses otherwise.
 - **A stopped copy still puts the disk away.** The cron line runs the gate's `detach` also when the
   whole job's process group is killed (TERM/INT/HUP).
@@ -458,6 +468,11 @@ degrade policy applies: a `_crash_` snapshot and exit 8 (see above); with `,stri
 without a snapshot. A scope with no guest disk (`vm-N-disk-M`, `subvol-N-disk-M`) has nothing to
 freeze and needs no privilege: a plain snapshot, exit 0 (U188). A local source freezes the guests
 on this host.
+Exit 8 (a snapshot taken without freezing the guest, `_crash_`) is a WARNING in the daily report, counted
+separately from errors: the statistics column reads "błędy / ostrz." (errors / warnings), e.g. "1 / 1", the
+relation's state "bez zamrożenia" (not frozen), and the cause is the engine's `Quiesce[<host>]: ...` line
+framed in Polish ("zamrożenie gościa na <host> nie powiodło się: ..."), cut at a word with
+"… (cały wpis: F2)".
 
 Filesystem-consistent is not application-consistent. For a database-consistent snapshot, put the
 engine's own quiesce logic (`FLUSH TABLES WITH READ LOCK`, Postgres backup mode, ...) in the
@@ -569,18 +584,27 @@ is `/root/scripts/zfs-snapshot-stats.log` for root and `$HOME/zfs-snapshot-stats
 non-root account.
 
 ```json
-{"time":"2026-07-24T10:15:03Z","script":"snapsend.sh","label":"src-a","dataset":"tank/data","target":"backup/tank/data","status":"success","duration_s":42,"resumed":false}
+{"time":"2026-07-24T10:15:03Z","script":"snapsend.sh","label":"src-a","dataset":"tank/data","target":"backup/tank/data","status":"success","duration_s":42,"resumed":false,"bytes":42028656,"job":"pve1 daily backup (data)"}
 {"time":"2026-07-24T10:16:01Z","script":"delsnaps.sh","dataset":"tank/data","pattern":"auto_","status":"success","duration_s":1,"deleted":2,"kept":3}
 ```
 
 `snapsend.sh`/`snapget.sh` records carry `label` (the relation, from `-L`; empty when the job
-has none), `target` and `resumed` (a real boolean). `delsnaps.sh` records carry
+has none), `target` and `resumed` (a real boolean). Since 1.0.30 they also carry `bytes` (what the run's
+transfers carried, from `zfs send -v -P`; absent when nothing was measured) and `job` (the cron job,
+exported by `zfs-job.sh`). The daily report's "dopisane" (added), `job-stats --runs` (`xfers`) and
+the F2 Runs history credit each job and run from these; without them they fall back to the
+`written` of target snapshots created in the window. The report uses the records for a job only
+once they cover the whole window (a record older than its start), so the week after an update
+is not reported from one day of records. `delsnaps.sh` records carry
 `pattern`/`deleted`/`kept` instead, since it prunes rather than transfers. `status` is `success`,
 a failure, or a distinct non-success such as `skipped_paused` (the relation is paused),
 `skipped_lock` or `snapshot_only`, so a skipped run can never be read back as a fresh backup.
 `skipped_lock` means another run of the same job held the lock: the engine ends with rc 75, which
-`zfs-job.sh` reports as a warning (a skipped run), not as a failure; job statistics, the Runs window
-and the digest do not count it as one either.
+is information: `zfs-job.sh` sends no mail of its own for it, and job statistics, the Runs window and
+the digest do not count it as a failure. The daily report shows it as a grey row, not as an error and not
+as "needs attention", with the cause in Polish, e.g. "pominięty: trwa kopia na nośnik usb1 od 2026-11-24
+18:05 (pid 4242)"; the relation's state reads "trwa poprzedni bieg (...)" and the NAJNOWSZA (newest)
+column "trwa od <start>" when the newest thing is that running copy.
 Logging is best-effort: an unwritable path is swallowed rather than failing a backup that already
 succeeded.
 
@@ -1302,7 +1326,7 @@ the defaults above. The environment beating the file is what makes
 | `[alerts] warnings` | `ZFS_WARN_MODE` |
 | `[alerts] all_ok_mail` | `ZFS_DIGEST_QUIET` |
 | `[alerts] stats_days` | `ZFS_DIGEST_DAYS` |
-| `[alerts] site` | `ZFS_ALERT_SITE`: the installation's name in the subject of the daily summary and of the alert mails (`notify-fail.sh`, `notify-warn.sh`), `[ZFS][REPORT|WARNING|ALERT] <site> <host>`, and in the sender's name where the host has a sendmail; unset or `-` gives the host's full name. The tag after `[ZFS]` says the kind of mail, for mail rules: `REPORT` the daily summary, `WARNING` a warning, pool capacity or data growth, `ALERT` a failed run |
+| `[alerts] site` | `ZFS_ALERT_SITE`: the installation's name in the sender and the subject of every mail (the daily report and every alert: `notify-fail.sh`, `notify-warn.sh`): sender `zfs-backup <site> <full host name>`, subject `[ZFS][REPORT|WARNING|ALERT] <site> <full host name> ...`; unset or `-` gives `zfs-backup <full host name>` and `[ZFS][...] <full host name> ...`, always the full name (`hostname -f`), never the short one. It is set in F10 or by `deploy.sh --site=NAME`; the daily report's footer says when it is missing. The tag after `[ZFS]` says the kind of mail, for mail rules: `REPORT` the daily summary, `WARNING` a warning, pool capacity or data growth, `ALERT` a failed run |
 | `[alerts] repeat_after` | `ZFS_ALERT_COOLDOWN` (a number of seconds, or `30m`, `4h`) |
 | `[capacity] threshold` | `ZFS_CAPACITY_THRESHOLD` |
 | `[capacity] guard`, `guard_at`, `guard_target`, `guard_min_keep` | `ZFS_GUARD*` (capacity guard) |
@@ -1359,7 +1383,7 @@ notify-fail.sh ...; [ $rc -ge 3 ] && notify-fail.sh ...`).
 |---|---|---|
 | `notify-fail.sh` | Any job returning non-zero (`snapsend`/`snapget`/`delsnaps` failure), `check-snap-age.sh` CRITICAL/UNKNOWN, or a pool that is not ONLINE | `daily`: appends `epoch<TAB>ALERT<TAB>label<TAB>detail` to the queue and sends no mail. `immediate`: mails at once, rate-limited per message |
 | `notify-warn.sh` | `check-snap-age.sh` WARNING (getting stale, not yet CRITICAL) | The same queue with severity `WARN`, per `ZFS_WARN_MODE` |
-| `alert-digest.sh` | | The only backup mail a host sends in `daily` mode. Once a day it mails one message whose subject is `[ZFS][REPORT] <host> <date> STAN: OK\|UWAGA -- N alert / M warn`. The first block is the state *now* (pools, and a table of the jobs over the `ZFS_DIGEST_DAYS` window); the second is what *happened*: ALERT findings first, then WARNING findings, each followed by what the finding actually said. A quiet day uses a different subject (`... cisza, kanal sprawny (raport okresowy)`) so it cannot be mistaken for a findings mail. If `mail` fails, the findings are put back on the queue and it exits non-zero |
+| `alert-digest.sh` | | The only backup mail a host sends in `daily` mode. Once a day it mails one message whose subject is `[ZFS][REPORT] <site> <host> <dd.mm>: OK, N relacje` or `...: N z M relacji wymaga uwagi, ...` (the default relation layout; `ZFS_DIGEST_LAYOUT=jobs` keeps the older job table with `STAN: OK\|UWAGA -- N alert / M warn`). It lists every relation with its state, then what *happened*: ALERT findings first, then WARNING findings, each with what the finding said. A periodic report on a quiet day adds ` (raport okresowy)` to the subject. If `mail` fails, the findings are put back on the queue and it exits non-zero |
 | `check-pool-capacity.sh` | A pool, or a dataset with a refquota, approaching full, ahead of any job failing from it. Reports through `notify-fail.sh` and so arrives in the same digest. It also checks the transfer progress records: one still "running" with no update for 30 minutes whose process is gone is reported as an orphan (and closed as dead), not as a hung copy | Cron, default threshold 90% (`ZFS_CAPACITY_THRESHOLD`) |
 | `capacity-guard.sh` | Optional (default `off`): when a pool crosses `ZFS_GUARD_AT` (default 89%), deletes only snapshots that are safe to delete: ones this host's own local `delsnaps` lines own, never held, never the newest snapshot of a dataset. Any uncertainty means deleting nothing | `[capacity]` in `settings.ini` |
 | `growth-guard.sh` | Optional (default `off`), alert only: flags an increment that is a multiple (`ZFS_GROWTH_FACTOR`, default 5) of the dataset's recent norm while being poorly compressible, the signature of mass file encryption. Deletes and pauses nothing | `[growth]` in `settings.ini` |
@@ -1420,7 +1444,9 @@ bash deploy.sh --backup-user=zfsbackup  # also CREATE the delegated non-root acc
 
 Defaults live in a config block at the top of the script (`NOTIFY_EMAIL`, `ALERT_MODE`,
 `BACKUP_USER`, `BACKUP_USER_DATASETS`); edit them to make a choice permanent for a host, or pass a
-flag for a single run. `--email=ADDR` sets the alert address, and `--test-mail` sends a delivery
+flag for a single run. `--email=ADDR` sets the alert address, `--site=NAME` the installation's name
+(`alerts.site`; letters, digits, `.` `_` `-`) that the sender and subject of every mail carry; `deploy.sh`
+warns when the name is unset. `--test-mail` sends a delivery
 smoke test (automatic on first setup only). A run ends with the next step (`zfs-backup gui`), not with
 hand-written cron recipes.
 

@@ -94,13 +94,23 @@ basket_step() {
         "${RECURSION:-flat}" "${BASKET_HIDE:-}" "${#B_ROOT[@]}" ${B_ROOT[@]+"${B_ROOT[@]}"} ${B_EXCL[@]+"${B_EXCL[@]}"} <<'PYEOF' || return 1
 import sys, json, os
 ds = json.load(open(sys.argv[1], encoding="utf-8")).get("datasets") or []
+# #14 (pve0 hdd/backups 2026-11-25): a dataset without snapshots whose descendants have them --
+# a recursive replica copies the descendants, so "will not copy it" alone read as "nothing goes"
+_kids = {d.get("name", "") for d in ds if isinstance(d.get("snapshots"), int) and d["snapshots"]}
+def zero_note(name):
+    if any(k.startswith(name + "/") for k in _kids) and os.environ.get("BASKET_ZERO_KIDS_NOTE"):
+        return os.environ["BASKET_ZERO_KIDS_NOTE"]
+    return os.environ.get("BASKET_ZERO_NOTE", "")
 n = int(sys.argv[9]); roots = sys.argv[10:10 + n]; ex = sys.argv[10 + n:10 + 2 * n]
 spec = {"title": sys.argv[3], "host": sys.argv[4], "show_mode": sys.argv[5] == "1", "no_exc": sys.argv[6] == "1",
         "recursion": sys.argv[7], "hide": sys.argv[8].split(),
         "datasets": [dict({"name": d.get("name", ""), "used": d.get("used"), "type": d.get("type")},
                           # U175: liczba migawek (list-datasets --own-snapshots) i uwaga przy zerze
-                          **({"snaps": d["snapshots"], "note": os.environ.get("BASKET_ZERO_NOTE", "") if not d["snapshots"] else ""}
-                             if isinstance(d.get("snapshots"), int) else {})) for d in ds],
+                          **({"snaps": d["snapshots"], "note": zero_note(d.get("name", "")) if not d["snapshots"] else ""}
+                             if isinstance(d.get("snapshots"), int) else {}),
+                          # U194: the newest snapshot -- when, USED, REFER (list-datasets newest_*)
+                          **({"newest": [d["newest_epoch"], d.get("newest_used", -1), d.get("newest_refer", -1)]}
+                             if isinstance(d.get("newest_epoch"), int) and d["newest_epoch"] > 0 else {})) for d in ds],
         "roots": roots, "excl": {r: [x for x in e.split("\n") if x] for r, e in zip(roots, ex)},
         "closed": [x for x in os.environ.get("BASKET_CLOSED", "").split("\n") if x],
         "no_close": os.environ.get("BASKET_NO_CLOSE") == "1"}

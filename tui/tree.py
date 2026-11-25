@@ -47,6 +47,7 @@ Okno samo nie zapisuje niczego poza OUT -- zapis robi czasownik w kreatorze.
 """
 import argparse
 import json
+import time
 import os
 import sys
 
@@ -184,7 +185,7 @@ class Tree(object):
             self.nodes[n] = {"name": n, "parent": p if p in seen else None, "kids": [], "sub": [],
                              "depth": 0, "used": info[n].get("used"), "type": info[n].get("type"),
                              "avail": info[n].get("avail"), "snaps": info[n].get("snaps"),
-                             "note": info[n].get("note") or u""}
+                             "newest": info[n].get("newest"), "note": info[n].get("note") or u""}
         self.tops = []
         for n in names:
             p = self.nodes[n]["parent"]
@@ -435,6 +436,17 @@ class Tree(object):
             out.append((u"", _(u"Wolne     %s") % used_text(nd["avail"])))
         if nd.get("snaps") not in (None, u""):
             out.append((u"", _(u"Migawki   %s") % nd["snaps"]))
+        # U194 (owner 2026-11-25): when and how big the newest snapshot is -- the fact that
+        # tells the admin he picked the right dataset. USED/REFER as zfs list names them.
+        nw = nd.get("newest")
+        if isinstance(nw, list) and len(nw) == 3:
+            try:
+                at = time.strftime("%Y-%m-%d %H:%M", time.localtime(int(nw[0])))
+            except (TypeError, ValueError, OverflowError):
+                at = u"?"
+            sz = u"  ".join(u"%s %s" % (k, used_text(v)) for k, v in (("USED", nw[1]), ("REFER", nw[2]))
+                           if isinstance(v, int) and v >= 0)
+            out.append((u"", _(u"Ostatnia  %s") % at + (u"  " + sz if sz else u"")))
         if nd.get("note"):
             out.append((u"", _(u"Uwagi     %s") % nd["note"]))
         if nd["kids"]:

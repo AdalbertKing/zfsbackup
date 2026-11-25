@@ -40,19 +40,27 @@ json_escape() {
 # `jq` instead of parsed with regex. Best-effort: never lets a logging
 # failure (e.g. unwritable path) break the actual backup.
 emit_stats() {
-    local dataset="$1" target="$2" status="$3" duration="$4" resumed="${5:-no}"
-    local resumed_bool="false"
+    local dataset="$1" target="$2" status="$3" duration="$4" resumed="${5:-no}" bytes="${6:-}"
+    local resumed_bool="false" bytes_field=""
     [ "$resumed" = "yes" ] && resumed_bool="true"
+    # "bytes" joined 2026-11-25 (#4/#16): what this run's transfers carried, summed by
+    # progress_done. The digest's "dopisane" used to read target snapshots CREATED in the
+    # window, so a passive replica copying older snapshots for 43 minutes read 0B. Absent
+    # when not measured (progress off, a skip) -- a reader falls back, never reads 0.
+    case "$bytes" in ''|*[!0-9]*) ;; *) bytes_field=",\"bytes\":$bytes" ;; esac
+    # The cron job that ran this (zfs-job.sh exports it): several tiers of one relation
+    # land in the same target, so only the job name says whose bytes these are.
+    [ -n "${ZFS_JOB_LABEL:-}" ] && bytes_field="$bytes_field,\"job\":\"$(json_escape "$ZFS_JOB_LABEL")\""
     {
         # "label" joined 2026-08-23: the RELATION identity (-L), so history can
         # be grouped per relationship by a future monitor/GUI instead of being
         # guessed from path prefixes. Additive field -- every existing consumer
         # keeps parsing.
-        printf '{"time":"%s","script":"%s","label":"%s","dataset":"%s","target":"%s","status":"%s","duration_s":%s,"resumed":%s}\n' \
+        printf '{"time":"%s","script":"%s","label":"%s","dataset":"%s","target":"%s","status":"%s","duration_s":%s,"resumed":%s%s}\n' \
             "$(date -u +%FT%TZ)" "$(basename "$0")" \
             "$(json_escape "${PAIR_LABEL:-}")" \
             "$(json_escape "$dataset")" "$(json_escape "$target")" "$(json_escape "$status")" \
-            "$duration" "$resumed_bool"
+            "$duration" "$resumed_bool" "$bytes_field"
     } >> "$STATS_LOG" 2>/dev/null || true
 }
 
@@ -251,17 +259,26 @@ progress_watch() {   # <errfile> <dataset> <target> <peer> <direction> <mode> <b
             # never 0, so a missing measurement cannot read as an idle link.
             wire=-1
             if [ -n "$wirefile" ] && [ -s "$wirefile" ]; then
-                wire=$(awk '/total/ { for(i=1;i<NF;i++) if ($(i+1)=="kiB" || $(i+1)=="MiB" || $(i+1)=="GiB") {v=$i; u=$(i+1)} }
+                # %.0f, not %d: mawk 1.3.x (pve0) clamps %d at 2147483647, so a replica
+                # past 2 GiB reported wire_bytes 2147483647 for days (#28, 2026-11-25).
+                wire=$(awk '/total/ { for(i=1;i<NF;i++) if ($(i+1)=="kiB" || $(i+1)=="MiB" || $(i+1)=="GiB" || $(i+1)=="TiB") {v=$i; u=$(i+1)} }
                     END { if (v=="") { print -1; exit }
-                          m=1; if (u=="kiB") m=1024; else if (u=="MiB") m=1048576; else if (u=="GiB") m=1073741824
-                          printf "%d", v*m }' "$wirefile" 2>/dev/null)
+                          m=1; if (u=="kiB") m=1024; else if (u=="MiB") m=1048576; else if (u=="GiB") m=1073741824; else if (u=="TiB") m=1099511627776
+                          printf "%.0f", v*m }' "$wirefile" 2>/dev/null)
                 case "$wire" in ''|*[!0-9-]*) wire=-1 ;; esac
             fi
             case "$done_b" in ''|*[!0-9]*) done_b=0 ;; esac
             now=$(date +%s)
-            if [ "$now" -gt "$prev_t" ] && [ "$done_b" -ge "$prev_b" ]; then
-                rate=$(( (done_b - prev_b) / (now - prev_t) ))
-                prev_b=$done_b; prev_t=$now
+            # L2 (lab pve10 2026-11-25): the rate was the byte delta between two 2-second ticks,
+            # but `zfs send -v` lands its count in bursts 4-6 s apart -- a local 1.5 GB copy read
+            # 0, 291M/s, 0, 0, 51M/s... and its final record 0. Average since the start instead;
+            # 0 once the count has not moved for 60 s, so a stall still reads as one (a healthy
+            # local copy was measured standing 25 s while ZFS flushed to disk -- 30 s would flap).
+            [ "$done_b" -ne "$prev_b" ] && { prev_b=$done_b; prev_t=$now; }
+            if [ "$now" -gt "$started" ] && [ $(( now - prev_t )) -lt 60 ]; then
+                rate=$(( done_b / (now - started) ))
+            else
+                rate=0
             fi
             eta=-1
             [ "$rate" -gt 0 ] && [ "$total" -gt "$done_b" ] && eta=$(( (total - done_b) / rate ))
@@ -295,9 +312,21 @@ progress_watch() {   # <errfile> <dataset> <target> <peer> <direction> <mode> <b
 # purpose for a moment -- a reader that looked away must still be able to see
 # how the transfer ended -- and removed on the next successful start for the
 # same dataset.
-progress_done() {   # <watcher pid> <dataset> <target> <status>
-    local pid="$1" dataset="$2" target="$3" status="$4"
+progress_done() {   # <watcher pid> <dataset> <target> <status> [errfile]
+    local pid="$1" dataset="$2" target="$3" status="$4" errfile="${5:-}"
     [ -n "$pid" ] && kill "$pid" 2>/dev/null
+    # #4/#16: add this transfer's bytes to the run's total (emit_stats "bytes"). Read
+    # from zfs send -v -P itself, not from the record: the watcher ticks every 2 s, so a
+    # short transfer may never have been written there. The last progress line lags up
+    # to a second; a finished stream is at least its announced size.
+    if [ -n "$errfile" ] && [ -f "$errfile" ]; then
+        local _pb
+        _pb=$(awk -F'\t' -v ok="$status" '
+            $1 == "size" { s = $2 }
+            $1 ~ /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]$/ { d = $2 }
+            END { b = d + 0; if (ok == "ok" && s + 0 > b) b = s + 0; printf "%.0f", b }' "$errfile" 2>/dev/null)
+        case "$_pb" in ''|*[!0-9]*) ;; *) STATS_BYTES=$(( ${STATS_BYTES:-0} + _pb )) ;; esac
+    fi
     local pfile; pfile=$(progress_path "$target")
     [ -f "$pfile" ] || return 0
     local body; body=$(cat "$pfile" 2>/dev/null) || return 0
@@ -672,6 +701,55 @@ read_inflight_snap() {
 
 clear_inflight_snap() {
     rm -f "$(inflight_snap_file "$1" "${2:-}")"
+}
+
+# Lab L9 (pve10, 2026-11-25): the failure path keeps the hold while a resume token
+# exists. When the token then disappears without a resume -- the target was destroyed
+# or `zfs receive -A` was run by hand -- the resume branch never runs, and the next run
+# used to record its own snapshot over the old one, leaving the old hold with nothing
+# that would ever release it. Called right before a NEW hold is placed: by then the
+# resume branch has either resumed or abandoned (both clear the record), so a record
+# still naming another snapshot is stale.
+#
+# REV-20261125-B01 F1: the record is the ONLY reference to that hold, so it is dropped only
+# when the hold is known to be gone; release_snapshot's blanket `|| true` is not that.
+# rc 1 = not known (ssh failed, release refused, holds unreadable): the record stays for a
+# later run and the caller must not place a new hold over it (record_inflight_snap would
+# overwrite the reference) -- it fails this member before anything is touched.
+release_stale_inflight() {
+    local tgt="$1" src="$2" snap="$3" remote_user="${4:-}" remote_host="${5:-}" old
+    old=$(read_inflight_snap "$tgt" "$src")
+    [ -n "$old" ] && [ "$old" != "$snap" ] || return 0
+    log 1 "Releasing the hold on $old -- left by an earlier failed transfer whose resume state is gone"
+    if ! release_hold_verified "$old" "$remote_user" "$remote_host"; then
+        log 0 "Could not release the hold '$HOLD_TAG' on $old${remote_host:+ on $remote_user@$remote_host}, nor confirm it is gone -- keeping its record and failing this member, so the hold is not lost. Release it by hand (zfs release $HOLD_TAG $old) or let a later run retry."
+        return 1
+    fi
+    clear_inflight_snap "$tgt" "$src"
+}
+
+# release_hold_verified <snapshot> [remote_user] [remote_host]
+#   0  the HOLD_TAG hold is gone: released now, or verified absent -- `zfs holds` read the
+#      snapshot and the tag is not there, or zfs said the snapshot does not exist
+#   1  not known: release failed and the check proved nothing (ssh 255, permission, pool)
+release_hold_verified() {
+    local snap="$1" ru="${2:-}" rh="${3:-}" out rc
+    if [ -n "$rh" ]; then
+        ssh -n "${SSH_OPTS[@]}" "$ru@$rh" "zfs release '$HOLD_TAG' '$snap'" >/dev/null 2>&1 && return 0
+        out=$(ssh -n "${SSH_OPTS[@]}" "$ru@$rh" "zfs holds -H '$snap'" 2>/dev/null); rc=$?
+    else
+        zfs release "$HOLD_TAG" "$snap" >/dev/null 2>&1 && return 0
+        out=$(zfs holds -H "$snap" 2>/dev/null); rc=$?
+    fi
+    if [ $rc -eq 0 ]; then
+        # `zfs holds -H`: "<snapshot> TAB <tag> TAB <time>" per hold.
+        printf '%s\n' "$out" | awk -F'\t' -v t="$HOLD_TAG" '$2 == t { f = 1 } END { exit f }' && return 0
+        log 0 "The hold '$HOLD_TAG' is still on $snap after zfs release failed"
+        return 1
+    fi
+    dataset_presence "$snap" "$ru" "$rh"
+    [ $? -eq 1 ] && return 0
+    return 1
 }
 
 # One-time handover from the pre-v3 file names, run once per dataset before any

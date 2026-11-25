@@ -57,7 +57,7 @@ Wszystko w bashu, zadania chodzą z crona, a do codziennej pracy jest tekstowe G
 
    Do hosta źródłowego kolektor potrzebuje wstępu SSH jako root; pakiet na źródle kreator zainstaluje sam.
 
-   Pasek tytułowy pokazuje wersję pakietu (np. `zfs-snapshot-all 1.0.29`).
+   Pasek tytułowy pokazuje wersję pakietu (np. `zfs-snapshot-all 1.0.30`).
 
    GUI startuje po angielsku. Po polsku: **F10** (ustawienia hosta), pozycja `language` = `pl`, albo
 
@@ -67,9 +67,11 @@ Wszystko w bashu, zadania chodzą z crona, a do codziennej pracy jest tekstowe G
 
    Komunikaty poleceń zostają po angielsku.
 
-3. Sprawdź po godzinie: **F2 Przebiegi**. Lista idzie od najnowszych: na górze biegi nadchodzące z najbliższych
-   6 godzin, potem kreska „teraz”, pod nią biegi zakończone z ostatnich 72 godzin (wynik, czas, powód błędu);
-   kursor staje na ostatnim zakończonym biegu. Linie crona jednej relacji, zadania i szczebla, które startują
+3. Sprawdź po godzinie: **F2 Przebiegi**. Są dwa widoki, oba czytane w dół od kreski „teraz”; biegi trwające stoją nad kreską.
+   KOLEJKA (F2 otwiera się na niej): pod kreską biegi nadchodzące z najbliższych 6 godzin, najbliższy pierwszy.
+   HISTORIA: pod kreską biegi zakończone z ostatnich 72 godzin (wynik, czas, powód błędu), najnowszy pierwszy.
+   Ctrl-W przełącza kolejkę i historię; po przełączeniu kursor staje na pierwszym biegu trwającym, a gdy
+   takiego nie ma, na pierwszym wierszu pod kreską. Linie crona jednej relacji, zadania i szczebla, które startują
    w odstępie najwyżej 5 minut (po jednej linii na dataset), to jeden wiersz, `N datasetów`, z najgorszym
    wynikiem; Enter rozwija go do wiersza na dataset. Bieg, który padł bez zakończenia, pokazuje się jako PRZERWANY.
 
@@ -84,7 +86,7 @@ Wszystko w bashu, zadania chodzą z crona, a do codziennej pracy jest tekstowe G
 | przejrzeć pliki z migawki | F4 Kopie, Enter (albo F4 z biegu na F2) |
 | dodać replikę na dysk | F6 Replika, Ins |
 | zobaczyć, czy dysk repliki jest podłączony, jak jest pełny i czy kopia trwa | F6: kolumny Typ (podłączony / odłączony / wewnętrzny) i Zajęte; trwająca kopia pokazuje `kopia trwa od …` |
-| odróżnić maile | temat: `[ZFS][REPORT]` raport dzienny, `[ZFS][WARNING]` ostrzeżenie, pojemność puli, przyrost danych, `[ZFS][ALERT]` nieudany bieg; F10 `alerts.site` wstawia do niego nazwę instalacji |
+| odróżnić maile | temat: `[ZFS][REPORT]` raport dzienny, `[ZFS][WARNING]` ostrzeżenie, pojemność puli, przyrost danych, `[ZFS][ALERT]` nieudany bieg; F10 `alerts.site` (albo `deploy.sh --site=NAZWA`) wstawia nazwę instalacji do tematu i nadawcy każdego maila; bez niej stoi tam pełna nazwa hosta |
 | zrobić to samo z linii poleceń | [KOMENDY.md](KOMENDY.md) |
 
 ## Gdzie dalej

@@ -1226,7 +1226,7 @@ transfer_data() {
                 _pg_rc=1
             fi
             if [ -n "$_pg_err" ]; then
-                progress_done "$_pg_pid" "$_pg_snap" "$_pg_tgt" "$([ $_pg_rc -eq 0 ] && echo ok || echo failed)"
+                progress_done "$_pg_pid" "$_pg_snap" "$_pg_tgt" "$([ $_pg_rc -eq 0 ] && echo ok || echo failed)" "$_pg_err"
                 progress_strip "$_pg_err"
                 [ -s "$_pg_err" ] && cat "$_pg_err" >&2
                 rm -f "$_pg_err"
@@ -1238,7 +1238,7 @@ transfer_data() {
                 _pg_rc=1
             fi
             if [ -n "$_pg_err" ]; then
-                progress_done "$_pg_pid" "$_pg_snap" "$_pg_tgt" "$([ $_pg_rc -eq 0 ] && echo ok || echo failed)"
+                progress_done "$_pg_pid" "$_pg_snap" "$_pg_tgt" "$([ $_pg_rc -eq 0 ] && echo ok || echo failed)" "$_pg_err"
                 progress_strip "$_pg_err"
                 [ -s "$_pg_err" ] && cat "$_pg_err" >&2
                 rm -f "$_pg_err"
@@ -1256,7 +1256,7 @@ transfer_data() {
                 _pg_rc=1
             fi
             if [ -n "$_pg_err" ]; then
-                progress_done "$_pg_pid" "$_pg_snap" "$_pg_tgt" "$([ $_pg_rc -eq 0 ] && echo ok || echo failed)"
+                progress_done "$_pg_pid" "$_pg_snap" "$_pg_tgt" "$([ $_pg_rc -eq 0 ] && echo ok || echo failed)" "$_pg_err"
                 progress_strip "$_pg_err"
                 [ -s "$_pg_err" ] && cat "$_pg_err" >&2
                 rm -f "$_pg_err"
@@ -1268,7 +1268,7 @@ transfer_data() {
                 _pg_rc=1
             fi
             if [ -n "$_pg_err" ]; then
-                progress_done "$_pg_pid" "$_pg_snap" "$_pg_tgt" "$([ $_pg_rc -eq 0 ] && echo ok || echo failed)"
+                progress_done "$_pg_pid" "$_pg_snap" "$_pg_tgt" "$([ $_pg_rc -eq 0 ] && echo ok || echo failed)" "$_pg_err"
                 progress_strip "$_pg_err"
                 [ -s "$_pg_err" ] && cat "$_pg_err" >&2
                 rm -f "$_pg_err"
@@ -1649,6 +1649,7 @@ process_dataset() {
     # below and in the resume branch above; deliberately left held on failure
     # so a stuck resume keeps its source snapshot until it either succeeds or
     # is abandoned.
+    release_stale_inflight "$tgt_dataset" "$src_dataset" "$snapshot" "" "" || return 1
     hold_snapshot "$snapshot" "" ""
     record_inflight_snap "$tgt_dataset" "$src_dataset" "$snapshot"
 
@@ -3110,7 +3111,7 @@ for dataset in "${DATASETS[@]}"; do
             FAILED_DATASETS+=("$dataset")
         }
     else
-        stats_start=$(date +%s)
+        stats_start=$(date +%s); STATS_BYTES=""
         _pd_ok=0; PD_FAILED_SEND=""
         process_dataset "$dataset" "$tgt_path" "$REMOTE_USER" "$REMOTE_HOST" && _pd_ok=1
         # -e on a pvesr target whose failed step sent a snapshot that is now gone from it:
@@ -3126,9 +3127,9 @@ for dataset in "${DATASETS[@]}"; do
             process_dataset "$dataset" "$tgt_path" "$REMOTE_USER" "$REMOTE_HOST" && _pd_ok=1
         fi
         if [ $_pd_ok -eq 1 ]; then
-            emit_stats "$dataset" "$tgt_path" "success" "$(( $(date +%s) - stats_start ))" "$STATS_RESUMED"
+            emit_stats "$dataset" "$tgt_path" "success" "$(( $(date +%s) - stats_start ))" "$STATS_RESUMED" "$STATS_BYTES"
         else
-            emit_stats "$dataset" "$tgt_path" "failed" "$(( $(date +%s) - stats_start ))" "$STATS_RESUMED"
+            emit_stats "$dataset" "$tgt_path" "failed" "$(( $(date +%s) - stats_start ))" "$STATS_RESUMED" "$STATS_BYTES"
             FAILED_DATASETS+=("$dataset")
         fi
     fi

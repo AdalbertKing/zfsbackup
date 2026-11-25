@@ -365,6 +365,40 @@ if [ -n "$STATS_LOGS" ]; then
         }' | sort -u)
 fi
 
+# #4/#16 (2026-11-25): WHAT EACH JOB CARRIED, as the engines measured it. Since this
+# date every engine record names its cron job and the bytes its transfers moved. The
+# snapshot-`written` figure below filters on snapshot CREATION, so a passive replica
+# that copied older snapshots for 43 minutes read "dopisane 0B" (a firm's report). A job
+# with records here is reported from them; one without (older engine, remote job)
+# keeps the old measurement. label<TAB>bytes, one row per job.
+#
+# ONLY A JOB RECORDED SINCE BEFORE THE WINDOW (live report on pve10, 2026-11-25): the
+# window is a week, the records start the day the engine is updated. Summed from that
+# day the week read 25.59K for a replica with 11 runs -- the bytes of today's run only.
+# A job qualifies when one of its records is older than the window start, i.e. every
+# run of the window was measured; until then (a week after the update, a new job) the
+# old measurement stays.
+JOB_BYTES=""
+if [ -n "$STATS_LOGS" ]; then
+    _SINCE_ISO=$(date -u -d "@$_SINCE_EP" +%FT%TZ 2>/dev/null)
+    JOB_BYTES=$(zcat -f $STATS_LOGS 2>/dev/null | grep -F '"job":' | awk -v since="$_SINCE_ISO" '
+        {
+            t = ""; j = ""; b = 0
+            if (match($0, /"time":"[^"]+"/))   t = substr($0, RSTART + 8, RLENGTH - 9)
+            if (match($0, /"bytes":[0-9]+/))   b = substr($0, RSTART + 8, RLENGTH - 8)
+            if (match($0, /"job":"([^"\\]|\\.)*"/)) j = substr($0, RSTART + 7, RLENGTH - 8)
+            if (t == "" || j == "") next
+            gsub(/\\"/, "\"", j); gsub(/\\\\/, "\\", j)
+            # The job key is the BEGIN line from field 5 on: the cron label WITHOUT its
+            # first word, the host (zfs-job.sh prints "<date> ZFS-JOB BEGIN <label>").
+            n = split(j, w, /[ \t]+/); j = ""; f = 0
+            for (i = 1; i <= n; i++) if (w[i] != "") { if (f++) j = j (j == "" ? "" : " ") w[i] }
+            if (t < since) { early[j] = 1; next }
+            s[j] += b
+        }
+        END { for (j in s) if (j in early) printf "%s\t%.0f\n", j, s[j] }')
+fi
+
 RUN_ROWS=""
 if [ -n "$CRON_LOGS" ]; then
     # --- twin: run-rows (the SAME text lives in zfs-backup.sh cmd_job_stats; a test pins equality) ---
@@ -383,7 +417,9 @@ if [ -n "$CRON_LOGS" ]; then
         if ($3 == "BEGIN") { bt[lbl, ++sp[lbl]] = secs($1); next }
         rc = ($NF ~ /^rc=/) ? substr($NF,4) + 0 : 0
         n[lbl]++
-        if (rc != 0 && rc != 75) f[lbl]++
+        # rc 8 = done without guest freeze: a WARNING with its own count, not a failure
+        # (chello 2026-11-25: a yellow row said "7 errors" in the same breath).
+        if (rc == 8) w[lbl]++; else if (rc != 0 && rc != 75) f[lbl]++
         # awk variables are global, so d survives the previous END line. Without
         # this reset a job whose BEGIN fell outside the window would inherit the
         # duration of whatever ran before it -- a wrong number that looks right.
@@ -407,7 +443,7 @@ if [ -n "$CRON_LOGS" ]; then
         t = day " " substr($1,12,5); ts = day " " substr($1,12,8)
         if (!(lbl in lastkey) || ts > lastkey[lbl]) { lastkey[lbl] = ts; lastwhen[lbl] = t; lastrc[lbl] = rc; lastdur[lbl] = (d == "" ? -1 : d) }
     }
-    END { for (k in n) printf "%s\t%d\t%d\t%d\t%d\t%s\t%d\t%d\t%d\n", k, n[k], f[k]+0, (c[k] ? tot[k]/c[k] : -1), mx[k]+0, lastwhen[k], lastrc[k], tot[k]+0, lastdur[k]+0 }
+    END { for (k in n) printf "%s\t%d\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%d\n", k, n[k], f[k]+0, (c[k] ? tot[k]/c[k] : -1), mx[k]+0, lastwhen[k], lastrc[k], tot[k]+0, lastdur[k]+0, w[k]+0 }
     ' | sort)
     # --- twin end: run-rows ---
 
@@ -685,6 +721,10 @@ job_volume() {   # <datasets> <label> <target|""> <family|""> -> written over th
     # 525 GB, which is the whole pool for a week. Only a job that creates or
     # receives snapshots gets a figure.
     case "$nl$SEND_LABELS$nl" in *"$nl$2$nl"*) ;; *) printf -- "-"; return 0 ;; esac
+    # The engines' own figure first (JOB_BYTES above): exact, and known for a remote
+    # target too.
+    _eb=$(printf '%s\n' "$JOB_BYTES" | awk -F'\t' -v k="$2" '$1 == k { print $2; exit }')
+    [ -n "$_eb" ] && { printf '%s' "$_eb"; return 0; }
     _jt="$3"
     [ -n "$_jt" ] || _jt="$1"
     case "$_jt" in *:*) printf -- "?"; return 0 ;; esac
@@ -761,7 +801,7 @@ ds_claimants() {   # <target-dataset> -> count
 SEEN_LABELS=""
 HAS_DS_ROWS=0
 if [ -n "$RUN_ROWS" ]; then
-    while IFS=$'\t' read -r _k _n _f _avg _mx _lw _lrc _tot _ldur; do
+    while IFS=$'\t' read -r _k _n _f _avg _mx _lw _lrc _tot _ldur _w; do
         [ -n "$_k" ] || continue
         SEEN_LABELS="$SEEN_LABELS
 $_k"
@@ -950,13 +990,15 @@ $_k"
         # operator actually reads. A run whose BEGIN fell outside the window
         # has no duration to report and gets a dash rather than a zero.
         if [ "${_ldur:-0}" -ge 0 ]; then _dlast=$(human_secs "$_ldur"); else _dlast="-"; fi
-        STATE_BODY="$STATE_BODY$(printf '  %-38s %-17s %10s %6s %8s %8s %10s %8s %8s' "$_disp" "$_st" "$_n" "$_f" "$_vol" "$_rt" "$_dlast" "$_avg"s "$_mx"s)
+        # -1 = no run that took time (only skips): "-", not "-1s"; max follows avg
+        if [ "${_avg:--1}" -ge 0 ] 2>/dev/null; then _avgs="${_avg}s"; _mxs="${_mx}s"; else _avgs="-"; _mxs="-"; fi
+        STATE_BODY="$STATE_BODY$(printf '  %-38s %-17s %10s %6s %8s %8s %10s %8s %8s' "$_disp" "$_st" "$_n" "$_f" "$_vol" "$_rt" "$_dlast" "$_avgs" "$_mxs")
 "
         STATE_BODY="$STATE_BODY$_DSBLOCK"
         # U160: the same row as a record for the relations mail (relations_render).
         case "$nl$SEND_LABELS$nl" in *"$nl$_k$nl"*) _snd=1 ;; *) _snd=0 ;; esac
-        [ -n "$DG_RD" ] && printf 'J\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "$_k" "$_live" "$_n" "$_f" "$_lw" "$_lrc" "${_vb:-0}" "$_vol" "$_rt" "$_dlast" "$_avg" "$_mx" "$_tg" "$_snd" "$_srcs" >> "$DG_RD/jobs.tsv"
+        [ -n "$DG_RD" ] && printf 'J\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$_k" "$_live" "$_n" "$_f" "$_lw" "$_lrc" "${_vb:-0}" "$_vol" "$_rt" "$_dlast" "$_avg" "$_mx" "$_tg" "$_snd" "$_srcs" "${_w:-0}" >> "$DG_RD/jobs.tsv"
     done <<< "$RUN_ROWS"
 fi
 
@@ -1124,7 +1166,7 @@ relations_render() {
         timeout --foreground 300 "$zb" monitor --json > "$DG_RD/monitor.json" 2>/dev/null
     fi
     printf '%s\n' "$SKIP_ROWS" > "$DG_RD/skip.tsv"
-    DG_HOST="$HOST" DG_LABEL="$(zfs_mail_host)" DG_SENDER="$(zfs_mail_sender)" DG_DAYS="$DIGEST_DAYS" DG_QUEUE="$PROCESSING" DG_QUIET="${QUIET:-0}" \
+    DG_HOST="$HOST" DG_SITE="${ZFS_ALERT_SITE:-}" DG_LABEL="$(zfs_mail_host)" DG_SENDER="$(zfs_mail_sender)" DG_DAYS="$DIGEST_DAYS" DG_QUEUE="$PROCESSING" DG_QUIET="${QUIET:-0}" \
     DG_QUIET_WHEN="$QUIET_WHEN" DG_TO="${ZFS_ALERT_EMAIL:-root}" DG_FROM="$(id -un 2>/dev/null || echo root)@$HOST" \
     DG_LOGS="${CRON_LOGS# }" DG_WINDOW="${RUN_WINDOW:-}" DG_RD="$DG_RD" python3 - <<'PYEOF'
 import os, re, json, html, time, gzip, textwrap
@@ -1172,9 +1214,18 @@ def tier_of(t):
     side = u" (źródło)" if re.match(r"^(l?src)_", t or "") else ""
     return base, side
 
+# A replica's job (gen-cron [replica:]): "replica copy (<name>)", job-stats keeps it without
+# the host. ANY_RE took "replica " for the host prefix and made a relation "copy (<name>)"
+# beside the replica's own monitor row "<name>": one replica, two rows, counted twice in
+# the subject, an English name in a Polish report (a firm's report 2026-11-25, #6/#20/#21).
+REP_RE = re.compile(r"^(?:\S+ )?replica copy \((.+)\)$")
+
 def parse_label(k):
     """-> relation name (None for a job of no relation), task words, tier base."""
     k = re.sub(r" -- .*$", "", k)
+    m = REP_RE.match(k)
+    if m:
+        return m.group(1), u"kopia na nośnik", "", m.group(1)
     m = REL_RE.match(k) or SO_RE.match(k)
     if m:
         rel, tier, word, scope = m.group(1), m.group(2), m.group(3), m.group(4)
@@ -1219,9 +1270,28 @@ def human(b):
     return "%dB" % b
 
 def cls(j):
+    # rc 75 = a run skipped because the previous one still holds the lock (a copy running):
+    # information, not an error (owner rule 2026-11-25). rc 8 = a warning (U159).
+    if j["rc"] == "75":
+        return "skip"
     if j["rc"] not in ("0", "8", ""):
         return "err"
-    return "warn" if j["rc"] == "8" or j["f"] else ""
+    return "warn" if j["rc"] == "8" or j["f"] or j["w"] else ""
+
+def dfmt(v):
+    """Seconds as the 'czas ost.' column writes them (43m30s), '-' for none (-1: no run
+    that took time, e.g. only skips -- it printed '-1s')."""
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        return v or "-"
+    if v < 0:
+        return "-"
+    if v < 60:
+        return "%ds" % v
+    if v < 3600:
+        return "%dm%02ds" % (v // 60, v % 60)
+    return "%dh%02dm" % (v // 3600, v % 3600 // 60)
 
 def plural(n, one, few, many):
     if n == 1:
@@ -1263,7 +1333,8 @@ for ln in rd("jobs.tsv").splitlines():
              "vb": int(f[7]) if f[7].isdigit() else 0, "vol": f[8], "rate": f[9], "dlast": f[10],
              "avg": f[11], "max": f[12], "tg": f[13], "send": f[14] == "1", "task": task,
              "tier": base, "scope": scope, "ds": [], "err": "",
-             "srcs": [x for x in (f[15] if len(f) > 15 else "").split(",") if x]}
+             "srcs": [x for x in (f[15] if len(f) > 15 else "").split(",") if x],
+             "w": int(f[16]) if len(f) > 16 and f[16].isdigit() else 0}
         jobs[f[1]] = j
         owner = relname or owner_of(j["srcs"])
         if owner and not relname and scope:
@@ -1273,12 +1344,21 @@ for ln in rd("jobs.tsv").splitlines():
         jobs[f[1]]["ds"].append(f[2:9])
     elif f[0] == "S" and len(f) >= 2:
         relname, task, base, scope = parse_label(f[1])
+        # #5 (a firm's report 2026-11-25): "no run in the window: monthly/yearly snapshot" in
+        # yellow, every week -- a job whose period is longer than the window had no run to
+        # have. Its freshness is the monitors' question, not this list's.
+        if DAYS < {"weekly": 7, "monthly": 31, "yearly": 366, "annual": 366}.get(base, 0):
+            continue
         owner = relname or scope_rel.get(scope)
         idle = rel(owner or scope or task)["idle"]
         t = task + (" (" + scope + ")" if scope and owner else "")
         if t not in idle:    # the same label in two cron lines is one missing job, not two
             idle.append(t)
 
+# A replica (no status.json relation of that name) is said as one.
+for x in rels.values():
+    if x["kind"] == "-" and any(REP_RE.match(j["k"]) for j in x["jobs"]):
+        x["kind"] = "replika"
 # A relation with no copy has one side only: "(źródło)" on its prune says nothing there.
 for x in rels.values():
     if not any(j["send"] and j["tg"] for j in x["jobs"]):
@@ -1292,6 +1372,39 @@ RANK = {"OK": 0, "CZEKA": 1, "WAITING": 1, "WARNING": 3, "UNKNOWN": 4, "CRITICAL
 for m in ((js("monitor.json") or {}).get("monitors") or []):
     if m.get("label"):
         rel(m["label"])["mons"].append(m)
+
+# #2/#21 (a firm's report 2026-11-25): the engines speak English, the report Polish. The lines
+# that reach the report as a cause or as an event's last line, and that the engines print
+# word for word, are said in Polish here; anything else stays as the engine wrote it (the
+# truth in English beats a guessed translation). The engine's own reason inside a line
+# (a guest agent's error, a ZFS message) is kept verbatim.
+PL_STAMP = re.compile(r"^\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d\S*\s+(-\s+)?")
+PL_LINES = [
+    (re.compile(r"^Quiesce: the snapshots were taken, but this run was DEGRADED -- .*?named '([^']*)'"),
+     u"migawki zrobione BEZ zamrożenia gościa -- spójne jak po awarii (nazwa %s)"),
+    (re.compile(r"^Quiesce: the transfer completed, but this run was DEGRADED -- .*?named '([^']*)'"),
+     u"kopia przeszła, ale BEZ zamrożenia gościa -- migawki spójne jak po awarii (nazwa %s)"),
+    (re.compile(r"^Quiesce: (\S+) could not quiesce \(reason above\) -- DEGRADING"),
+     u"zamrożenie gościa na %s nie powiodło się -- migawki będą spójne jak po awarii, z '_crash_' w nazwie"),
+    (re.compile(r"^Quiesce: (.*?) -- DEGRADING \("),
+     u"zamrożenie nie powiodło się (%s) -- migawki będą spójne jak po awarii, z '_crash_' w nazwie"),
+    (re.compile(r"the copy onto '([^']*)' running since (\S+ \S+) \(pid (\d+)\) holds '([^']*)' -- this run leaves it alone"),
+     u"pominięty: kopia na nośnik %s trwa od %s (pid %s) i trzyma pulę %s"),
+    (re.compile(r"a copy onto '([^']*)' is already running since (\S+ \S+) \(pid (\d+)\)"),
+     u"pominięty: trwa kopia na nośnik %s od %s (pid %s)"),
+    # lab pve10 2026-11-25 (the live report): the gate's closing line of a run that found
+    # the pool already imported -- the last line of its event.
+    (re.compile(r"leaving '([^']*)' imported: this run did not import it"),
+     u"pula %s zostaje zaimportowana: ten bieg jej nie importował, więc nie on ją odkłada"),
+]
+
+def pl_line(s):
+    t = PL_STAMP.sub("", s or "")
+    for rx, fmt in PL_LINES:
+        mm = rx.search(t)
+        if mm:
+            return fmt % mm.groups()
+    return s
 
 # The last error line of a failed job: the detail the job queued (daily alert mode).
 events = []
@@ -1308,7 +1421,7 @@ for ln in qlines:
     events.append((f[0], f[1], f[2], det))
     key = re.sub(r"^\S+ (?=profile__)", "", f[2])
     if key in jobs and det:
-        jobs[key]["err"] = det[-1]
+        jobs[key]["err"] = pl_line(det[-1])
 
 # THE CAUSE (owner, variant A 2026-11-04: "nie mówi o szczegółach, co wysiadło"). zfs-job.sh
 # appends the job's stderr to its cron.log right before "ZFS-JOB END <host> <label> rc=N"
@@ -1338,23 +1451,49 @@ def log_causes(keys):
                     lines = [STAMP.sub("", x) for x in block if not x.startswith(("CRITICAL ", "WARNING ", "OK "))]
                     # rc=8: the last line only says the run was DEGRADED; the reason (and the
                     # fix) is the FIRST "Quiesce:" line of the run (measured on pve11).
+                    # 2026-11-25 (a firm's report): the "Quiesce:" line only says "could not
+                    # quiesce (reason above) -- DEGRADING ..." and was cut at 320 characters
+                    # mid-sentence. The reason itself is the engine's "Quiesce[<host>]: ..." line
+                    # (lib-zfs-snap.sh QERR); that one goes first, framed in Polish.
+                    qr = [x for x in lines if x.startswith("Quiesce[")] if m.group(3) == "8" else []
                     q = [x for x in lines if x.startswith("Quiesce:")] if m.group(3) == "8" else []
-                    if q or lines:
-                        c = (q or lines[-1:])[0]
-                        found[m.group(2)] = c if len(c) <= 320 else c[:317] + "..."
+                    c = ""
+                    if qr:
+                        qm = re.match(r"Quiesce\[([^\]]*)\]:\s*(.*)", qr[0])
+                        c = u"zamrożenie gościa na %s nie powiodło się: %s" % (qm.group(1), qm.group(2)) if qm else qr[0]
+                    elif m.group(3) == "75":
+                        # owner rule 2026-11-25: a skip names what is running, in Polish
+                        # zfs-media-gate.sh says: "a copy onto 'L' is already running since D T (pid N)"
+                        sm = re.search(r"onto '([^']*)' is already running since (\S+ \S+) \(pid (\d+)\)", " ".join(lines))
+                        # #21: the gate's other wording ("holds '<pool>' -- this run leaves it alone")
+                        sk = [pl_line(x) for x in lines if pl_line(x) != x]
+                        c = (u"pominięty: trwa kopia na nośnik %s od %s (pid %s)" % sm.groups()) if sm \
+                            else (sk[0] if sk else u"pominięty: poprzedni bieg jeszcze trwa")
+                    elif q or lines:
+                        c = pl_line((q or lines[-1:])[0])
+                    if c:
+                        # cut at a word, and say where the whole line is
+                        found[m.group(2)] = c if len(c) <= 320 else c[:300].rsplit(" ", 1)[0] + u" … (cały wpis: F2)"
                 block = []
     return found
 for k, c in log_causes(set(k for k, j in jobs.items() if j["rc"] not in ("0", ""))).items():
     jobs[k]["err"] = c
 
+def src_name(d):
+    """A remote source 'account@host:dataset' as 'dataset na host': in the mail the first
+    form reads as an address, and the mail client made it a mailto link (chello 2026-11-25)."""
+    m = re.match(r"^(?:[^@/:\s]+@)?([^:/\s]+):(\S+)$", d or "")
+    return u"%s na %s" % (m.group(2), m.group(1)) if m else d
+
 def obj(j):
-    """What the job acts on, as zfs list names it: the sources (siblings shortened), -> target."""
+    """What the job acts on, as zfs list names it: the sources, -> target. Full names: the
+    sibling shortening wrote 'hdd/backups, data, rpool/data' -- which 'data'? (chello)."""
     out = []
-    for i, d in enumerate(j["srcs"]):
-        if i and d.rsplit("/", 1)[0] == j["srcs"][0].rsplit("/", 1)[0]:
-            d = d.rsplit("/", 1)[-1]
-        out.append(d)
-    o = ", ".join(out) or j["scope"] or "-"
+    for d in j["srcs"]:
+        d = src_name(d)
+        if d not in out:
+            out.append(d)
+    o = ", ".join(out) or src_name(j["scope"]) or "-"
     return o + (" -> " + j["tg"] if j["send"] and j["tg"] else "")
 
 def wrap(prefix, text, width=78, more=0):
@@ -1387,8 +1526,9 @@ def first_line(s, key):
 todo = []
 for x in rels.values():
     live = x["jobs"]
-    bad = [j for j in live if j["rc"] not in ("0", "8", "")]
+    bad = [j for j in live if j["rc"] not in ("0", "8", "75", "")]
     deg = [j for j in live if j["rc"] == "8"]
+    skip = [j for j in live if j["rc"] == "75"]
     mons = sorted(x["mons"], key=lambda m: -RANK.get(m.get("verdict"), 2))
     worst = mons[0] if mons else None
     wv = worst.get("verdict") if worst else None
@@ -1398,6 +1538,14 @@ for x in rels.values():
         # No run of the window succeeded: the newest snapshot the monitor saw, if any.
         seen = [re.search(r"newest=\S*?(\d{4}-\d\d-\d\d)_(\d\d)-(\d\d)", m.get("reason") or "") for m in mons]
         x["newest"] = max(("%s %s:%s" % g.groups() for g in seen if g), default="")
+    # #25 (a firm's report 2026-11-25): a copy running since yesterday had NAJNOWSZA "-". When
+    # nothing newer finished, the column says since when the running copy runs.
+    x["newest_cell"] = when(x["newest"]) if x["newest"] else "-"
+    for j in skip:
+        ms = re.search(r" od (\d{4}-\d\d-\d\d \d\d:\d\d)", j.get("err") or "")
+        if ms and (not x["newest"] or ms.group(1) > x["newest"]):
+            x["newest_cell"] = u"trwa od " + when(ms.group(1))
+            break
     x["runs"] = sum(j["n"] for j in live)
     x["fails"] = sum(j["f"] for j in live)
     if bad:
@@ -1433,7 +1581,8 @@ for x in rels.values():
         last = max(j["lw"] for j in deg)
         what = (u"%s bez zamrożenia gościa, %s rc=8" % (tasks[0], when(last))) if len(tasks) == 1 \
             else (u"%s bez zamrożenia gościa, ostatnio %s rc=8" % (n_tasks(len(deg)).replace("zadania", "zadanie"), when(last)))
-        lines = wrap("", ", ".join(obj(j) for j in deg), 75)
+        # one object once: the daily and the weekly job name the same dataset (chello: twice)
+        lines = wrap("", ", ".join(dict.fromkeys(obj(j) for j in deg)), 75)
         lines.append(u"migawka jest, ale spójna jak po nagłym wyłączeniu gościa")
         causes = distinct_causes(deg)
         for c in causes[:2]:
@@ -1446,6 +1595,11 @@ for x in rels.values():
         x["rank"], x["state"] = 2, "wstrzymana"
     elif wv in ("CZEKA", "WAITING") or (not live and not mons):
         x["rank"], x["state"] = 1, "czeka na pierwszy termin"
+    elif skip:
+        # Owner rule 2026-11-25: a run skipped because the previous one still runs is said,
+        # with what runs, and is not an error and not "needs attention". Whether the running
+        # copy moves is the monitor's question, not this line's.
+        x["rank"], x["state"] = 0, u"trwa poprzedni bieg (%s)" % (skip[0]["err"] or u"następny pominięty")
     else:
         x["rank"], x["state"] = 0, "aktualne"
 
@@ -1487,10 +1641,11 @@ def cut(s, n):
     return s if len(s) <= n else s[:n - 3] + "..."
 # Variant A (owner 2026-11-04): no kind column -- "migawki lokalne" told migawki-a from
 # migawki-b nothing; what tells relations apart is in DO ZROBIENIA and in the attachment.
-out.append("%-*s  %-11s  %s" % (w, "RELACJA", "NAJNOWSZA", "STAN"))
-out.append("%s  %s  %s" % ("-" * w, "-" * 11, "-" * max(4, 74 - w - 13)))
+w2 = max([11] + [len(x["newest_cell"]) for x in order])
+out.append("%-*s  %-*s  %s" % (w, "RELACJA", w2, "NAJNOWSZA", "STAN"))
+out.append("%s  %s  %s" % ("-" * w, "-" * w2, "-" * max(4, 74 - w - w2 - 2)))
 for x in order:
-    out.append(u"%-*s  %-11s  %s" % (w, cut(x["name"], w), when(x["newest"]) if x["newest"] else "-", x["state"]))
+    out.append(u"%-*s  %-*s  %s" % (w, cut(x["name"], w), w2, x["newest_cell"], x["state"]))
 if not order:
     out.append(u"(brak relacji i zadań na tym hoście)")
 if todo:
@@ -1518,6 +1673,9 @@ out.append(u"%s: %d %s, %d %s%s%s." % (
 # reader saving both attachments must not overwrite one with the other
 fname = "statystyka-%s-%s.html" % (HOST, time.strftime("%Y-%m-%d", NOW))
 out.append(u"Pełna statystyka: załącznik %s." % fname)
+# 2026-11-25: without alerts.site the mail names only the host -- said once, in the footer.
+if not re.match(r"^[A-Za-z0-9._-]+$", E.get("DG_SITE") or "") or E.get("DG_SITE") == "-":
+    out.append(u"Bez nazwy instalacji (firmy): ustaw ją w F10 (alerts.site), żeby nadawca i temat mówiły, skąd jest ten mail.")
 if E.get("DG_QUIET") == "1":
     out.append("")
     out.append(u"Ten list jest dowodem, że droga alertu na tym hoście działa.")
@@ -1536,16 +1694,16 @@ for x in order:
         x["fails"], plural(x["fails"], u"błąd", u"błędy", u"błędów")))
     rows.append(u"<p class='st'>stan: %s</p>" % h(x["state"]))
     if x["jobs"]:
-        rows.append(u"<table><tr><th>zadanie</th><th>obiekt</th><th>ostatni bieg</th><th>biegów</th><th>błędy</th>"
+        rows.append(u"<table><tr><th>zadanie</th><th>obiekt</th><th>ostatni bieg</th><th>biegów</th><th>błędy / ostrz.</th>"
                     u"<th>dopisane</th><th>transfer</th><th>czas ost.</th><th>śr.</th><th>max</th><th>ostatni błąd</th></tr>")
         for j in sorted(x["jobs"], key=task_key):
             copy = j["send"] and bool(j["tg"]) and not x.get("passive")
-            rows.append(u"<tr class='%s'><td>%s</td><td class='o'>%s</td><td>%s</td><td>%d</td><td>%d</td><td>%s</td><td>%s</td>"
+            rows.append(u"<tr class='%s'><td>%s</td><td class='o'>%s</td><td>%s</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td>"
                         u"<td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
                 cls(j), h(j["task"]), h(obj(j)),
-                h(when(j["lw"])) + ("" if j["rc"] in ("0", "") else " rc=" + h(j["rc"])), j["n"], j["f"],
+                h(when(j["lw"])) + ("" if j["rc"] in ("0", "") else " rc=" + h(j["rc"])), j["n"], ("%d / %d" % (j["f"], j["w"])) if j["w"] else "%d" % j["f"],
                 h(j["vol"]) if copy else "-", h(j["rate"]) if copy else "-", h(j["dlast"]),
-                h(j["avg"]) + "s", h(j["max"]) + "s", h(j["err"]) if cls(j) == "err" else ""))
+                h(dfmt(j["avg"])), h(dfmt(j["max"] if dfmt(j["avg"]) != "-" else -1)), h(j["err"]) if cls(j) in ("err", "skip") else ""))
             if copy:
                 for d in j["ds"]:
                     rows.append(u"<tr class='ds'><td></td><td class='o'>&nbsp;&nbsp;%s</td><td></td><td>%s</td><td></td><td>%s</td>"
@@ -1577,7 +1735,7 @@ if events:
         relname, task, base, scope = parse_label(job)
         rows.append(u"<tr class='%s'><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
             "err" if sev == "ALERT" else "warn", h(t), "alarm" if sev == "ALERT" else u"ostrzeżenie",
-            h((relname + ": " if relname else "") + task), h(det[-1] if det else "")))
+            h((relname + ": " if relname else "") + task), h(pl_line(det[-1]) if det else "")))
     rows.append("</table>")
 skips = [l.split("\t") for l in rd("skip.tsv").splitlines() if l.strip()]
 if skips:
@@ -1594,7 +1752,7 @@ h2{font-size:14px;color:%(acc)s;margin:18px 0 4px}.sum{float:right;color:%(dim)s
 table{border-collapse:collapse;width:100%%;margin-bottom:6px}
 th,td{border:1px solid %(line)s;padding:2px 8px;text-align:left;white-space:nowrap}
 th{background:%(head)s;color:%(dim)s;font-weight:normal}td+td{text-align:right}td:last-child{text-align:left;white-space:normal}
-tr.err td{color:%(err)s;background:%(errbg)s}tr.warn td,p.warn{color:%(warn)s}tr.warn td{background:%(warnbg)s}
+tr.err td{color:%(err)s;background:%(errbg)s}tr.skip td{color:%(dim)s}tr.warn td,p.warn{color:%(warn)s}tr.warn td{background:%(warnbg)s}
 tr.ds td{color:%(dim)s}td.o{text-align:left;white-space:normal}
 </style></head><body><h1>%(t)s<span class="sum">pule: %(p)s</span></h1>%(r)s
 <p class="dim">okno: %(win)s (%(d)d dni); logi: %(logs)s</p></body></html>""" % dict(
@@ -1603,7 +1761,7 @@ tr.ds td{color:%(dim)s}td.o{text-align:left;white-space:normal}
 
 msg = EmailMessage()
 msg["Subject"] = subj
-msg["From"] = "zfs-backup %s <%s>" % (E.get("DG_SENDER") or SHORT, E.get("DG_FROM", "root"))
+msg["From"] = "zfs-backup %s <%s>" % (E.get("DG_SENDER") or HOST, E.get("DG_FROM", "root"))   # full name (2026-11-25); Python quotes the dotted display name
 msg["To"] = E.get("DG_TO", "root")
 msg["Date"] = formatdate(localtime=True)
 msg.set_content(body)

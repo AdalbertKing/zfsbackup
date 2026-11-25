@@ -29,7 +29,12 @@ alert() {
         # beside this script), root if neither is there.
         # shellcheck disable=SC1091
         . "$(dirname "$0")/alert-env.sh" 2>/dev/null || :
-        echo "$2" | mail -s "[ZFS][WARNING] $1" "${ZFS_ALERT_EMAIL:-root}"
+        # Host and site in sender and subject, like every other mail (2026-11-25).
+        if command -v alert_mail >/dev/null 2>&1; then
+            echo "$2" | alert_mail "[ZFS][WARNING] $(zfs_mail_host): $1" "${ZFS_ALERT_EMAIL:-root}"
+        else
+            echo "$2" | mail -s "[ZFS][WARNING] $(hostname -f 2>/dev/null || hostname): $1" "${ZFS_ALERT_EMAIL:-root}"
+        fi
     fi
 }
 

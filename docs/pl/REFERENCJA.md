@@ -135,7 +135,7 @@ jednorazowo: `ZFS_TUI_LANG=pl zfs-backup gui` albo `--lang=pl`.
 | Klawisz | Okno lub akcja |
 |---|---|
 | F1 | Pomoc |
-| F2 | Przebiegi: nadchodzące z 6 h na górze, kreska „teraz”, wykonane pod nią; linie crona jednej relacji, czynności i szczebla startujące najwyżej 5 min po sobie (kreator rozrzuca je po wolnych minutach) to jeden wiersz „N datasety” (Enter rozwija) |
+| F2 | Przebiegi, dwa widoki czytane w dół od kreski „teraz”: KOLEJKA (otwiera się na niej): trwające nad kreską, nadchodzące z 6 h pod nią, najbliższy pierwszy; HISTORIA: trwające nad kreską, wykonane z 72 h pod nią, najnowszy pierwszy; trwająca kopia lub replika ma w kolumnie Czas, jak długo trwa, a w kolumnie Dane, co już dotarło i z jaką prędkością; nadchodzący termin repliki, gdy jej kopia trwa, brzmi „pominie”; linie crona jednej relacji, czynności i szczebla startujące najwyżej 5 min po sobie (kreator rozrzuca je po wolnych minutach) to jeden wiersz „N datasety” (Enter rozwija) |
 | F3 | Relacje (Ins = nowa, Del = usuń, Enter = otwórz, `e` = edytuj w oknie relacji) |
 | F4 | Kopie (Enter/Tab do migawek, Enter na migawce albo F7 przegląda pliki, F9 przywraca) |
 | F5 | Szablony |
@@ -143,8 +143,8 @@ jednorazowo: `ZFS_TUI_LANG=pl zfs-backup gui` albo `--lang=pl`.
 | F7 | Uruchom teraz (F2, F3, F6), Przeglądaj (F4) |
 | F8 | pauza/wznów na relacji (F3), Klucz (F6) |
 | F9 | Plik -- eksport/import (F3), Przywróć (F4) |
-| Ctrl-G | Grupuj po relacji / jedna lista (F2, F4); podpis na dolnej ramce listy |
-| Ctrl-W | Ukryj/pokaż wykonane (F2); podpis na dolnej ramce listy |
+| Ctrl-G | Grupuj po relacji (F2, F4; potem ramka proponuje „oś czasu” w F2, „jedna lista” w F4); w F2 grupy leżą na tej samej osi, a grupy z trwającym biegiem są pierwsze; podpis na dolnej ramce listy |
+| Ctrl-W | Przełącz kolejkę i historię (F2); ramka mówi „Ctrl-W historia” albo „Ctrl-W kolejka”, a tytuł nazywa widok; po przełączeniu kursor staje na pierwszym biegu trwającym, a gdy go nie ma, na pierwszym wierszu pod kreską |
 | F10 | Ustawienia (`settings.ini` hosta, zobacz [Alerty](#alerty)) |
 | F12 | Wyjście |
 
@@ -153,11 +153,11 @@ Odzysk z dysku (dawne okno F11 Odzysk) jest od 2026-10-27 w F4 Kopie: wiersz dys
 Szczegóły okien:
 
 - Pasek tytułu pokazuje wersję pakietu, czytaną z pierwszego nagłówka wersji pliku `CHANGELOG.md` dostarczanego obok programu.
-- F2 listuje wykonane przebiegi z ostatnich 72 godzin i zawsze listuje przebieg trwający, także po Ctrl-W i gdy zaczął się przed tym oknem. Po nadejściu historii przebiegów otwiera się na najnowszym wykonanym przebiegu. Przebieg bez rekordu końca, którego proces `zfs-job.sh` już nie istnieje, jest pokazany jako PRZERWANY (`job-stats --runs` daje mu rc `-2`); tam, gdzie nie da się czytać procesów innych użytkowników (`hidepid`), zostaje „trwa”. Silnik zabity przez TERM/INT/HUP sam zamyka swoje rekordy postępu jako przerwane. Wiersz znajduje swoje przebiegi po etykiecie własnej linii crona, więc wiersze migawek relacji tylko-migawki i wiersz lokalnego prune złożony z kilku datasetów pokazują własne przebiegi. W bezczynności ekran jest przerysowywany w całości raz na minutę, więc komunikat z konsoli nie zostawia śmieci.
+- F2 listuje w widoku historii wykonane przebiegi z ostatnich 72 godzin, a w obu widokach zawsze listuje przebieg trwający, także po Ctrl-W i gdy zaczął się przed tym oknem. Przebieg bez rekordu końca, którego proces `zfs-job.sh` już nie istnieje, jest pokazany jako PRZERWANY (`job-stats --runs` daje mu rc `-2`); tam, gdzie nie da się czytać procesów innych użytkowników (`hidepid`), zostaje „trwa”. Silnik zabity przez TERM/INT/HUP sam zamyka swoje rekordy postępu jako przerwane. Wiersz znajduje swoje przebiegi po etykiecie własnej linii crona, więc wiersze migawek relacji tylko-migawki i wiersz lokalnego prune złożony z kilku datasetów pokazują własne przebiegi. W bezczynności ekran jest przerysowywany w całości raz na minutę, więc komunikat z konsoli nie zostawia śmieci.
 - F4 opisuje dataset repliki, który nie ma jeszcze migawki, jako „kopia trwa”, gdy kopia biegnie, a jako „przerwana, wznowi się”, gdy przerwany odbiór zostawił token wznowienia (`zfs-tree --json` niesie `resume`). Listuje dyski gości relacji tylko-migawki, które replikuje `pvesr`, i pokazuje nośnik repliki słowami F6 (NIE TEN DYSK albo Podłączony, gdy pula nie jest zaimportowana).
 - F6 przy NIE TEN DYSK repliki wymiennej mówi powód, gdy pula o nazwie puli repliki ma ID spoza jej dysków (dysk sformatowany ponownie albo inny): podaje oba ID i drogę przypisania (zmiana repliki, krok nośnik, pula oznaczona (obecny) -- dopisuje ID bez formatowania). `list-replicas --json` niesie `wrong_why` (`guid`, albo `dataset` przy innych odmowach bramy) i `wrong_guid` (ID puli); w innych stanach oba puste.
 - F6 ma kolumnę „Zajęte” i linię nośnika „zajęte N% (X z Y)”, gdy pula dysku jest zaimportowana. Trwająca kopia czyta się „kopia trwa od ...” zamiast ostatniego zakończonego przebiegu, a świeżo włożony dysk, którego kopia czeka, „dysk podłączony, kopia za ~N s” zamiast „odłączony”. Lista replik jest czytana ponownie co 15 s, gdy F6 jest otwarte.
-- Kreator repliki pokazuje w drzewie datasetów liczbę migawek każdego datasetu (wszystkie rodziny; daje ją `list-datasets --own-snapshots` jako `snapshots`), a przy zerze uwagę, że replika pasywna go nie skopiuje. Jego plan mówi, jak duża będzie pierwsza kopia, a przy zaimportowanej puli nośnika ile jest wolnego, z `!!!`, gdy się nie zmieści. Przy dysku już podłączonym pyta, czy zacząć pierwszą kopię teraz (w tle, jak F7).
+- Kreator repliki pokazuje w drzewie datasetów liczbę migawek każdego datasetu (wszystkie rodziny; daje ją `list-datasets --own-snapshots` jako `snapshots`), a przy zerze uwagę, że replika pasywna go nie skopiuje (gdy jego potomne mają migawki: „pójdą tylko potomne” -- replika rekursywna kopiuje potomne). Panel datasetu pod kursorem pokazuje poza liczbą migawek także najnowszą: „Ostatnia <RRRR-MM-DD GG:MM>  USED <rozmiar>  REFER <rozmiar>” (kolumny nazwane jak w `zfs list`). Jego plan mówi, jak duża będzie pierwsza kopia i ile potrwa przy 3 MB/s (środek pomiaru 2,5-4 MB/s na dysku SMR przez USB), np. „około 74 h (3 dni)” dla 800 GB, a przy zaimportowanej puli nośnika ile jest wolnego, z `!!!`, gdy się nie zmieści. Przy dysku już podłączonym pyta, czy zacząć pierwszą kopię teraz (w tle, jak F7).
 
 ### Repliki na nośnikach wymiennych
 
@@ -171,9 +171,15 @@ pulę, zwykle na dysk, który się wypina. Każdy przebieg jest objęty klamrą 
   od kiedy kopia trwa, i nie rusza nośnika; jego detach nie eksportuje dysku spod trwającej kopii.
   Gdy brama nie umie utworzyć lub zablokować swojego rekordu przebiegu albo zapisać go i odczytać,
   `attach` kończy się z rc 2 przed jakimkolwiek importem; detach, który trafi na nieczytelny rekord,
-  nie eksportuje puli (pisze DO NOT UNPLUG, gdy pula jest zaimportowana). `zfs-job.sh` zgłasza rc 75
-  jako ostrzeżenie. Monitor wieku (`zfs-media-gate.sh age`) zgłasza trwającą kopię jako OK, a jako
-  WARNING dopiero gdy ta kopia trwa dłużej niż wiek krytyczny.
+  nie eksportuje puli (pisze DO NOT UNPLUG, gdy pula jest zaimportowana). rc 75 to
+  informacja: `zfs-job.sh` nie wysyła z jego powodu własnego maila. Monitor wieku
+  (`zfs-media-gate.sh age`) liczy w czasie trwania kopii wiek od ostatniej UKOŃCZONEJ kopii (trwająca
+  kopia nie czyni nośnika aktualnym): OK / WARNING / CRITICAL według tych samych progów co poza kopią,
+  a linia nazywa trwającą kopię i jej postęp. PIERWSZA kopia (nic jeszcze ukończonego) czyta się
+  „first copy: a copy is running since ..., now <dataset>: NG of MG at XM/s, dataset ends ~<czas>” i jest
+  OK. Alarm „kopia stoi” (STALLED): postęp kopii (zapisane bajty, z rekordów postępu silników)
+  niezmieniony przez 1 h daje WARNING, przez 6 h CRITICAL; brak widocznego rekordu postępu nie jest
+  liczony jako zastój.
 - **Pierwsza kopia, która się nie zmieści, jest odrzucana.** Przed zapisem brama sumuje źródła, które
   nie mają jeszcze kopii na nośniku (`zfs used` na źródle) i porównuje z wolnym miejscem; gdy go
   brakuje, odmawia z rc 2 (alert) i eksportuje dysk. Liczba, której nie da się odczytać, pomija
@@ -204,7 +210,11 @@ pulę, zwykle na dysk, który się wypina. Każdy przebieg jest objęty klamrą 
   każdym attach.
 - **`prepare-media`** tworzy pulę z `ashift=12` (mostki USB zgłaszają sektory 512 B na dyskach 4 KiB)
   i ostrzega, gdy `physical_block_size` widziany przez jądro jest mniejszy niż podaje `smartctl`, czyli
-  mostek ukrywa rozmiar sektora. Świeżo sformatowany dysk jest sprawdzany, zanim zostanie uznany za
+  mostek ukrywa rozmiar sektora. Plan ostrzega też, gdy dysk jest SMR: `smartctl -i` pisze wtedy „Zoned
+  Device: Device managed zones” (sprawdzane z `-d sat` także przez mostek USB). Na takim dysku 2,5" przez
+  USB zmierzono 2,5-4 MB/s przy długiej kopii, więc pierwsza kopia 800 GB trwa około 3 dni; dysk CMR tego
+  unika. Mostek USB tego dysku (0480:b301) oferuje tylko transport Bulk-Only (bez UAS), więc `usb-storage`
+  nie jest wyborem hosta. Świeżo sformatowany dysk jest sprawdzany, zanim zostanie uznany za
   gotowy: czeka, aż zwykłe `zpool import` wylistuje nową pulę, a w przeciwnym razie odmawia.
 - **Zatrzymana kopia nadal odkłada dysk.** Linia crona uruchamia `detach` bramy także wtedy, gdy
   zabito całą grupę procesów zadania (TERM/INT/HUP).
@@ -464,6 +474,10 @@ dla tego jednego skryptu. Gdy nie zrobisz żadnego z tych dwóch, obowiązuje do
 degradacji: migawka `_crash_` i kod wyjścia 8 (zobacz wyżej); z `,strict` zadanie kończy się
 błędem bez migawki. Zakres bez dysku gościa (`vm-N-disk-M`, `subvol-N-disk-M`) nie ma czego
 zamrażać i uprawnień nie potrzebuje: zwykła migawka, kod 0 (U188). Źródło lokalne zamraża gości na tym hoście.
+Kod 8 (migawka bez zamrożenia gościa, `_crash_`) raport dzienny liczy jako OSTRZEŻENIE, osobno od błędów:
+kolumna statystyk brzmi „błędy / ostrz.” (np. „1 / 1”), stan relacji „bez zamrożenia”, a przyczyną jest
+linia silnika `Quiesce[<host>]: ...` ujęta po polsku („zamrożenie gościa na <host> nie powiodło się: ...”),
+ucięta na granicy słowa z dopiskiem „… (cały wpis: F2)”.
 
 Spójność systemu plików to nie spójność aplikacji. Dla migawki spójnej z bazą danych umieść własną
 logikę zamrażania silnika bazy (`FLUSH TABLES WITH READ LOCK`, tryb backupu Postgresa, ...) w
@@ -576,18 +590,26 @@ regexem. Domyślna ścieżka to `/root/scripts/zfs-snapshot-stats.log` dla roota
 `$HOME/zfs-snapshot-stats.log` dla konta bez roota.
 
 ```json
-{"time":"2026-07-24T10:15:03Z","script":"snapsend.sh","label":"src-a","dataset":"tank/data","target":"backup/tank/data","status":"success","duration_s":42,"resumed":false}
+{"time":"2026-07-24T10:15:03Z","script":"snapsend.sh","label":"src-a","dataset":"tank/data","target":"backup/tank/data","status":"success","duration_s":42,"resumed":false,"bytes":42028656,"job":"pve1 daily backup (data)"}
 {"time":"2026-07-24T10:16:01Z","script":"delsnaps.sh","dataset":"tank/data","pattern":"auto_","status":"success","duration_s":1,"deleted":2,"kept":3}
 ```
 
 Rekordy `snapsend.sh`/`snapget.sh` niosą `label` (relację, z `-L`; pusty, gdy zadanie jej nie ma),
-`target` i `resumed` (prawdziwy boolean). Rekordy `delsnaps.sh` niosą zamiast tego
+`target` i `resumed` (prawdziwy boolean). Od 1.0.30 niosą też `bytes` (ile przeniosły transfery
+przebiegu, z `zfs send -v -P`; brak pola, gdy nic nie zmierzono) i `job` (zadanie crona, eksportowane
+przez `zfs-job.sh`). „Dopisane” w raporcie dziennym, `job-stats --runs` (`xfers`) i historia
+Przebiegów F2 liczą z nich każde zadanie i przebieg; bez nich wracają do `written` migawek celu
+utworzonych w oknie. Raport bierze rekordy zadania dopiero, gdy pokrywają całe okno (jest rekord
+starszy niż jego początek), więc tydzień po aktualizacji nie jest liczony z jednego dnia rekordów. Rekordy `delsnaps.sh` niosą zamiast tego
 `pattern`/`deleted`/`kept`, bo robi prune, a nie transfer. `status` to `success`, błąd albo
 odrębny niesukces, jak `skipped_paused` (relacja jest spauzowana), `skipped_lock` lub
 `snapshot_only`, dzięki czemu pominięty przebieg nigdy nie zostanie odczytany jako świeży backup.
 `skipped_lock` znaczy, że blokadę trzymał inny przebieg tego samego zadania: silnik kończy się z rc 75,
-co `zfs-job.sh` zgłasza jako ostrzeżenie (przebieg pominięty), a nie jako błąd; statystyki zadań,
-okno Przebiegi i digest też nie liczą go jako błędu.
+to informacja: `zfs-job.sh` nie wysyła z jego powodu własnego maila, a statystyki zadań, okno
+Przebiegi i digest nie liczą go jako błędu. Raport dzienny pokazuje go szarym wierszem, nie jako błąd
+ani „wymaga uwagi”, z przyczyną po polsku, np. „pominięty: trwa kopia na nośnik usb1 od 2026-11-24 18:05
+(pid 4242)”; stan relacji brzmi „trwa poprzedni bieg (...)”, a kolumna NAJNOWSZA „trwa od <start>”, gdy
+najnowsza jest właśnie ta trwająca kopia.
 Logowanie jest typu best-effort: niezapisywalna ścieżka jest połykana, zamiast wywalać backup,
 który już się udał.
 
@@ -1325,7 +1347,7 @@ powyższe wartości domyślne. To, że środowisko wygrywa z plikiem, sprawia, �
 | `[alerts] warnings` | `ZFS_WARN_MODE` |
 | `[alerts] all_ok_mail` | `ZFS_DIGEST_QUIET` |
 | `[alerts] stats_days` | `ZFS_DIGEST_DAYS` |
-| `[alerts] site` | `ZFS_ALERT_SITE`: nazwa instalacji w temacie zbiorczego maila i maili alertów (`notify-fail.sh`, `notify-warn.sh`), `[ZFS][REPORT|WARNING|ALERT] <site> <host>`, oraz w nazwie nadawcy, gdy host ma sendmail; brak albo `-` daje pełną nazwę hosta. Znacznik po `[ZFS]` mówi, jaki to mail (dla reguł poczty): `REPORT` raport dzienny, `WARNING` ostrzeżenie, zajętość puli albo przyrost danych, `ALERT` nieudany bieg |
+| `[alerts] site` | `ZFS_ALERT_SITE`: nazwa instalacji w nadawcy i temacie każdego maila (raport dzienny i każdy alert: `notify-fail.sh`, `notify-warn.sh`): nadawca `zfs-backup <site> <pełna nazwa hosta>`, temat `[ZFS][REPORT|WARNING|ALERT] <site> <pełna nazwa hosta> ...`; brak albo `-` daje `zfs-backup <pełna nazwa hosta>` i `[ZFS][...] <pełna nazwa hosta> ...`, zawsze pełną (`hostname -f`), nigdy krótką. Ustawia ją F10 albo `deploy.sh --site=NAZWA`; stopka raportu dziennego mówi, gdy jej brak. Znacznik po `[ZFS]` mówi, jaki to mail (dla reguł poczty): `REPORT` raport dzienny, `WARNING` ostrzeżenie, zajętość puli albo przyrost danych, `ALERT` nieudany bieg |
 | `[alerts] repeat_after` | `ZFS_ALERT_COOLDOWN` (liczba sekund albo `30m`, `4h`) |
 | `[capacity] threshold` | `ZFS_CAPACITY_THRESHOLD` |
 | `[capacity] guard`, `guard_at`, `guard_target`, `guard_min_keep` | `ZFS_GUARD*` (strażnik pojemności) |
@@ -1381,7 +1403,7 @@ notify-fail.sh ...; [ $rc -ge 3 ] && notify-fail.sh ...`).
 |---|---|---|
 | `notify-fail.sh` | Każde zadanie zwracające kod różny od zera (awaria `snapsend`/`snapget`/`delsnaps`), `check-snap-age.sh` CRITICAL/UNKNOWN albo pulę, która nie jest ONLINE | `daily`: dopisuje `epoch<TAB>ALERT<TAB>label<TAB>detail` do kolejki i nie wysyła maila. `immediate`: wysyła mail od razu, z limitem częstotliwości per wiadomość |
 | `notify-warn.sh` | `check-snap-age.sh` WARNING (robi się nieświeże, jeszcze nie CRITICAL) | Ta sama kolejka z poziomem `WARN`, zgodnie z `ZFS_WARN_MODE` |
-| `alert-digest.sh` | | Jedyny mail o backupie, jaki host wysyła w trybie `daily`. Raz dziennie wysyła jedną wiadomość z tematem `[ZFS][REPORT] <host> <date> STAN: OK\|UWAGA -- N alert / M warn`. Pierwszy blok to stan *teraz* (pule oraz tabela zadań z okna `ZFS_DIGEST_DAYS`); drugi to to, co *się wydarzyło*: najpierw ustalenia ALERT, potem WARNING, a po każdym to, co ustalenie faktycznie mówiło. Cichy dzień ma inny temat (`... cisza, kanal sprawny (raport okresowy)`), żeby nie dało się go pomylić z mailem z ustaleniami. Jeśli `mail` zawiedzie, ustalenia wracają do kolejki, a skrypt kończy się kodem różnym od zera |
+| `alert-digest.sh` | | Jedyny mail o backupie, jaki host wysyła w trybie `daily`. Raz dziennie wysyła jedną wiadomość z tematem `[ZFS][REPORT] <site> <host> <dd.mm>: OK, N relacje` albo `...: N z M relacji wymaga uwagi, ...` (domyślny układ relacji; `ZFS_DIGEST_LAYOUT=jobs` zostawia dawną tabelę zadań z `STAN: OK\|UWAGA -- N alert / M warn`). Wymienia każdą relację z jej stanem, potem to, co *się wydarzyło*: najpierw ustalenia ALERT, potem WARNING, każde z tym, co mówiło. Raport okresowy w cichy dzień ma w temacie dopisek ` (raport okresowy)`. Jeśli `mail` zawiedzie, ustalenia wracają do kolejki, a skrypt kończy się kodem różnym od zera |
 | `check-pool-capacity.sh` | Pulę albo dataset z refquota zbliżającą się do zapełnienia, zanim jakiekolwiek zadanie przez to zawiedzie. Zgłasza przez `notify-fail.sh`, więc trafia do tego samego digestu. Sprawdza też rekordy postępu transferów: rekord wciąż „running” bez aktualizacji od 30 minut, którego proces już nie istnieje, jest zgłaszany jako osierocony (i zamykany jako martwy), a nie jako zawieszona kopia | Cron, domyślny próg 90% (`ZFS_CAPACITY_THRESHOLD`) |
 | `capacity-guard.sh` | Opcjonalny (domyślnie `off`): gdy pula przekroczy `ZFS_GUARD_AT` (domyślnie 89%), usuwa wyłącznie migawki, które można bezpiecznie usunąć: te należące do lokalnych linii `delsnaps` tego hosta, nigdy z holdem, nigdy najnowszą migawkę datasetu. Każda wątpliwość oznacza, że nie usuwa nic | `[capacity]` w `settings.ini` |
 | `growth-guard.sh` | Opcjonalny (domyślnie `off`), tylko alert: oznacza przyrost będący wielokrotnością (`ZFS_GROWTH_FACTOR`, domyślnie 5) niedawnej normy datasetu, a przy tym słabo kompresowalny, co jest sygnaturą masowego szyfrowania plików. Niczego nie usuwa i niczego nie wstrzymuje | `[growth]` w `settings.ini` |
@@ -1445,7 +1467,9 @@ bash deploy.sh --backup-user=zfsbackup  # also CREATE the delegated non-root acc
 
 Wartości domyślne leżą w bloku konfiguracyjnym na początku skryptu (`NOTIFY_EMAIL`, `ALERT_MODE`,
 `BACKUP_USER`, `BACKUP_USER_DATASETS`); edytuj je, żeby wybór był trwały dla hosta, albo przekaż
-flagę na jedno uruchomienie. `--email=ADDR` ustawia adres alertów, a `--test-mail` wysyła
+flagę na jedno uruchomienie. `--email=ADDR` ustawia adres alertów, `--site=NAZWA` nazwę instalacji
+(`alerts.site`; litery, cyfry, `.` `_` `-`), którą dostają nadawca i temat każdego maila; `deploy.sh`
+ostrzega, gdy nazwy brak. `--test-mail` wysyła
 próbny mail sprawdzający dostarczanie (automatycznie tylko przy pierwszej konfiguracji). Przebieg
 kończy się następnym krokiem (`zfs-backup gui`), a nie ręcznie pisanymi przepisami na cron.
 

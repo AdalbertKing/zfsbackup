@@ -127,7 +127,9 @@ first_copy_bytes() {   # <recursive 0|1> <source dataset>
     if [ "$1" = 1 ]; then
         b="$(zfs get -H -p -o value used "$2" 2>/dev/null)"
     else
-        b="$(zfs get -H -p -o value usedbydataset,usedbysnapshots "$2" 2>/dev/null | awk '{s += $1} END {if (NR == 2) printf "%d", s}')"
+        # %.0f, not %d: mawk 1.3.x (Debian, pve0) clamps %d at 2147483647, so every
+        # dataset over 2 GiB read as 2 GiB and the size gate never refused (#28, 2026-11-25).
+        b="$(zfs get -H -p -o value usedbydataset,usedbysnapshots "$2" 2>/dev/null | awk '{s += $1} END {if (NR == 2) printf "%.0f", s}')"
     fi
     case "$b" in ''|*[!0-9]*) return 1 ;; esac
     printf '%s\n' "$b"

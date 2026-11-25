@@ -104,21 +104,23 @@ _restore_env() {
 }
 _restore_env
 
-# WHICH INSTALLATION A MAIL IS ABOUT (owner 2026-11-07, six collectors to deploy): "pve2"
-# alone exists in several firms. alerts.site (F10) names the installation; the subject then
-# reads "<site> <host>". Unset (or "-"): the host's full name, never the bare short one.
-# Only letters, digits, . _ - reach a subject; anything else in the file is ignored.
+# WHICH INSTALLATION A MAIL IS ABOUT (owner 2026-11-07, six collectors to deploy; schema
+# accepted 2026-11-25 for a hundred collectors): "pve0" alone exists in several firms, so
+# every mail names the installation AND the host's FULL name, in the subject and in the
+# sender alike. alerts.site (F10) names the installation: "<site> <full host>". Unset (or
+# "-"): the full host name, never the bare short one. Only letters, digits, . _ - reach a
+# subject; anything else in the file is ignored.
 zfs_mail_host() {
     local h="${HOST:-}" s="${ZFS_ALERT_SITE:-}"
     [ -n "$h" ] || h=$(hostname -f 2>/dev/null || hostname)
-    case "$s" in ""|-|*[!A-Za-z0-9._-]*) printf '%s' "$h" ;; *) printf '%s %s' "$s" "${h%%.*}" ;; esac
+    case "$s" in ""|-|*[!A-Za-z0-9._-]*) printf '%s' "$h" ;; *) printf '%s %s' "$s" "$h" ;; esac
 }
-# The sender's name stays dot-free ("<site> <short>" or "<short>"): a dot in a display name
-# makes it a quoted string ("zfs-backup pve2.x.net"), measured on a CI runner's long name.
+# The sender's display name is the same text (2026-11-25: "zfs-backup pve0" from two firms
+# read the same, and a short name sorts nothing). A dot makes the display name a quoted
+# string -- valid RFC 5322; alert_mail writes the quotes itself, the digest lets Python's
+# email package do it. Site and host carry only [A-Za-z0-9._-], so no quote can break it.
 zfs_mail_sender() {
-    local h="${HOST:-}" s="${ZFS_ALERT_SITE:-}"
-    [ -n "$h" ] || h=$(hostname -f 2>/dev/null || hostname)
-    case "$s" in ""|-|*[!A-Za-z0-9._-]*) printf '%s' "${h%%.*}" ;; *) printf '%s %s' "$s" "${h%%.*}" ;; esac
+    zfs_mail_host
 }
 
 # ---------------------------------------------------------------------------
@@ -209,7 +211,7 @@ alert_mail() {
     sm=$(alert_sendmail)
     h=$(hostname -f 2>/dev/null || hostname)
     if [ -n "$sm" ]; then
-        { printf 'From: zfs-backup %s <%s@%s>\nTo: %s\nSubject: %s\nMIME-Version: 1.0\nContent-Type: text/plain; charset=us-ascii\n\n' \
+        { printf 'From: "zfs-backup %s" <%s@%s>\nTo: %s\nSubject: %s\nMIME-Version: 1.0\nContent-Type: text/plain; charset=us-ascii\n\n' \
               "$(zfs_mail_sender)" "$(id -un 2>/dev/null || echo root)" "$h" "$2" "$1"; cat; } | "$sm" -t -oi
     else
         mail -s "$1" "$2"

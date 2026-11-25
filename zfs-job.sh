@@ -73,9 +73,10 @@ Usage: zfs-job.sh <label> [--log=FILE] [--notify=SCRIPT] [--detail=N] -- <comman
             (default: <this script's parent dir>/cron.log)
   --notify  called as: <script> "<label>" "<last N lines of stderr>"
             (default: <this script's parent dir>/notify-fail.sh)
-  --warn    called the same way when the command exits 75 (skipped: the
-            previous run still holds the lock), INSTEAD of --notify
-            (default: notify-warn.sh beside the --notify script)
+  --warn    called the same way when the command exits 8 (done without
+            quiescing the guest), INSTEAD of --notify; exit 75 (skipped: the
+            previous run still holds the lock) calls neither -- it is in the
+            daily report (default: notify-warn.sh beside the --notify script)
   --detail  how many trailing stderr lines the notification carries (default 8)
   --pve-guests=HOST:ID[,ID...]
             the command snapshots or prunes the live disks of these Proxmox
@@ -127,6 +128,11 @@ case "$DETAIL" in ''|*[!0-9]*) echo "zfs-job: --detail takes a count" >&2; usage
 # the command never ran AT ALL -- silently. That is the 2026-08-09 signature the
 # fallback exists to prevent, and it is kept here for the same reason.
 e=$(mktemp 2>/dev/null) || e="$LOG.err.$$"
+
+# #4/#16 (2026-11-25): the engines record what each run carried ("bytes" in the stats
+# log); naming the job there lets the report credit it to THIS job, not to every tier
+# that lands in the same target.
+export ZFS_JOB_LABEL="$LABEL"
 
 printf '%s ZFS-JOB BEGIN %s\n' "$(date -Is)" "$LABEL" >>"$LOG" 2>/dev/null \
     || {
@@ -292,8 +298,12 @@ printf '%s ZFS-JOB END %s rc=%s\n' "$(date -Is)" "$LABEL" "$rc" >>"$LOG" 2>/dev/
 # limit already -- see the header).
 [ -n "$WARN" ] || WARN="$(dirname "$NOTIFY")/notify-warn.sh"
 if [ "$rc" -eq 75 ]; then
-    [ -x "$WARN" ] && "$WARN" "$LABEL -- skipped, the previous run still holds the lock" \
-        "$(tail -n "$DETAIL" "$e" 2>/dev/null)" 2>>"$LOG"
+    # Owner rule 2026-11-25: a run skipped because the previous one still runs is
+    # information, not a warning -- no mail of its own. It used to send a [WARNING]
+    # every night of a 3-day first copy. The END marker above keeps rc=75, the daily
+    # report says "skipped, the copy runs since ..." in grey, and a copy that STOPS
+    # moving is the media monitor's alarm ("STALLED"), not this line's.
+    :
 elif [ "$rc" -eq 8 ]; then
     # U159 (pve11 2026-11-04): exit 8 is a run that took its snapshots WITHOUT quiescing
     # the guest (snapsend/snapget "continuing WITHOUT quiesce ... exit 8"). The snapshot

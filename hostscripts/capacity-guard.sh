@@ -73,7 +73,13 @@ HOST="$(hostname -s 2>/dev/null || hostname)"
 say() { echo "$(date '+%Y-%m-%d %H:%M:%S') capacity-guard: $*"; }
 alert() {   # <temat> <treść>
     if [ -x "$NOTIFY" ]; then "$NOTIFY" "$1" "$2" 2>/dev/null && return 0; fi
-    command -v mail >/dev/null 2>&1 && printf '%s\n' "$2" | mail -s "[ZFS][WARNING] $1" "${ZFS_ALERT_EMAIL:-root}" 2>/dev/null
+    # Fallback without notify-fail.sh: the same sender and subject as every other mail
+    # (host and site, 2026-11-25) through alert_mail when alert-env.sh is there.
+    if command -v alert_mail >/dev/null 2>&1; then
+        printf '%s\n' "$2" | alert_mail "[ZFS][WARNING] $(zfs_mail_host): $1" "${ZFS_ALERT_EMAIL:-root}" 2>/dev/null
+    else
+        command -v mail >/dev/null 2>&1 && printf '%s\n' "$2" | mail -s "[ZFS][WARNING] $(hostname -f 2>/dev/null || hostname): $1" "${ZFS_ALERT_EMAIL:-root}" 2>/dev/null
+    fi
     return 0
 }
 

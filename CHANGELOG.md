@@ -6,6 +6,56 @@ when they change how the tool is used.
 
 ## [Unreleased]
 
+## [1.0.30] — 2026-11-25
+
+- Mail identity: the daily report and the alert mails carry the installation name and the
+  full host name in the sender and the subject, `[ZFS][ALERT] Site-A pve2.firma.pl: ...`.
+  `deploy.sh --site=NAME` sets it (also F10, `alerts.site`); the report's footer says when it
+  is missing. `--smtp-relay` warns when the sender is the alert recipient's own address.
+- A run skipped because the previous one still runs (rc 75) is information: no mail of its own,
+  a grey row in the report with the cause in Polish ("trwa kopia na nośnik ... od ...").
+  A snapshot without freezing the guest (rc 8) is a warning, counted apart from errors.
+- Daily report: one replica is one row; full dataset names; a remote source reads
+  "dataset na host"; a running copy shows in NAJNOWSZA; jobs whose period is longer than the
+  report window are not listed as idle.
+- Replica medium age: counted from the last completed copy while a copy runs; a first copy
+  reports its progress; new alarm STALLED when the copy writes nothing for 1 h (WARNING) or
+  6 h (CRITICAL).
+- F2 Runs: two views, queue (default) and history, both read down from the "now" line, running
+  runs above it with time and data so far; Ctrl-W switches. A replica's running first copy is
+  shown. While a run is in progress F2 reads the progress by itself every 5 s and the run list
+  every 60 s.
+- Replica wizard: the newest snapshot of the dataset under the cursor (time, USED, REFER); a
+  dataset without snapshots whose descendants have them says a recursive replica copies those.
+- `prepare-media` warns about an SMR disk; the replica plan gives the first copy's time at
+  3 MB/s (2.5-4 MB/s measured on an SMR disk over USB).
+- Fixed: the transfer rate in the progress records (F2 "· x/s", ETA) is the average since the
+  start; it read 0 between `zfs send`'s byte bursts on local copies.
+- Fixed: the English replica wizard said "removable disk" for a fixed disk too (step titles,
+  the name step, the disk step, formatting, the replica view, the plan's monitor line); it
+  now says "replica disk".
+- Fixed: a `zfssnapall_inflight` hold left by a failed transfer stayed for good once its resume
+  state was gone (target destroyed, `zfs receive -A`); the next transfer now releases it before
+  placing its own hold. When that release fails and the hold cannot be shown gone (ssh down,
+  `release` not delegated), the member fails and keeps the record, so the hold is not lost. The `-F`/root hint after a failed receive is no longer printed to root.
+- Fixed: "dopisane 0B" in the daily report for a long passive replica copy, and no data per run in
+  the F2 history. The engines now record each run's transferred bytes and its cron job in the stats
+  log (`bytes`, `job`); the report, `job-stats --runs` (`xfers`) and F2 use them, so a job copying
+  older snapshots, and a push to a remote target (which read "?"), get a real figure. The report
+  switches a job to these figures once its records cover the whole window (a week after the
+  update, for a new job a week after its first run); until then it keeps the old measurement.
+- Fixed (F2): a replica run's lower panel said "this job has no datasets"; it lists the replica's
+  source -> target. The English window wrote sizes with a decimal comma ("551,2 MiB"). A folded
+  prune row that started on an earlier day said "since 18:36" without the date.
+- Fixed: the Polish daily report showed engine lines in English: the quiesce DEGRADED/DEGRADING
+  lines (cause and "Zdarzenia z okresu") and the media gate's "holds ... -- this run leaves it
+  alone" skip and "leaving <pool> imported"; they are said in Polish. Other engine text stays verbatim.
+- Fixed: the replica wizard's plan said "source is encrypted" when only a child dataset is; it
+  now names the encrypted datasets (raw on an unencrypted dataset is an ordinary copy).
+- Fixed: byte sums above 2 GiB were clamped to 2147483647 under mawk (progress `wire_bytes`,
+  and the size of a first copy, so a source over 2 GiB was measured as 2 GiB and a too-small
+  disk was not refused).
+
 ## [1.0.29] — 2026-11-22
 
 - `deploy.sh --smtp-relay=HOST[:PORT] --smtp-user=ACCOUNT`: the host sends its mail through

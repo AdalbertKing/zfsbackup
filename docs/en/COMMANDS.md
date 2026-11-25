@@ -224,7 +224,8 @@ Flag families worth knowing:
 | `--source-keep=N` | *snapget*, an active replica: after a successful pull, destroy on the **source** this job's own older snapshots beyond the N newest (only those this target stamped; nothing under `-r`) |
 
 An engine that finds its lock held by another run of the same job ends with **rc 75**: the run was
-skipped, nothing was copied. `zfs-job.sh` reports that as a warning, not as a failure.
+skipped, nothing was copied. That is information: `zfs-job.sh` sends no mail of its own for it, and
+the daily report shows it as a grey row (with the cause), not as an error.
 
 **`-H`/`-D`/`-W`/`-M`/`-Y`** in `delsnaps.sh` mean *how many to keep*; the lowercase
 `-h`/`-d`/`-w`/`-m`/`-y` set an age threshold: snapshots older than the
@@ -262,8 +263,12 @@ deploy.sh --test-mail                # whether alerts get out
 ```
 
 The mail subject says what kind of mail it is: `[ZFS][REPORT]` the daily summary, `[ZFS][WARNING]`
-a warning, pool capacity or data growth, `[ZFS][ALERT]` a failed run. With `alerts.site` set, the
-summary reads `[ZFS][REPORT] Site-A pve2 <date> ...` and an alert `[ZFS][ALERT] Site-A pve2: ...`; without it the host's full name stands in its place.
+a warning, pool capacity or data growth, `[ZFS][ALERT]` a failed run. With `alerts.site` set, every
+mail (the daily report and every alert) has the sender `zfs-backup <Site> <full host name>` and the subject
+`[ZFS][...] <Site> <full host name> ...`, e.g. `[ZFS][ALERT] Site-A pve2.firma.pl: ...`. Without it the
+sender is just `zfs-backup <full host name>` and the subject `[ZFS][...] <full host name> ...`; always the
+full name (`hostname -f`), never the short one. The name is set in F10 or by `deploy.sh --site=NAME`; the
+daily report's footer says so when it is missing.
 
 ---
 

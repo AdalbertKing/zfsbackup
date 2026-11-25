@@ -58,7 +58,7 @@ server console.
 
    The collector needs SSH access to the source host as root; the wizard installs the package on the source by itself.
 
-   The title bar shows the package version (e.g. `zfs-snapshot-all 1.0.29`).
+   The title bar shows the package version (e.g. `zfs-snapshot-all 1.0.30`).
 
    The GUI starts in English. For Polish: **F10** (host settings), item `language` = `pl`, or
 
@@ -68,9 +68,11 @@ server console.
 
    Command output stays in English.
 
-3. Check after an hour: **F2 Przebiegi (runs)**. The list reads newest first: upcoming runs of the next 6 hours
-   on top, then the `now` line, then the finished runs of the last 72 hours (result, time, reason of an error);
-   the cursor starts on the latest finished run. Cron lines of one relation, task and tier that start within
+3. Check after an hour: **F2 Przebiegi (runs)**. There are two views, both read downward from the `now` line; running runs stand
+   above the line. QUEUE (F2 opens on it): upcoming runs of the next 6 hours below the line, nearest first.
+   HISTORY: finished runs of the last 72 hours below the line (result, time, reason for an error), newest first.
+   Ctrl-W switches queue and history; after switching, the cursor is on the first running run, or, when
+   there is none, on the first row under the line. Cron lines of one relation, task and tier that start within
    5 minutes of each other (one line per dataset) are one row, `N datasets`, with the worst result; Enter expands
    it to one row per dataset. A run that died without finishing shows as INTERRUPTED.
 
@@ -85,7 +87,7 @@ server console.
 | browse files in a snapshot | F4 Kopie, Enter (or F4 on a run in F2) |
 | add a replica on a disk | F6 Replika (replica), Ins |
 | see whether a replica disk is connected, how full it is, whether a copy is running | F6: columns Type (connected / disconnected / internal) and Used; a running copy reads `copy running since …` |
-| tell the mails apart | subject: `[ZFS][REPORT]` daily summary, `[ZFS][WARNING]` warning, pool capacity, data growth, `[ZFS][ALERT]` failed run; F10 `alerts.site` puts the installation's name in it |
+| tell the mails apart | subject: `[ZFS][REPORT]` daily summary, `[ZFS][WARNING]` warning, pool capacity, data growth, `[ZFS][ALERT]` failed run; F10 `alerts.site` (or `deploy.sh --site=NAME`) puts the installation's name in the subject and sender of every mail; without it the host's full name stands there |
 | do the same from the command line | [COMMANDS.md](COMMANDS.md) |
 
 ## Where next

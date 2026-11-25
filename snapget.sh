@@ -1210,7 +1210,7 @@ transfer_data() {
                 _pg_rc=1
             fi
             if [ -n "$_pg_err" ]; then
-                progress_done "$_pg_pid" "$_pg_snap" "$_pg_tgt" "$([ $_pg_rc -eq 0 ] && echo ok || echo failed)"
+                progress_done "$_pg_pid" "$_pg_snap" "$_pg_tgt" "$([ $_pg_rc -eq 0 ] && echo ok || echo failed)" "$_pg_err"
                 progress_strip "$_pg_err"
                 [ -s "$_pg_err" ] && cat "$_pg_err" >&2
                 rm -f "$_pg_err" ${_pg_wire:+"$_pg_wire"}
@@ -1222,7 +1222,7 @@ transfer_data() {
                 _pg_rc=1
             fi
             if [ -n "$_pg_err" ]; then
-                progress_done "$_pg_pid" "$_pg_snap" "$_pg_tgt" "$([ $_pg_rc -eq 0 ] && echo ok || echo failed)"
+                progress_done "$_pg_pid" "$_pg_snap" "$_pg_tgt" "$([ $_pg_rc -eq 0 ] && echo ok || echo failed)" "$_pg_err"
                 progress_strip "$_pg_err"
                 [ -s "$_pg_err" ] && cat "$_pg_err" >&2
                 rm -f "$_pg_err" ${_pg_wire:+"$_pg_wire"}
@@ -1242,7 +1242,7 @@ transfer_data() {
                 _pg_rc=1
             fi
             if [ -n "$_pg_err" ]; then
-                progress_done "$_pg_pid" "$_pg_snap" "$_pg_tgt" "$([ $_pg_rc -eq 0 ] && echo ok || echo failed)"
+                progress_done "$_pg_pid" "$_pg_snap" "$_pg_tgt" "$([ $_pg_rc -eq 0 ] && echo ok || echo failed)" "$_pg_err"
                 progress_strip "$_pg_err"
                 [ -s "$_pg_err" ] && cat "$_pg_err" >&2
                 rm -f "$_pg_err" ${_pg_wire:+"$_pg_wire"}
@@ -1254,7 +1254,7 @@ transfer_data() {
                 _pg_rc=1
             fi
             if [ -n "$_pg_err" ]; then
-                progress_done "$_pg_pid" "$_pg_snap" "$_pg_tgt" "$([ $_pg_rc -eq 0 ] && echo ok || echo failed)"
+                progress_done "$_pg_pid" "$_pg_snap" "$_pg_tgt" "$([ $_pg_rc -eq 0 ] && echo ok || echo failed)" "$_pg_err"
                 progress_strip "$_pg_err"
                 [ -s "$_pg_err" ] && cat "$_pg_err" >&2
                 rm -f "$_pg_err" ${_pg_wire:+"$_pg_wire"}
@@ -1995,6 +1995,7 @@ process_dataset() {
     # the resume branch above; deliberately left held on failure so a stuck
     # resume keeps its source snapshot until it either succeeds or is
     # abandoned.
+    release_stale_inflight "$tgt_dataset" "$src_dataset" "$snapshot" "$remote_user" "$remote_host" || return 1
     hold_snapshot "$snapshot" "$remote_user" "$remote_host"
     record_inflight_snap "$tgt_dataset" "$src_dataset" "$snapshot"
 
@@ -2596,7 +2597,9 @@ process_dataset() {
             local _mnt; _mnt=$(zfs get -H -o value mounted "$tgt_dataset" 2>/dev/null)
             if [ "$_mnt" = "yes" ] && [ "$(id -u)" -ne 0 ]; then
                 log 0 "Hint: this receive carries -F (a forced rollback) and '$tgt_dataset' is MOUNTED. Rolling back a mounted dataset unmounts it first, and on Linux a non-root user cannot unmount even with full 'zfs allow' delegation -- so this run could not have succeeded whatever else is true. A collector's copies are not meant to be mounted; that is what canmount=noauto is for. Unmount it once as root: zfs unmount '$tgt_dataset' -- then this pull goes through as the delegated account, with no further root involvement."
-            else
+            elif [ "$(id -u)" -ne 0 ]; then
+                # Lab L9: as root this hint cannot apply (and it was printed under an
+                # unrelated "out of space").
                 log 0 "Hint: this receive carries -F (a forced rollback), which needs to mount/unmount the (local) target. On Linux, non-root users cannot do that even with full 'zfs allow' delegation -- if this failed on a mount/unmount permission error, this run needed root."
             fi
         fi
@@ -3556,7 +3559,7 @@ if [ $SNAPSHOT_ONLY -eq 1 ]; then
             snapshot_only_dataset "$src_path" "$REMOTE_USER" "$REMOTE_HOST" || FAILED_DATASETS+=("$src_path")
             continue
         fi
-        stats_start=$(date +%s)
+        stats_start=$(date +%s); STATS_BYTES=""
         if snapshot_only_dataset "$src_path" "$REMOTE_USER" "$REMOTE_HOST"; then
             emit_stats "$src_path" "" "snapshot_only" "$(( $(date +%s) - stats_start ))"
         else
@@ -3643,7 +3646,7 @@ for src_path in "${DATASETS[@]}"; do
             FAILED_DATASETS+=("$dataset")
         }
     else
-        stats_start=$(date +%s)
+        stats_start=$(date +%s); STATS_BYTES=""
         _pd_ok=0; PD_FAILED_SEND=""
         process_dataset "$src_path" "$dataset" "$REMOTE_USER" "$REMOTE_HOST" && _pd_ok=1
         # -e on a pvesr target whose failed step sent a snapshot that is now gone from it:
@@ -3659,7 +3662,7 @@ for src_path in "${DATASETS[@]}"; do
             process_dataset "$src_path" "$dataset" "$REMOTE_USER" "$REMOTE_HOST" && _pd_ok=1
         fi
         if [ $_pd_ok -eq 1 ]; then
-            emit_stats "$dataset" "$src_path" "success" "$(( $(date +%s) - stats_start ))" "$STATS_RESUMED"
+            emit_stats "$dataset" "$src_path" "success" "$(( $(date +%s) - stats_start ))" "$STATS_RESUMED" "$STATS_BYTES"
             # The copy is done and recorded as done; a mirror that then
             # refuses or leaves something behind fails the run on its own
             # account, so the cron envelope says so.
@@ -3667,7 +3670,7 @@ for src_path in "${DATASETS[@]}"; do
                 FAILED_DATASETS+=("$dataset (mirror)")
             fi
         else
-            emit_stats "$dataset" "$src_path" "failed" "$(( $(date +%s) - stats_start ))" "$STATS_RESUMED"
+            emit_stats "$dataset" "$src_path" "failed" "$(( $(date +%s) - stats_start ))" "$STATS_RESUMED" "$STATS_BYTES"
             FAILED_DATASETS+=("$dataset")
         fi
     fi

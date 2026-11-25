@@ -175,6 +175,11 @@ Plan ostrzega, gdy jądro widzi mniejszy sektor fizyczny niż podaje dysk (`smar
 Tak robi część mostków USB (512 B zamiast 4096 B); `ashift=12` i tak trzyma pulę w
 wyrównaniu.
 
+Plan ostrzega też, gdy dysk jest SMR: `smartctl -i` pisze wtedy „Zoned Device: Device managed zones”
+(sprawdzane z `-d sat` także przez mostek USB). Na takim dysku 2,5" przez USB zmierzono 2,5-4 MB/s przy
+długiej kopii, więc pierwsza kopia 800 GB trwa około 3 dni; dysk CMR tego unika. Mostek USB tego dysku
+(0480:b301) oferuje tylko transport Bulk-Only (bez UAS), więc `usb-storage` nie jest wyborem hosta.
+
 **Dysk USB: kolejka.** Dysk za sterownikiem `usb-storage` startuje z `nr_requests=2`;
 zapisy ZFS nie są wtedy scalane i replika pisze ok. 10 MB/s (zmierzone 2026-11-09,
 WD My Passport 2 TB). Dlatego bramka przed każdym importem puli, a `prepare-media` przed
@@ -256,8 +261,13 @@ blokuje następnych włożeń. Regułę bez `--collect` kreator repliki odnawia 
 
 **Jeden bieg naraz.** Kopia, która jeszcze trwa, gdy przychodzi następne wyzwolenie (harmonogram albo ponowne
 podłączenie), nie startuje drugi raz: nowy bieg kończy się kodem 75 i mówi, od kiedy kopia trwa, a jego detach nie
-eksportuje dysku spod trwającej kopii. Kod 75 to pominięcie, nie błąd; monitor wieku zgłasza trwającą kopię jako OK
-(WARNING po przekroczeniu wieku krytycznego). Bieg, który nie umie się zapisać, nie startuje: gdy bramka nie może
+eksportuje dysku spod trwającej kopii. Kod 75 to informacja, nie błąd i nie własny mail. W czasie trwania kopii monitor
+wieku liczy wiek od ostatniej UKOŃCZONEJ kopii (trwająca kopia nie czyni nośnika aktualnym): OK / WARNING /
+CRITICAL według tych samych progów co poza kopią, a linia nazywa trwającą kopię i jej postęp. PIERWSZA kopia
+(nic jeszcze ukończonego) czyta się „first copy: a copy is running since ..., now <dataset>: NG of MG at XM/s,
+dataset ends ~<czas>” i jest OK. Alarm „kopia stoi” (STALLED): postęp kopii (zapisane bajty, z rekordów postępu
+silników) niezmieniony przez 1 h daje WARNING, przez 6 h CRITICAL; brak widocznego rekordu postępu nie jest
+liczony jako zastój. Bieg, który nie umie się zapisać, nie startuje: gdy bramka nie może
 założyć blokady ani zapisać i odczytać rekordu biegu, attach kończy się kodem 2 przed jakimkolwiek importem, a detach,
 który trafi na nieczytelny rekord, nie eksportuje puli (przy zaimportowanej puli pisze DO NOT UNPLUG). Kopia zabita
 przez SIGTERM i tak eksportuje swój dysk.
@@ -265,7 +275,9 @@ przez SIGTERM i tak eksportuje swój dysk.
 **Pierwsza kopia, która się nie zmieści, jest odmawiana.** Przed zapisem bramka sumuje źródła, które nie mają jeszcze
 kopii na nośniku, i porównuje sumę z wolnym miejscem nośnika; gdy brakuje, eksportuje dysk i odmawia z obiema
 liczbami (kod 2, alert). `add-replica` i kreator repliki pokazują rozmiar pierwszej kopii w planie, przed Uruchom,
-wraz z wolnym miejscem, gdy pula nośnika jest zaimportowana, oraz `!!!`, gdy się nie zmieści. Gdy przy zakładaniu
+wraz z wolnym miejscem, gdy pula nośnika jest zaimportowana, oraz `!!!`, gdy się nie zmieści; podają też czas
+pierwszej kopii przy 3 MB/s (środek pomiaru 2,5-4 MB/s na dysku SMR przez USB), np. „około 74 h (3 dni)”
+dla 800 GB. Gdy przy zakładaniu
 nowej repliki dysk jest już podłączony, kreator pyta, czy zacząć pierwszą kopię teraz (w tle, jak F7; stan jest
 w F2).
 
@@ -278,7 +290,8 @@ i `medium_alloc` w bajtach (puste, gdy pula nie jest zaimportowana). Trwająca k
 (`replica.insert_wait`), pokazuje `dysk podłączony, kopia za ~N s` (`insert_in`). F6 czyta listę ponownie przy
 wejściu i co 15 s. W F4 dataset repliki bez żadnej migawki mówi `kopia trwa`, dopóki kopia biegnie, i `przerwana,
 wznowi się`, gdy przerwany odbiór zostawił token wznowienia. Kreator repliki pokazuje przy każdym datasecie liczbę
-migawek, a przy zerze uwagę, że replika pasywna go nie skopiuje.
+migawek, a przy zerze uwagę, że replika pasywna go nie skopiuje; panel datasetu pod kursorem pokazuje też
+najnowszą migawkę: „Ostatnia <RRRR-MM-DD GG:MM>  USED <rozmiar>  REFER <rozmiar>” (kolumny nazwane jak w `zfs list`).
 
 ## 6. Scenariusz A: co ląduje w configu
 

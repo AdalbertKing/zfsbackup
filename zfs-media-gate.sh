@@ -349,16 +349,6 @@ if [ "$VERB" = age ]; then
     }
     _w=$(to_sec "$AGE_WARN") && _c=$(to_sec "$AGE_CRIT") && [ "$_w" -lt "$_c" ] \
         || { echo "UNKNOWN replica=$LABEL -- --warn and --crit need durations like 9d/36h, warn below crit (got '$AGE_WARN' / '$AGE_CRIT')"; exit 3; }
-    # A copy running now is not a medium nobody looks after. It stays OK until it
-    # has itself been running longer than crit -- a copy that never ends must
-    # still reach somebody.
-    _run=$(running_holder)
-    if [ -n "$_run" ]; then
-        _rs=${_run#* }; _ra=$(( $(date +%s) - _rs ))
-        if [ "$_ra" -ge "$_c" ]; then _v=WARNING; _rc=1; else _v=OK; _rc=0; fi
-        echo "$_v replica=$LABEL pool=$POOL -- a copy is running since $(running_since "$_run") ($(( _ra / 86400 ))d$(( (_ra % 86400) / 3600 ))h, pid ${_run%% *}) (warn=$AGE_WARN crit=$AGE_CRIT)"
-        exit "$_rc"
-    fi
     _at=""
     if [ -r "$CURRENT" ]; then
         _at=$(head -1 "$CURRENT" 2>/dev/null); case "$_at" in ''|*[!0-9]*) _at="" ;; esac
@@ -366,6 +356,60 @@ if [ "$VERB" = age ]; then
     # A medium recorded before this file existed still has its .synced record:
     # its mtime is the last copy that advanced it.
     [ -n "$_at" ] || { [ -r "$SYNCED" ] && _at=$(stat -c %Y "$SYNCED" 2>/dev/null); }
+    # A COPY RUNNING NOW (owner rule 2026-11-25, #26 and point 4). Two questions, and a
+    # live process answers neither:
+    #   does it MOVE? The engines' progress records for targets on this pool are read
+    #     every run; their (target, done_bytes) set unchanged for 1 h is WARNING, for
+    #     6 h CRITICAL -- "kopia stoi". A hung pipeline keeps its process and its lock,
+    #     and every later run is skipped (rc 75) behind it, so nothing else says so.
+    #   how old is the protection? Counted from the last COMPLETED copy, as when
+    #     nothing runs: a copy in progress does not make the medium current. The FIRST
+    #     copy has nothing to age from -- it says so, with its progress, not "overdue".
+    _run=$(running_holder)
+    if [ -n "$_run" ]; then
+        _now=$(date +%s); _rs=${_run#* }; _ra=$(( _now - _rs ))
+        _rtxt="a copy is running since $(running_since "$_run") ($(( _ra / 86400 ))d$(( (_ra % 86400) / 3600 ))h, pid ${_run%% *})"
+        _pd="${ZFS_PROGRESS_DIR:-/var/lib/zfs-snapshot-all/progress}"
+        _recs=$(cat "$_pd"/*.json 2>/dev/null | grep '"state":"running"' | grep -F -e "\"target\":\"$POOL/" -e "\"target\":\"$POOL\"")
+        _sig=$(printf '%s\n' "$_recs" | sed -n 's/.*"target":"\([^"]*\)".*"done_bytes":\([0-9]*\).*/\1 \2/p' | sort | cksum | tr ' ' '-')
+        _prog=$(printf '%s\n' "$_recs" | sed -n 's/.*"target":"\([^"]*\)".*"total_bytes":\([0-9-]*\),"done_bytes":\([0-9]*\),"rate_bps":\([0-9-]*\),"eta_seconds":\([0-9-]*\).*/\1 \2 \3 \4 \5/p' | tail -1)
+        _ptxt=""
+        if [ -n "$_prog" ]; then
+            set -- $_prog
+            # Lab pve10 2026-11-25: whole GiB said "0G of 0G" for an 80 MB dataset -- one
+            # decimal from 1 GiB up, MiB below it.
+            _hb() { if [ "$1" -ge 1073741824 ] 2>/dev/null; then _t=$(( $1 * 10 / 1073741824 )); echo "$(( _t / 10 )).$(( _t % 10 ))G"; else echo "$(( ${1:-0} / 1048576 ))M"; fi; }
+            _ptxt=", now $1: $(_hb "$3")"
+            [ "$2" -gt 0 ] 2>/dev/null && _ptxt="$_ptxt of $(_hb "$2")"
+            [ "$4" -gt 0 ] 2>/dev/null && _ptxt="$_ptxt at $(( $4 / 1048576 ))M/s"
+            [ "$5" -gt 0 ] 2>/dev/null && _ptxt="$_ptxt, dataset ends ~$(date -d "@$(( _now + $5 ))" '+%Y-%m-%d %H:%M' 2>/dev/null)"
+        fi
+        _ff="$STATE_DIR/$LABEL.flow"; _fp=""; _ft=""; _fs=""
+        read -r _fp _ft _fs < "$_ff" 2>/dev/null || :
+        if [ "$_fp" != "${_run%% *}" ] || [ "$_fs" != "$_sig" ] || ! [ "${_ft:-x}" -gt 0 ] 2>/dev/null; then
+            _ft=$_now
+            { mkdir -p "$STATE_DIR" && printf '%s %s %s\n' "${_run%% *}" "$_now" "$_sig" > "$_ff"; } 2>/dev/null || :
+        fi
+        _st=$(( _now - _ft ))
+        # No record visible (another account's progress dir, a run still listing its
+        # sources) is NOT measured as "no bytes": unmeasured never alarms as stalled.
+        if [ -z "$_recs" ]; then _st=0; _ptxt=", progress not visible here"; fi
+        if [ "$_st" -ge "${ZFS_STALL_CRIT:-21600}" ] || [ "$_st" -ge "${ZFS_STALL_WARN:-3600}" ]; then
+            if [ "$_st" -ge "${ZFS_STALL_CRIT:-21600}" ]; then _v=CRITICAL; _rc=2; else _v=WARNING; _rc=1; fi
+            echo "$_v replica=$LABEL pool=$POOL -- STALLED: $_rtxt, but no bytes written for $(( _st / 3600 ))h$(( (_st % 3600) / 60 ))m$_ptxt; later runs are skipped behind it (warn=$AGE_WARN crit=$AGE_CRIT)"
+            exit "$_rc"
+        fi
+        if [ -z "$_at" ]; then
+            echo "OK replica=$LABEL pool=$POOL -- first copy: $_rtxt$_ptxt (warn=$AGE_WARN crit=$AGE_CRIT)"
+            exit 0
+        fi
+        _age=$(( _now - _at )); _when=$(date -d "@$_at" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$_at")
+        if [ "$_age" -ge "$_c" ]; then _v=CRITICAL; _rc=2
+        elif [ "$_age" -ge "$_w" ]; then _v=WARNING; _rc=1
+        else _v=OK; _rc=0; fi
+        echo "$_v replica=$LABEL pool=$POOL last_current=$_when age=$(( _age / 86400 ))d$(( (_age % 86400) / 3600 ))h -- the last completed copy; $_rtxt$_ptxt (warn=$AGE_WARN crit=$AGE_CRIT)"
+        exit "$_rc"
+    fi
     if [ -z "$_at" ]; then
         echo "WARNING replica=$LABEL pool=$POOL -- no copy has ever been recorded for this medium (warn=$AGE_WARN crit=$AGE_CRIT)"
         exit 1

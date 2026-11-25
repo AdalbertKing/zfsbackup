@@ -180,6 +180,11 @@ The plan warns when the kernel sees a smaller physical sector than the drive rep
 (`smartctl`). Some USB bridges do that (512 B instead of 4096 B); `ashift=12` keeps the
 pool aligned regardless.
 
+The plan also warns when the disk is SMR: `smartctl -i` then reports "Zoned Device: Device managed zones"
+(checked with `-d sat`, also through a USB bridge). On such a 2.5" disk over USB 2.5-4 MB/s was measured on a
+long copy, so a first copy of 800 GB takes about 3 days; a CMR disk avoids it. The USB bridge of that disk
+(0480:b301) offers only Bulk-Only transport (no UAS), so `usb-storage` is not the host's choice.
+
 **USB disk: the queue.** A disk behind the `usb-storage` driver comes up with
 `nr_requests=2`; ZFS writes are then not merged and a replica writes about 10 MB/s
 (measured 2026-11-09, WD My Passport 2 TB). So the gate, before every pool import, and
@@ -261,8 +266,13 @@ so a failed run does not block later connections. The replica wizard renews a ru
 
 **One run at a time.** A copy still running when the next trigger comes (schedule or a re-plug) is not started a
 second time: the new run ends with rc 75 and says since when the copy runs, and its detach does not export the disk
-under the running copy. rc 75 is a skip, not a failure; the age monitor reports a running copy as OK (WARNING past
-the critical age). A run that cannot record itself does not start: when the gate cannot create its lock or write
+under the running copy. rc 75 is information, not a failure and not a mail of its own. While a copy runs, the
+age monitor counts the age from the last COMPLETED copy (a running copy does not make the medium current): OK /
+WARNING / CRITICAL by the same warn/crit as otherwise, and the line names the running copy and its progress. The
+FIRST copy (nothing completed yet) reads "first copy: a copy is running since ..., now <dataset>: NG of MG at
+XM/s, dataset ends ~<time>" and is OK. The alarm STALLED (the copy has stopped): the copy's progress (bytes written, from
+the engines' progress records) unchanged for 1 h gives WARNING, for 6 h CRITICAL; no visible progress record is
+not counted as stalled. A run that cannot record itself does not start: when the gate cannot create its lock or write
 and read back its run record, attach stops with rc 2 before any import, and a detach that finds a record it cannot
 read does not export the pool (it says DO NOT UNPLUG if the pool is imported). A copy killed with SIGTERM still
 exports its disk.
@@ -270,8 +280,9 @@ exports its disk.
 **A first copy that cannot fit is refused.** Before writing, the gate adds up the sources that have no copy on the
 medium yet and compares the sum with the medium's free space; when it is short, the gate exports the disk and
 refuses with both numbers (rc 2, an alert). `add-replica` and the replica wizard show the size of the first copy
-in the plan, before Run, with the free space when the medium's pool is imported, and `!!!` when it cannot fit.
-When the disk is already attached while a new replica is created, the wizard asks whether to start the first copy
+in the plan, before Run, with the free space when the medium's pool is imported, and `!!!` when it cannot fit; they also give the time of
+the first copy at 3 MB/s (the middle of 2.5-4 MB/s measured on an SMR disk over USB), e.g. "about 74 h (3 days)" for
+800 GB. When the disk is already attached while a new replica is created, the wizard asks whether to start the first copy
 now (in the background, as F7; the state is in F2).
 
 A replica source whose name holds `:` (`tank/data:part`) is copied as a local dataset.
@@ -283,7 +294,9 @@ is, while its pool is imported), Done, Last run, Schedule; `list-replicas --json
 reads `disk connected, copy in ~N s` (`insert_in`). F6 reads the list again on entry and every 15 s. In F4 a
 replica dataset with no snapshot yet says `copy running` while the copy runs, and `interrupted, will resume`
 when a cut-off receive left a resume token. The replica wizard shows the number of snapshots next to each dataset
-and, at zero, the note that a passive replica will not copy it.
+and, at zero, the note that a passive replica will not copy it; the panel of the dataset under the cursor
+also shows the newest snapshot: "Newest <YYYY-MM-DD HH:MM>  USED <size>  REFER <size>" (the columns named as
+`zfs list` names them).
 
 ## 6. Scenario A: what lands in the config
 

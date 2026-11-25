@@ -422,14 +422,16 @@ wdrażania warto przełączyć na natychmiastowe:
 
 Temat mówi, czym jest mail: `[ZFS][REPORT]` raport dzienny, `[ZFS][WARNING]` ostrzeżenie, pojemność puli albo
 przyrost danych, `[ZFS][ALERT]` nieudany bieg. Reguła pocztowa łapiąca `[ZFS]` działa dalej; reguła na stare
-`[ZFS CAPACITY]` albo `[ZFS GROWTH]` wymaga nowego tematu. Bez nazwy instalacji temat niesie pełną nazwę hosta.
-Gdy jedna osoba dostaje maile z kilku instalacji, nazwij każdą: F10 (ustawienia hosta), albo
+`[ZFS CAPACITY]` albo `[ZFS GROWTH]` wymaga nowego tematu. Bez nazwy instalacji nadawca i temat niosą pełną nazwę hosta (`hostname -f`),
+nigdy krótką. Gdy jedna osoba dostaje maile z kilku instalacji, nazwij każdą: F10 (ustawienia hosta), albo
 
 ```bash
 ./zfs-backup.sh settings set alerts.site=Site-A --yes
 ```
 
-Temat alertu brzmi wtedy `[ZFS][ALERT] Site-A pve-backup: …`.
+albo przy wdrożeniu `./deploy.sh --site=Site-A` (litery, cyfry, `.` `_` `-`); `deploy.sh` ostrzega, gdy nazwy
+brak. Nadawca każdego maila (raport dzienny i każdy alert) brzmi wtedy `zfs-backup Site-A pve-backup.firma.pl`,
+a temat alertu `[ZFS][ALERT] Site-A pve-backup.firma.pl: …`.
 
 ### Poczta na czystym Debianie (nie-Proxmox)
 
@@ -484,7 +486,8 @@ Następnie `deploy.sh`:
   prawa 600) i nadawcę: adresy tego hosta (`myhostname`, `myorigin`) wychodzą
   jako `--smtp-from` (domyślnie `--smtp-user`, gdy jest adresem). Cudze
   `smtp_generic_maps` zostaje nietknięte; domeny hosta nie przepisuje, gdy jest
-  równa domenie odbiorcy alertów;
+  równa domenie odbiorcy alertów; ostrzega, gdy adres nadawcy jest taki sam jak odbiorcy alertów
+  (zalecana osobna skrzynka do wysyłania);
 - odczytuje wynik z `postconf`; przy każdym błędzie przywraca zapisane pliki i
   mówi to wprost;
 - wysyła mail testowy z własnym Message-ID i czyta log postfiksa tylko dla tej

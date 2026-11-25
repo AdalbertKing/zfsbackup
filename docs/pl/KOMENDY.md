@@ -225,7 +225,8 @@ Rodziny flag, które warto znać:
 | `--source-keep=N` | *snapget*, replika aktywna: po udanym pobraniu zniszcz na **źródle** starsze własne snapshoty zadania poza N najnowszymi (tylko te, które oznaczył ten cel; nic pod `-r`) |
 
 Silnik, który zastaje blokadę trzymaną przez inny przebieg tego samego zadania, kończy się z **rc 75**:
-przebieg został pominięty, nic nie skopiowano. `zfs-job.sh` zgłasza to jako ostrzeżenie, a nie jako błąd.
+przebieg został pominięty, nic nie skopiowano. To informacja: `zfs-job.sh` nie wysyła z tego powodu
+własnego maila, a raport dzienny pokazuje to szarym wierszem (z przyczyną), nie jako błąd.
 
 **`-H`/`-D`/`-W`/`-M`/`-Y`** w `delsnaps.sh` to *ile sztuk zostawić*; małe litery
 `-h`/`-d`/`-w`/`-m`/`-y` ustawiają próg wieku — kasowane są snapshoty starsze niż
@@ -264,7 +265,11 @@ deploy.sh --test-mail                # czy alerty wychodzą
 
 Temat maila mówi, jaki to rodzaj maila: `[ZFS][REPORT]` dzienne podsumowanie, `[ZFS][WARNING]`
 ostrzeżenie, zapełnienie puli lub przyrost danych, `[ZFS][ALERT]` nieudany przebieg. Przy ustawionym
-`alerts.site` podsumowanie ma temat `[ZFS][REPORT] Site-A pve2 <data> ...`, a alert `[ZFS][ALERT] Site-A pve2: ...`; bez niego na jego miejscu stoi pełna nazwa hosta.
+`alerts.site` każdy mail (raport dzienny i każdy alert) ma nadawcę `zfs-backup <Site> <pełna nazwa hosta>`
+i temat `[ZFS][...] <Site> <pełna nazwa hosta> ...`, np. `[ZFS][ALERT] Site-A pve2.firma.pl: ...`. Bez niego
+stoi tam samo `zfs-backup <pełna nazwa hosta>` i `[ZFS][...] <pełna nazwa hosta> ...`; zawsze pełna nazwa
+(`hostname -f`), nigdy krótka. Nazwę ustawia F10 albo `deploy.sh --site=NAZWA`; stopka raportu dziennego
+przypomina o tym, gdy jej brak.
 
 ---
 

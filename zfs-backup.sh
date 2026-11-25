@@ -8355,11 +8355,45 @@ media_sector_warning() {   # <whole-disk device>
     return 0
 }
 
+# #8 (Site-B pve0 2026-11-24): the replica disk, a 2.5" TOSHIBA MQ04UBD200 on USB, is
+# DM-SMR -- smartctl -i says "Zoned Device: Device managed zones" -- and wrote 2.5-3.9
+# MB/s for days of a first copy (800 GB: ~3 days). The kernel does not know (queue/zoned
+# "none" for a drive-managed zone disk), the drive does. Said before the disk is formatted.
+media_smr_warning() {   # <whole-disk device>
+    local dev; dev=$(readlink -f "$1" 2>/dev/null) || dev="$1"
+    command -v smartctl >/dev/null 2>&1 || return 0
+    local z
+    z=$(smartctl -i "$dev" 2>/dev/null | sed -n 's/^Zoned Device: *//p' | head -1)
+    [ -n "$z" ] || z=$(smartctl -d sat -i "$dev" 2>/dev/null | sed -n 's/^Zoned Device: *//p' | head -1)
+    case "$z" in
+        *[Mm]anaged*)
+            echo "  WARNING:  the drive reports \"Zoned Device: $z\" (smartctl): an SMR disk. Measured on such a disk over USB: 2.5-4 MB/s on a long copy -- a first copy of 800 GB takes about 3 days. A CMR disk avoids it." ;;
+    esac
+    return 0
+}
+
 # media_scan_sees GUID -> 0 when a plain `zpool import` scan lists a pool with
 # this GUID (what the replica list and the gate will see), 1 otherwise.
 media_scan_sees() {
     [ -n "$1" ] || return 1
     zpool import 2>/dev/null | awk -v g="$1" '$1 == "id:" && $2 == g {f=1} END {exit !f}'
+}
+
+# media_blkid_refresh DEVICE -- re-probe DEVICE and its partitions into the
+# blkid cache (/run/blkid/blkid.tab). The plain `zpool import` scan finds pools
+# through that cache, and neither udev settle nor a change trigger rewrites it:
+# measured on Site-B pve0 2026-11-24 (ZFS 2.1.9) -- a disk that had held ext4
+# kept TYPE="ext4" in the cache after zpool create+export, the plain scan
+# listed nothing, `-d DEVICE` listed the pool, and one `blkid DEVICE` made the
+# plain scan list it. Probing a device only updates its cache entry.
+media_blkid_refresh() {
+    command -v blkid >/dev/null 2>&1 || return 0
+    local _p
+    blkid "$1" >/dev/null 2>&1
+    lsblk -nr -o NAME "$1" 2>/dev/null | sed 1d | while IFS= read -r _p; do
+        [ -n "$_p" ] && blkid "/dev/$_p" >/dev/null 2>&1
+    done
+    return 0
 }
 
 cmd_prepare_media() {
@@ -8404,6 +8438,7 @@ cmd_prepare_media() {
     echo "PLAN (prepare-media):"
     echo "  disk:     $dev  ($real, $(lsblk -dn -o SIZE,MODEL "$real" 2>/dev/null | sed 's/  */ /g'))"
     media_sector_warning "$real"
+    media_smr_warning "$real"
     lsblk -nr -o NAME,FSTYPE,LABEL "$real" 2>/dev/null | awk 'NF > 1 {print "  WIPED:    " $1 " holds " $2 (NF > 2 ? " (" $3 ")" : "")}'
     echo "  1. zpool create -f -m none -o ashift=12 -o failmode=continue -O compression=zstd $pool $dev   -- EVERYTHING on the disk is erased"
     # W19(b) (owner 2026-10-11, "ma byc proste" 2026-10-13): the medium encrypted with a
@@ -8460,9 +8495,12 @@ cmd_prepare_media() {
     # window would have taken the disk for absent and skipped. So the disk is
     # ready only when the plain scan shows THIS pool (by GUID): wait for udev,
     # ask it once to re-read the disk, and say so plainly if it still does not.
+    # Site-B 2026-11-24: the cause was a stale blkid cache entry, which udev does
+    # not touch -- so the cache is refreshed first (media_blkid_refresh).
+    media_blkid_refresh "$real"
     media_scan_sees "$_pguid" || {
         command -v udevadm >/dev/null 2>&1 && { udevadm settle --timeout=30 2>/dev/null; media_scan_sees "$_pguid" \
-            || { udevadm trigger --action=change "$real" 2>/dev/null; udevadm settle --timeout=30 2>/dev/null; }; }
+            || { udevadm trigger --action=change "$real" 2>/dev/null; udevadm settle --timeout=30 2>/dev/null; media_blkid_refresh "$real"; }; }
         media_scan_sees "$_pguid" \
             || die "prepare-media: the medium is ready and exported, but a plain 'zpool import' does not list pool '$pool' (guid $_pguid) yet -- a replica run now would take the disk for absent. Check 'zpool import' and 'udevadm info $real' before relying on it."
     }
@@ -8831,6 +8869,11 @@ cmd_add_replica() {   # <name> --source=DS [--source=DS2 ...] --dst=POOL/BASE [.
         _need=$(( _need + _nb )); _new="$_new $_s2"
     done
     if [ -n "$_new" ]; then
+        # #7 (pve0 2026-11-24): a first copy of 800 GB ran for days and nobody said so up front.
+        # The disk's own rate is unknown before it writes; the one measured on an SMR disk over
+        # USB (2.5-4 MB/s) gives a planning figure for a slow disk, said as such.
+        local _h=$(( _need / 3000000 / 3600 ))
+        [ "$_h" -ge 1 ] && echo ">>> first copy time: at 3 MB/s (measured on an SMR disk over USB) about ${_h} h$([ "$_h" -ge 48 ] && echo " ($(( _h / 24 )) days)"); a faster disk takes less -- F2 shows its real rate while it runs"
         zpool list -H -o name "$pool" >/dev/null 2>&1 && _free="$(zfs get -H -p -o value available "$dst" 2>/dev/null)"
         case "$_free" in *[!0-9]*) _free="" ;; esac
         if [ -z "$_free" ]; then
@@ -15984,31 +16027,39 @@ cmd_list_datasets() {
     # The wizard asks "who makes these -- another collector, or nobody (leftovers)?"
     # and shows its age as the one fact the admin decides on. A listing without the
     # creation column (old peer output) counts as before and reports 0.
-    local -A own_n=() own_f=() own_e=() own_t=()
+    # newest_* (U194, owner 2026-11-25): the NEWEST snapshot of each dataset, any family --
+    # its creation, USED and REFER as zfs list shows them. The replica picker showed only
+    # how many; when and how big the last one is tells the admin he picked the right dataset.
+    local -A own_n=() own_f=() own_e=() own_t=() new_e=() new_u=() new_r=()
     if [ "$own" -eq 1 ]; then
-        local snaps _s _d _c
+        local snaps _s _d _c _su _sr
         rc=0
         if [ -z "$host" ]; then
-            snaps=$(zfs list -H -p -o name,creation -t snapshot 2>"$errf") || rc=$?
+            snaps=$(zfs list -H -p -o name,creation,used,referenced -t snapshot 2>"$errf") || rc=$?
         else
-            snaps=$(rux_root_ssh "$host" "${port:-22}" "zfs list -H -p -o name,creation -t snapshot" 2>"$errf") || rc=$?
+            snaps=$(rux_root_ssh "$host" "${port:-22}" "zfs list -H -p -o name,creation,used,referenced -t snapshot" 2>"$errf") || rc=$?
         fi
         if [ "$rc" -ne 0 ]; then
             tail -3 "$errf" >&2; rm -f "$errf"
             die "list-datasets: ${host:+$host: }zfs list -t snapshot failed (rc=$rc)"
         fi
-        while IFS=$'\t' read -r _s _c; do
+        while IFS=$'\t' read -r _s _c _su _sr; do
             case "$_s" in *@*) ;; *) continue ;; esac
             _d="${_s%%@*}"
             # U175: every snapshot, reserved families too -- the replica picker shows the count.
             own_t[$_d]=$(( ${own_t[$_d]:-0} + 1 ))
+            case "$_c" in ''|*[!0-9]*) _c=0 ;; esac
+            if [ "$_c" -gt 0 ] && [ "$_c" -ge "${new_e[$_d]:-0}" ]; then
+                new_e[$_d]=$_c
+                case "$_su" in ''|*[!0-9]*) _su=-1 ;; esac; case "$_sr" in ''|*[!0-9]*) _sr=-1 ;; esac
+                new_u[$_d]=$_su; new_r[$_d]=$_sr
+            fi
             case "${_s#*@}" in vzdump*|__replicate_*|__migration__*) continue ;; esac
             own_n[$_d]=$(( ${own_n[$_d]:-0} + 1 ))
             # Our FAMILY alone (the wizard's chain check for a backup, owner 2026-10-20):
             # a manual snapshot is not a chain, an automated_* one made elsewhere is.
             if [[ "${_s#*@}" =~ ^([A-Za-z0-9.-]+_)?automated_ ]]; then
                 own_f[$_d]=$(( ${own_f[$_d]:-0} + 1 ))
-                case "$_c" in ''|*[!0-9]*) _c=0 ;; esac
                 [ "$_c" -gt "${own_e[$_d]:-0}" ] && own_e[$_d]=$_c
             fi
         done <<SN
@@ -16024,7 +16075,8 @@ SN
         [ "$first" -eq 1 ] || printf ','
         first=0
         printf '{"name":"%s","type":"%s","used":%s,"avail":%s' "$(json_escape "$_n")" "$(json_escape "$_t")" "${_u:-0}" "${_av:-0}"
-        [ "$own" -eq 1 ] && printf ',"own_snapshots":%s,"family_snapshots":%s,"family_newest":%s,"snapshots":%s' "${own_n[$_n]:-0}" "${own_f[$_n]:-0}" "${own_e[$_n]:-0}" "${own_t[$_n]:-0}"
+        [ "$own" -eq 1 ] && printf ',"own_snapshots":%s,"family_snapshots":%s,"family_newest":%s,"snapshots":%s' "${own_n[$_n]:-0}" "${own_f[$_n]:-0}" "${own_e[$_n]:-0}" "${own_t[$_n]:-0}" \
+            && printf ',"newest_epoch":%s,"newest_used":%s,"newest_refer":%s' "${new_e[$_n]:-0}" "${new_u[$_n]:--1}" "${new_r[$_n]:--1}"
         # W17: an encrypted source is offered the raw send (-w) by the wizard.
         printf ',"encryption":"%s"' "$(json_escape "${_enc:--}")"
         printf '}'
@@ -17477,7 +17529,7 @@ relation_copy_sources() {
 # key|built-in default|kind|applies to|help (Polish -- shown in the window)
 SETTINGS_REGISTRY='gui.language|en|enum:en,pl|-|język okien GUI (en, pl); komunikaty poleceń zostają po angielsku
 alerts.email|root|email|-|kto dostaje maile o kopiach
-alerts.site|-|name|-|nazwa instalacji (firmy) w temacie maili, np. Site-A -> "[ZFS][ALERT] Site-A pve2: ..."; "-" = pełna nazwa hosta
+alerts.site|-|name|-|nazwa instalacji (firmy) w nadawcy i temacie każdego maila, np. Site-A -> "[ZFS][ALERT] Site-A pve2.firma.pl: ..."; "-" = sama pełna nazwa hosta
 alerts.errors|daily|enum:daily,immediate|-|błędy: zbiorczo raz na dobę albo od razu
 alerts.warnings|daily|enum:daily,immediate|-|ostrzeżenia: zbiorczo raz na dobę albo od razu
 alerts.repeat_after|4h|dur|-|tryb "od razu": ten sam alert znowu po tym czasie
@@ -18252,7 +18304,9 @@ cmd_job_stats() {
         if ($3 == "BEGIN") { bt[lbl, ++sp[lbl]] = secs($1); next }
         rc = ($NF ~ /^rc=/) ? substr($NF,4) + 0 : 0
         n[lbl]++
-        if (rc != 0 && rc != 75) f[lbl]++
+        # rc 8 = done without guest freeze: a WARNING with its own count, not a failure
+        # (chello 2026-11-25: a yellow row said "7 errors" in the same breath).
+        if (rc == 8) w[lbl]++; else if (rc != 0 && rc != 75) f[lbl]++
         # awk variables are global, so d survives the previous END line. Without
         # this reset a job whose BEGIN fell outside the window would inherit the
         # duration of whatever ran before it -- a wrong number that looks right.
@@ -18276,7 +18330,7 @@ cmd_job_stats() {
         t = day " " substr($1,12,5); ts = day " " substr($1,12,8)
         if (!(lbl in lastkey) || ts > lastkey[lbl]) { lastkey[lbl] = ts; lastwhen[lbl] = t; lastrc[lbl] = rc; lastdur[lbl] = (d == "" ? -1 : d) }
     }
-    END { for (k in n) printf "%s\t%d\t%d\t%d\t%d\t%s\t%d\t%d\t%d\n", k, n[k], f[k]+0, (c[k] ? tot[k]/c[k] : -1), mx[k]+0, lastwhen[k], lastrc[k], tot[k]+0, lastdur[k]+0 }
+    END { for (k in n) printf "%s\t%d\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%d\n", k, n[k], f[k]+0, (c[k] ? tot[k]/c[k] : -1), mx[k]+0, lastwhen[k], lastrc[k], tot[k]+0, lastdur[k]+0, w[k]+0 }
         ' | sort)
         # --- twin end: run-rows ---
         # --- twin: ds-rows (the SAME text lives in hostscripts/alert-digest.sh; a test pins equality) ---
@@ -18440,13 +18494,13 @@ cmd_job_stats() {
     done
     printf '],"jobs":['
     first=1
-    local _k _n _f _avg _mx _lw _lrc _tot _ldur
-    while IFS=$'\t' read -r _k _n _f _avg _mx _lw _lrc _tot _ldur; do
+    local _k _n _f _avg _mx _lw _lrc _tot _ldur _w
+    while IFS=$'\t' read -r _k _n _f _avg _mx _lw _lrc _tot _ldur _w; do
         [ -n "$_k" ] || continue
         [ "$first" -eq 1 ] || printf ','
         first=0
-        printf '{"label":"%s","runs":%s,"failures":%s,"avg_s":%s,"max_s":%s,"total_s":%s,"last_s":%s,"last_rc":%s,"last_at":"%s"}' \
-            "$(json_escape "$_k")" "${_n:-0}" "${_f:-0}" "${_avg:--1}" "${_mx:-0}" "${_tot:-0}" "${_ldur:--1}" "${_lrc:-0}" "$(json_escape "$_lw")"
+        printf '{"label":"%s","runs":%s,"failures":%s,"warnings":%s,"avg_s":%s,"max_s":%s,"total_s":%s,"last_s":%s,"last_rc":%s,"last_at":"%s"}' \
+            "$(json_escape "$_k")" "${_n:-0}" "${_f:-0}" "${_w:-0}" "${_avg:--1}" "${_mx:-0}" "${_tot:-0}" "${_ldur:--1}" "${_lrc:-0}" "$(json_escape "$_lw")"
     done <<RUNS
 $run_rows
 RUNS
@@ -18520,6 +18574,28 @@ RLS
         done <<RSN
 $rs_snaps
 RSN
+        printf ']'
+        # #4/#16 (2026-11-25): what the engines measured per job ("bytes"/"job" in the
+        # stats log). The reader credits a run with the records of its label that fall
+        # between its start and end; a run with none keeps the snapshot estimate above.
+        local _sls="${ZFS_STATS_LOGS:-}" _sl _xsince
+        if [ -z "$_sls" ]; then
+            for _sl in /root/scripts/zfs-snapshot-stats.log /home/*/zfs-snapshot-stats.log; do
+                [ -r "$_sl" ] && _sls="$_sls $_sl"
+                [ -r "$_sl.1" ] && _sls="$_sls $_sl.1"
+            done
+        fi
+        _xsince=$(date -u -d "-$runs_h hours" +%FT%TZ 2>/dev/null)
+        printf ',"xfers":['
+        [ -n "$_sls" ] && zcat -f $_sls 2>/dev/null | grep -F '"job":' | awk -v since="$_xsince" '
+            {
+                t = ""; b = ""; j = ""
+                if (match($0, /"time":"[^"]+"/))   t = substr($0, RSTART + 8, RLENGTH - 9)
+                if (match($0, /"bytes":[0-9]+/))   b = substr($0, RSTART + 8, RLENGTH - 8)
+                if (match($0, /"job":"([^"\\]|\\.)*"/)) j = substr($0, RSTART, RLENGTH)
+                if (t == "" || b == "" || j == "" || t < since) next
+                printf "%s{\"time\":\"%s\",\"bytes\":%s,%s}", (n++ ? "," : ""), t, b, j
+            }'
         printf ']'
     fi
     printf '}\n'

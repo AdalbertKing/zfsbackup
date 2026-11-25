@@ -427,15 +427,17 @@ during the deployment it is worth switching to immediate ones:
 
 The subject says what the mail is: `[ZFS][REPORT]` the daily summary, `[ZFS][WARNING]` a warning, pool
 capacity or data growth, `[ZFS][ALERT]` a failed run. A mail rule matching `[ZFS]` keeps working; a rule
-matching the old `[ZFS CAPACITY]` or `[ZFS GROWTH]` needs the new subject. Without a site name the subject
-carries the host's full name. When one person gets mail from several installations, name each of them:
-F10 (host settings), or
+matching the old `[ZFS CAPACITY]` or `[ZFS GROWTH]` needs the new subject. Without a site name the sender
+and the subject carry the host's full name (`hostname -f`), never the short one. When one person gets mail
+from several installations, name each of them: F10 (host settings), or
 
 ```bash
 ./zfs-backup.sh settings set alerts.site=Site-A --yes
 ```
 
-An alert's subject then reads `[ZFS][ALERT] Site-A pve-backup: …`.
+or at deployment `./deploy.sh --site=Site-A` (letters, digits, `.` `_` `-`); `deploy.sh` warns when the
+name is missing. The sender of every mail (the daily report and every alert) then reads
+`zfs-backup Site-A pve-backup.firma.pl`, and an alert's subject `[ZFS][ALERT] Site-A pve-backup.firma.pl: …`.
 
 ### Mail on plain Debian (non-Proxmox)
 
@@ -489,7 +491,8 @@ command line. `deploy.sh` then:
   mode 600) and the sender: the addresses of this host (`myhostname`,
   `myorigin`) leave as `--smtp-from` (default: `--smtp-user` when it is an
   address). An `smtp_generic_maps` set by someone else is left alone, and so is a
-  host domain equal to the alert recipient's;
+  host domain equal to the alert recipient's; it warns when the sender address equals the alert
+  recipient (a separate sending mailbox is recommended);
 - reads the result back from `postconf`; on any failure it puts the saved files
   back and says so;
 - sends the test mail with its own Message-ID and reads postfix's log for that

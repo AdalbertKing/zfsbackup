@@ -286,6 +286,7 @@ SEND_TEST_MAIL=0
 SMTP_RELAY=""
 SMTP_USER=""
 SMTP_FROM=""
+ALERT_SITE=""   # --site: the installation (firm) named in every mail (2026-11-25)
 SMTP_PASSWORD_FILE=""
 SMTP_PASSWORD=""
 # Seconds the test mail waits for the local queue to drain (a relay login takes longer).
@@ -516,6 +517,8 @@ while [ "$#" -gt 0 ]; do
         --smtp-user=*)  SMTP_USER="${1#*=}"; shift ;;
         --smtp-user)    SMTP_USER="${2:-}"; shift 2 ;;
         --smtp-from=*)  SMTP_FROM="${1#*=}"; shift ;;
+        --site=*)       ALERT_SITE="${1#*=}"; shift ;;
+        --site)         ALERT_SITE="${2:-}"; shift 2 ;;
         --smtp-from)    SMTP_FROM="${2:-}"; shift 2 ;;
         # No --smtp-password=: a password on the command line is visible to every
         # user in `ps` and stays in the shell history.
@@ -640,6 +643,9 @@ Usage: deploy.sh [options]
                             without a terminal)
     --smtp-from=ADDR        sender the server accepts for root@<this host>
                             (default: --smtp-user when it is an address)
+    --site=NAME             the installation (firm) every mail names in its sender
+                            and subject: "[ZFS][REPORT] NAME pve0.example.net ...";
+                            letters, digits, . _ - only (settings alerts.site, F10)
 Defaults are the config block at the top of this script -- edit them there to
 make them permanent for a host.
 
@@ -4053,6 +4059,13 @@ smtp_sender_rewrite() {
     fi
     local to; to=$(mail_effective_recipient)
     rdom="${to##*@}"; [ "$rdom" = "$to" ] && rdom=""
+    # 2026-11-25 (two firms' reports read "From: <the owner>"): with the sender rewritten to
+    # the recipient's own address, a mail client that shows contacts by name hides the
+    # sender's display name, so every host's mail looks like the admin's own. Said, not
+    # refused -- some providers allow nothing else.
+    if [ -n "$to" ] && [ "$(printf '%s' "$from" | tr 'A-Z' 'a-z')" = "$(printf '%s' "$to" | tr 'A-Z' 'a-z')" ]; then
+        warn "  the sender $from is also the alert recipient: a mail client may show every host's mail as the recipient's own contact name. Use a separate sending mailbox (--smtp-user/--smtp-from)."
+    fi
     map=""
     o=$(postconf -xh myorigin 2>/dev/null)
     case "$o" in /*) o=$(head -1 "$o" 2>/dev/null) ;; esac
@@ -6320,6 +6333,21 @@ fi
 SMTP_PASSWORD=""
 
 alert_delivery_verdict || true
+
+# THE INSTALLATION IN EVERY MAIL (owner 2026-11-25, a hundred collectors): --site writes
+# alerts.site; without one, the host's full name alone tells the firms apart, and the run
+# says so once.
+if [ "$CHECK_ONLY" -eq 0 ] && [ -x "${REPO_DIR:-}/zfs-backup.sh" ]; then
+    if [ -n "$ALERT_SITE" ]; then
+        case "$ALERT_SITE" in
+            *[!A-Za-z0-9._-]*) warn "--site='$ALERT_SITE': only letters, digits, . _ - -- not set" ;;
+            *) "$REPO_DIR/zfs-backup.sh" settings set "alerts.site=$ALERT_SITE" --yes >/dev/null 2>&1                    && log "mail: installation name '$ALERT_SITE' (alerts.site) -- in every sender and subject"                    || warn "could not set alerts.site=$ALERT_SITE (zfs-backup.sh settings set)" ;;
+        esac
+    else
+        _site=$("$REPO_DIR/zfs-backup.sh" settings get alerts.site 2>/dev/null | tail -1)
+        case "$_site" in ''|-) warn "no installation name for mails: they say only the host name. Set it: --site=FIRM, or zfs-backup settings set alerts.site FIRM (F10)" ;; esac
+    fi
+fi
 
 if [ "$CHECK_ONLY" -eq 1 ]; then
     log "skipping the test email (check-only)"
