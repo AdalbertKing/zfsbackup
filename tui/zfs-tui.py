@@ -234,7 +234,8 @@ PRZ_STATS_S = 60
 
 
 def replica_type_word(r):
-    """U99 (wlasciciel 2026-10-27): kolumna Typ -- nosnik staly to "wewnętrzny";
+    """U99 (wlasciciel 2026-10-27): kolumna Dysk (do 2026-11-27 "Typ": lab S11, stan pod
+    naglowkiem "Typ" czytal sie jak rodzaj) -- nosnik staly to "wewnętrzny";
     wymienny: podłączony / odłączony (stany niepewne slowami bramy)."""
     if (r.get("media") or "") == "fixed":
         return _(u"wewnętrzny")
@@ -538,8 +539,16 @@ def wrap(text, n):
     text = u"%s" % text
     indent = len(text) - len(text.lstrip(" "))
     pad = " " * min(indent, max(0, n - 10))
+    # #35 (lab pve10 2026-11-27): "checks" / "every 15 min", "(this" / "= the last)". A phrase
+    # after a 3-space gap and a (bracket) stay whole when they fit a line; a number keeps its
+    # unit. Glued spaces are U+0000 here and come back as spaces at the end.
+    room0 = max(1, n - len(pad))
+    glue = lambda m: m.group(0).replace(u" ", u"\0") if len(m.group(0)) <= room0 else m.group(0)
+    body = re.sub(u"\\([^()]*\\)", glue, text.strip())
+    body = re.sub(u"(?<=   )[^ ][^\0]*?(?=   |$)", glue, body)
+    body = re.sub(u"(?<=\\d) (?=[^\\W\\d]{1,4}\\b)", u"\0", body)
     out, line = [], pad
-    for word in text.strip().split(" "):
+    for word in body.split(" "):
         room = n - len(pad)
         while len(word) > room:
             if line.strip():
@@ -556,7 +565,7 @@ def wrap(text, n):
             line = pad + word
     if line.strip() or not out:
         out.append(line)
-    return out
+    return [x.replace(u"\0", u" ").rstrip() or pad for x in out]
 
 
 def box(ch, title, body, width, double=True, footer=""):
@@ -575,6 +584,14 @@ def box(ch, title, body, width, double=True, footer=""):
     out.append(tl + top + h * (inner - len(top)) + tr)
     for line in body:
         out.append(v + " " + fit(line, inner - 2, ch) + " " + v)
+    # S2 (lab pve10 2026-11-27): at 80 columns the hints were cut mid-word
+    # ("Tab to source → targe"). Hints are separated by two spaces: whole hints drop from
+    # the end; a single hint longer than the frame is still cut.
+    if footer and len(footer) + 3 > inner:
+        parts = footer.split(u"  ")
+        while len(parts) > 1 and len(u"  ".join(parts)) + 3 > inner:
+            parts.pop()
+        footer = u"  ".join(parts)
     bot = (h + " " + footer + " ") if footer else ""
     bot = bot[:inner]
     out.append(bl + bot + h * (inner - len(bot)) + br)
@@ -1782,6 +1799,11 @@ def job_src_dst(j):
     wysyłka i kopia lokalna -- odwrotnie; porządki -- tylko cel (co przycinają)."""
     d = j.get("direction", "")
     scope, other = j.get("scope", "") or "?", j.get("other_end", "") or ""
+    if j.get("section_kind") == "prune":
+        # #36 (lab pve10 2026-11-27): a source-side prune of a pull relation carries
+        # direction "pull" with scope == other_end, so the panel read
+        # "pve11:hdd/ct -> pve11:hdd/ct". A prune has a target only: what it prunes.
+        return "-", scope
     if d == "pull":
         return other or "?", scope
     if d in ("push", "local"):
@@ -1849,8 +1871,18 @@ def own_inline_prunes(j):
             break
     if not own_tag:
         return []
-    return [cl for cl in j.get("cron_lines") or []
-            if "delsnaps.sh" in cl and raw_tier in cl and ("(%s)" % own_tag) in cl]
+    # P2 #40 F2 (PAGOK 2026-11-26): jedna linia wysylki dla dwoch datasetow niesie znacznik
+    # "(a+b)", a porzadki zrodla sa osobne: "(a)" i "(b)". Skladnik znacznika liczy sie
+    # tylko z linia, ktora czysci scope TEGO zadania (cala sciezka, nie przedrostek).
+    parts = [t for t in own_tag.split("+") if t] if "+" in own_tag else []
+    scope_re = re.compile(r'(?:^|[\s"\'])%s(?=$|[\s"\'@])' % re.escape(j.get("scope") or "\0"))
+    out = []
+    for cl in j.get("cron_lines") or []:
+        if "delsnaps.sh" not in cl or raw_tier not in cl:
+            continue
+        if ("(%s)" % own_tag) in cl or (any(("(%s)" % t) in cl for t in parts) and scope_re.search(cl)):
+            out.append(cl)
+    return out
 
 
 def build_jobs(data, now):
@@ -2176,26 +2208,42 @@ def tab_title(name, tabs, ti):
     return (u"%s: " % name if name else u"") + u"  ".join(parts)
 
 
-def table_fit(heads, rows, inner, ch, prio=None, flex=0):
+def table_fit(heads, rows, inner, ch, prio=None, flex=0, drop_first=False):
     """Kolumny na miare tresci (nie wezsze niz naglowek), odstep 2..4. Za szeroko --
     najpierw traci szerokosc kolumna `flex` (do 12 znakow), potem odpadaja kolumny
     najmniej wazne (`prio`: indeksy od najwazniejszej). Kolejnosc na ekranie
     zostaje. -> (naglowek, linie)"""
     n = len(heads)
     w = [max([len(heads[i])] + [len(u"%s" % (r[i] if r[i] is not None else "")) for r in rows]) for i in range(n)]
+    nat = list(w)
     keep = list(range(n))
     order = list(prio) if prio else list(range(n))
 
     def total(ix):
         return sum(w[i] for i in ix) + 2 * (len(ix) - 1)
+    # `flex`: one index or several, in the order they give up width (#41: F2 cuts the
+    # long "What" before it drops it, then the relation name).
+    flexes = list(flex) if isinstance(flex, (list, tuple)) else [flex]
     while len(keep) > 1 and total(keep) > inner:
-        fx = flex if flex in keep else keep[0]
-        over = total(keep) - inner
-        floor = max(len(heads[fx]), 12)
-        if w[fx] - over >= floor:
-            w[fx] -= over
+        fl = [f for f in flexes if f in keep] or [keep[0]]
+        # drop_first (F2): a column ranked below every flex column goes before any flex
+        # column is cut ("Time"/"Data" before a cut "What").
+        cheap = [i for i in reversed(order) if i in keep and i not in flexes
+                 and all(order.index(i) > order.index(f) for f in fl)] if drop_first else []
+        if cheap:
+            keep.remove(cheap[0])
+            continue
+        fitted = False
+        for fx in fl:
+            over = total(keep) - inner
+            floor = max(len(heads[fx]), 12)
+            if w[fx] - over >= floor:
+                w[fx] -= over
+                fitted = True
+                break
+            w[fx] = min(w[fx], floor)
+        if fitted:
             break
-        w[fx] = min(w[fx], floor)
         for i in reversed(order):
             if i in keep:
                 keep.remove(i)
@@ -2204,6 +2252,12 @@ def table_fit(heads, rows, inner, ch, prio=None, flex=0):
             break
     if total(keep) > inner:
         w[keep[0]] = max(4, w[keep[0]] - (total(keep) - inner))
+    # #34 (lab pve10 2026-11-27): the flex column was cut to 12 BEFORE a column was dropped,
+    # and the room the dropped column freed never came back ("lokalna-hdd…" next to empty
+    # space at every width). Give it back, up to each column's own width, last cut first.
+    for fx in reversed([f for f in flexes if f in keep]):
+        if w[fx] < nat[fx] and total(keep) < inner:
+            w[fx] = min(nat[fx], w[fx] + inner - total(keep))
     gap = 2
     if len(keep) > 1:
         gap = max(2, min(4, 2 + (inner - total(keep)) // (len(keep) - 1)))
@@ -2214,7 +2268,7 @@ def table_fit(heads, rows, inner, ch, prio=None, flex=0):
 
 
 def render_tabbed(data, width, height, now, ch, screen, title, heads, cells, cursor, list_foot,
-                  det_title, det_pairs, child, focus, pair_cursor, actions, empty_lines=(), prio=None, flex=0, pinned=()):
+                  det_title, det_pairs, child, focus, pair_cursor, actions, empty_lines=(), prio=None, flex=0, pinned=(), drop_first=False):
     """Ekran wg reguly U21: u gory lista (lewo) i szczegoly (prawo), na dole
     zakladki z dziecmi wiersza. `child` = None: bez dolnego panelu (F4) -- wtedy
     ponizej 150 kolumn panel idzie pod liste, jak dotad."""
@@ -2239,7 +2293,7 @@ def render_tabbed(data, width, height, now, ch, screen, title, heads, cells, cur
         top_h = max(len(cells) + len(pinned) + 4, 7, min(panel_need, avail - need_child))
         top_h = min(top_h, avail - min(need_child, max(5, avail // 3)))
     inner = lbw - 4
-    hdr, rest = table_fit(heads, cells, inner, ch, prio, flex)
+    hdr, rest = table_fit(heads, cells, inner, ch, prio, flex, drop_first)
     list_h = max(1, top_h - 4)
     # pinned (F4, wlasciciel 2026-11-18: ".. [przegląd]" zawsze na gorze, nie przewija sie):
     # cale linie pod naglowkiem, poza kolumnami tabeli (nie obcina ich szerokosc kolumny i nie
@@ -2429,6 +2483,16 @@ def run_is_prune(it):
     return j.get("section_kind") == "prune" or u"prune" in (it.get("task") or u"")
 
 
+def run_folds(it):
+    """#39 (pve0 2026-11-25: "lokalny prune ... OK ×72" in one row, "migawka lokalna hourly"
+    in 72): successful runs of a prune AND of a snapshot-only job (local or remote) fold
+    into one row. A copy keeps a row per run -- each carries its own data."""
+    if run_is_prune(it):
+        return True
+    j = it.get("job") or (it.get("jobs") or [{}])[0]
+    return j.get("direction") in ("snapshot", "snaponly")
+
+
 def run_running(r):
     """Bieg trwajacy: wykonany bez konca, rc -1 (albo brak) -- tez wiersz zbiorczy z takim biegiem."""
     return any(q.get("past") and q.get("end") is None and q.get("rc") in (-1, None) and q.get("start")
@@ -2537,7 +2601,7 @@ def build_runs(data, jobrows, now, show_done=True, grouped=False, past_h=PRZ_PAS
             # "x N" w miejscu ostatniego; bieg z bledem, pominiety albo trwajacy zostaje
             # osobnym wierszem, zeby go nie przeoczyc.
             okr = [r for r in mine if r.get("rc") == 0]
-            if run_is_prune(it0) and len(okr) > 1:
+            if run_folds(it0) and len(okr) > 1:
                 fold = dict(okr[-1])
                 fold.update({"fold_n": len(okr), "fold_from": okr[0]["at"],
                              "fold_bad": len([r for r in mine if r.get("rc") not in (0, 75, -1, None)])})
@@ -3057,7 +3121,15 @@ def replica_run_bytes(x, r, data):
     powstalych po poprzednim biegu i nie pozniej niz koniec tego -- to przyrost, ktory bieg
     przeslal (wlasciciel 2026-10-29: kolumna Dane byla pusta). Replika bez wlasnej migawki
     (prefix "-", historia kolektora) i brak danych = None ("-")."""
-    if not x.get("past") or "snaps" not in (data.stats or {}):
+    if not x.get("past"):
+        return None
+    # S10 (lab pve10 2026-11-27): F6 showed "-" for every run of sejf-a (collector history,
+    # prefix "-"), though the engine records the bytes of each replica dataset in the stats
+    # log ("job": "pve10 replica copy (sejf-a)") since 2026-11-25 -- the measured bytes win.
+    xb = run_xfer_bytes(x, data)
+    if xb is not None:
+        return xb
+    if "snaps" not in (data.stats or {}):
         return None
     pfx = r.get("prefix") or "replica_"
     if pfx == "-":
@@ -3164,7 +3236,9 @@ def job_panel_pairs(row, data, now, ch):
         src, dst = side_words(src, here_name(data)), side_words(dst, here_name(data))
         d = j.get("direction", "")
         if d == "snaponly":
-            pairs.append((_(u"Cel"), src))
+            # #36: the snapshots are made on `src`; "Cel <src>" read as a copy onto itself.
+            pairs.append((_(u"Migawki na"), src))
+            pairs.append((_(u"Cel"), _(u"brak -- tylko migawki")))
         elif d == "prune" or u"prune" in (row.get("task") or ""):
             # Porzadki szczebla plaskiego siedza w zadaniu pobrania (uwaga 4) --
             # przycinaja jego CEL; harmonogram jest wiersza, nie zadania.
@@ -3185,6 +3259,10 @@ def job_panel_pairs(row, data, now, ch):
         pairs.append((_(u"Czas"), _(u"? -- job-stats nie odpowiedział")))
     elif srow:
         pairs.append((_(u"Czas"), times_words(srow.get("last_s"), srow.get("avg_s"), srow.get("max_s"))))
+    elif data.stats is None:
+        # S7 (lab pve10 2026-11-27): job-stats is a slow read; before it arrives the panel
+        # said "no runs in this window's log" and a few seconds later "last 7s / avg 54s".
+        pairs.append((_(u"Czas"), _(u"czytam dziennik przebiegów…")))
     else:
         pairs.append((_(u"Czas"), _(u"brak przebiegów w dzienniku z tego okna%s") % ("" if row.get("clabel") else _(u" -- zadania nie ma w cronie"))))
     if len(srows) > 1 and not data.failed("stats"):
@@ -3448,13 +3526,14 @@ def render_zadania(data, rows, cursor, width, height, now, ch, message="", show_
              _(u"Nową relację zakładasz na F3 Relacje: Ins.")]
     # Wlasciciel 2026-11-18: przelaczniki WIDOKU listy (wykonane, grupowanie) nie sa akcjami
     # okna -- schodza z paska F na ramke listy, Ctrl-W i Ctrl-G (jak Ctrl-R, Ctrl-O).
-    foot = (_(u"Enter pełne okno zadania  Tab do źródło → cel") + u"  Ctrl-G " + (_(u"oś czasu") if grouped else _(u"grupuj"))
-            + u"  Ctrl-W " + (_(u"kolejka") if show_done else _(u"historia"))) if n_runs else         ((u"Ctrl-W " + (_(u"kolejka") if show_done else _(u"historia"))) if rows else "")
+    # S2: the hints only F2 has go first -- a narrow frame drops whole hints from the end.
+    foot = (u"Ctrl-W " + (_(u"kolejka") if show_done else _(u"historia")) + u"  Ctrl-G " + (_(u"oś czasu") if grouped else _(u"grupuj"))
+            + u"  " + _(u"Enter okno zadania  Tab źródło → cel")) if n_runs else         ((u"Ctrl-W " + (_(u"kolejka") if show_done else _(u"historia"))) if rows else "")
     # 2026-11-25: an empty history still has the "now" line -- without the hint the operator
     # has no way back to the queue shown on the frame.
     return render_tabbed(data, width, height, now, ch, "zadania", title,
                          [_(u"Kiedy"), _(u"Zadanie") if grouped else _(u"Relacja"), _(u"Co"), _(u"Wynik"), _(u"Czas"), _(u"Dane")], cells, cursor, foot,
-                         det_title, det, child, focus, pair_cursor, acts, empty, prio=[0, 1, 3, 2, 5, 4], flex=1)
+                         det_title, det, child, focus, pair_cursor, acts, empty, prio=[0, 1, 3, 2, 5, 4], flex=(2, 1), drop_first=True)
 
 
 def summarize(rows):
@@ -3664,8 +3743,11 @@ def key_bar_parts(active, width, actions=()):
         tight = {"F2": u"Runs", "F4": u"Copy", "F5": u"Tmpl", "F10": u"Set", "F12": u"Quit", "F6": u"Repl", "F3": u"Rel"}
     items = [(fk, _(label), key) for fk, label, key in items]
     short = dict((k, _(v)) for k, v in short.items())
-    for compact, sep, brief in ((False, u" ", False), (True, u" ", False), (True, u"", False), (True, u"", True),
-                                (True, u"", "tight")):
+    # Lab pve10 2026-11-27 (100 columns): "1Help2Runs3Relations…" -- the form without a
+    # separator won before the short labels with one. Short labels keep the space; the
+    # glued form is the last resort only.
+    for compact, sep, brief in ((False, u" ", False), (True, u" ", False), (True, u" ", True), (True, u" ", "tight"),
+                                (True, u"", True), (True, u"", "tight")):
         line, marks = u" ", []
         for fk, label, key in items:
             if brief and fk in short:
@@ -4593,7 +4675,10 @@ def wrap_hanging(lines, avail):
         if len(line) <= avail:
             out.append(line)
             continue
-        m = re.match(r"^(\s*\S.{0,22}?\s{2,})(?=\S)", line)
+        # S9 (lab pve10 2026-11-27): the lazy match stopped at "  F2  " and hung the tail
+        # under "Runs" ("line" alone, then the next line at the description column). The
+        # description starts after the LAST wide gap of the label part.
+        m = re.match(r"^(\s*\S.{0,22}\s{2,})(?=\S)", line)
         hang = len(m.group(1)) if m and len(m.group(1)) < avail // 2 else len(line) - len(line.lstrip(" "))
         first, rest = True, line
         while len(rest) > avail:
@@ -4940,7 +5025,7 @@ def render_nosniki(data, cursor, width, height, now, ch, message="", focus="list
         det_title = _(u"stany nośnika")
         det = [(_(MEDIA_STATES[k][0]), _(MEDIA_STATES[k][2])) for k in ("here", "available", "away", "wrong_medium")]
     return render_tabbed(data, width, height, now, ch, "nosniki", _(u"Repliki backupu kolektora (%d)") % len(reps),
-                         [_(u"Replika"), _(u"Typ"), _(u"Zajęte"), _(u"Wykonana"), _(u"Przebieg"), _(u"Harmonogram")], cells, cursor,
+                         [_(u"Replika"), _(u"Dysk"), _(u"Zajęte"), _(u"Wykonana"), _(u"Przebieg"), _(u"Harmonogram")], cells, cursor,
                          (_(u"Enter szczegóły   Ins nowa   Del usuń   Tab do przebiegów")) if reps else _(u"Ins nowa replika"),
                          det_title, det, child, focus, pair_cursor, screen_actions("nosniki"), empty, prio=[0, 4, 1, 2, 3, 5], flex=5)
 
@@ -5908,6 +5993,19 @@ class UI(object):
         """F2 bez okna i z biegiem w toku: lista ma zyc (PRZ_LIVE_MS)."""
         return self.screen == "zadania" and not self.window and any(
             r.get("kind") == "run" and run_running(r) for r in (getattr(self, "runrows", None) or []))
+
+    def idle_tick(self):
+        """Idle timeout (no key, no read in flight): F6 reads the media, F2 the runs."""
+        if self.window:
+            return
+        if self.screen == "nosniki":
+            self.refresh_bg(("replicas",))
+        elif self.screen == "zadania":
+            # #38 (lab pve10 2026-11-27): without a run in progress F2 never read again --
+            # finished runs stood as "upcoming" for an hour. Idle F2 reads the runs at the
+            # same rhythm as a live one.
+            self._prz_stats_at = time.time()
+            self.refresh_bg(("progress", "stats"), quiet=True)
 
     def prz_live_tick(self):
         """Jeden takt F2 w toku: postep zawsze, przebiegi co PRZ_STATS_S."""
@@ -7897,8 +7995,7 @@ def curses_loop(ui):
                     ui.prz_live_tick()      # bez clear(): co 5 s pelne przerysowanie migaloby
                 elif not (ui.bg_pending() or ui.slow_pending() or (ui.window and ui.window[0] == "output")):
                     stdscr.clear()
-                    if ui.screen == "nosniki" and not ui.window:
-                        ui.refresh_bg(("replicas",))
+                    ui.idle_tick()
                 ui.poll_bg()
                 ui.poll_slow()
                 continue

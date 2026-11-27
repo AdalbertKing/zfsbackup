@@ -6,6 +6,41 @@ when they change how the tool is used.
 
 ## [Unreleased]
 
+## [1.0.33] — 2026-11-27
+
+- GUI F2: a local relation whose one snapshot line covers two datasets ("(a+b)") shows each
+  dataset's source prune again; the F3 clean-up count includes them.
+- `deploy.sh` re-run: "added ... cron line" only when a line was really added ("moved" when a loose one
+  was taken into the block). A line that was
+  already in the block keeps its place instead of moving to the end.
+- Crontab block writer (`deploy.sh`, `gen-cron.sh`): a failing or killed step while the new block or
+  crontab is being staged (sed, awk, a temporary file) now stops with an error and leaves the
+  crontab exactly as it was. Before, it could install an empty or cut block and report success.
+- `deploy.sh --unpair`: the commands printed for the other side also include `rmdir` of the
+  pair-gate state directory (only when empty).
+- `deploy.sh --email=X` next to an existing alert config warns that X is not saved, says where
+  alerts go and gives the `settings set alerts.email=X --yes` command.
+- `deploy.sh --smtp-relay` names the host first (FQDN, addresses, firm) and asks on a terminal;
+  without one, or with `--smtp-password-file`, it only prints.
+- GUI F2: an idle screen re-reads the runs every minute instead of only repainting (a window left
+  open showed the same "read" time for 42 minutes). Column widths follow the window: Relation and
+  What grow into free room, and the lowest-priority columns drop first. Wrapping keeps phrases,
+  brackets and "number unit" together. The F key bar no longer runs labels into each other at 100
+  columns, and a frame footer that is too long drops whole hints.
+- GUI: a prune shows its target only ("pve11:hdd/ct → pve11:hdd/ct" is gone). A snapshot-only
+  job reads "Snapshots on" + the source and "Target: none -- snapshots only". Snapshot-only runs fold in the
+  history like prune. The job panel says "reading the run log…" until the statistics arrive, not
+  "no runs".
+- GUI F6: the Data column of a replica's run list shows the bytes the run sent (from the run
+  statistics; without them, the sum of the snapshots' `written`), and the column that showed
+  "connected / disconnected / internal" is named Disk instead of Type.
+- Replica wizard, step 3: one window "What should be on the replica's disk?" with three answers.
+  The answers are the collector's copy, its snapshots since the first copy (`--passive`); the newest
+  snapshot each run, no intermediates (`--passive --history=newest`; points copied earlier stay while
+  the collector keeps them); or N versions back (`--keep=N`). The wizard no longer offers "own
+  snapshot + mirror of the collector"; the CLI keeps it. A new replica marks the default disk
+  "(selected)", not "(current)".
+
 ## [1.0.32] — 2026-11-27
 
 - A passive replica's (mirror, `snapget.sh -e -M`) first copy starts at the NEWEST eligible

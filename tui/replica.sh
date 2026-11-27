@@ -241,9 +241,9 @@ replica_engine() {   # 0 = coś zmienione (ARGV zbuduje krok 6), 1 = Wstecz bez 
     local p_pas="$PASSIVE" p_keep="$KEEP" p_h="$HIST" items v N
     while :; do
         geom
-        items=(mig "$(T 'Migawki          ')$([ "$p_pas" = yes ] && T 'cała historia (istniejące)' || T 'tylko stan na chwilę kopii (własne replica_)')")
-        # X10 (właściciel 2026-10-12/14): sprzecznych ustawień nie da się wybrać. "Cała historia"
-        # przenosi wszystkie istniejące migawki, a "N ostatnich migawek" -- tylko migawki replica_
+        items=(mig "$(T 'Migawki          ')$([ "$p_pas" = yes ] && T 'migawki kolektora od pierwszej kopii' || T 'tylko stan na chwilę kopii (własne replica_)')")
+        # X10 (właściciel 2026-10-12/14): sprzecznych ustawień nie da się wybrać. "Kopia kolektora"
+        # przenosi migawki kolektora od pierwszej kopii, a "N ostatnich migawek" -- tylko migawki replica_
         # (silnik wysyła wtedy samo najnowsze: pośrednie trafiałyby na dysk bez sprzątania).
         # W obu wiersz Historia nie ma czego wybierać.
         [ "$p_pas" != yes ] && [ -z "$p_keep" ] && items+=(hist "$(T 'Historia         ')$(eng_hist_words "$p_h")$([ "$p_h" = all ] && T ' (wbudowane)')")
@@ -256,7 +256,7 @@ replica_engine() {   # 0 = coś zmienione (ARGV zbuduje krok 6), 1 = Wstecz bez 
             mig)
                 wt --title "$(T 'Migawki')" --ok-button "$(T Wybierz)" --cancel-button "$(T Wstecz)" --notags --default-item "$([ "$p_pas" = yes ] && echo passive || echo own)" \
                    --menu "$(T 'Jakie migawki ma przenosić replika?')\n\n$(T 'Pasywnie = istniejące migawki źródła: idzie stan z ostatniej z nich, nie bieżący; dataset bez migawek nie jest kopiowany.')" 13 "$W" 2 \
-                   passive "$(T 'Cała historia od pierwszej kopii -- migawki kolektora (wrócisz do wczoraj, tydzień temu…); więcej miejsca')" \
+                   passive "$(T 'Kopia kolektora -- migawki od pierwszej kopii, póki kolektor je trzyma')" \
                    own "$(T 'Tylko stan na chwilę kopii -- jedna migawka replica_ na dysku; najmniej miejsca')" || continue
                 [ "$WT_OUT" = passive ] && { p_pas=yes; p_keep=""; p_h=all; } || p_pas=no ;;
             hist)
@@ -358,7 +358,7 @@ edit_menu() {    # -> step ustawiony na pierwszy krok pozycji (albo exit)
         _src="${SRCS%%,*}"; [ "$n" -gt 1 ] && _src="$_src (+$((n - 1)))"
         CARD_TAGS=(); CARD_NAMES=(); CARD_VALUES=(); CARD_FIXED=(); np=0
         rp_row zrodla "$(T 'Źródła')" "$_src"
-        rp_row dysk "$(T 'Na dysku')" "$([ "$PASSIVE" = yes ] && T 'cała historia (istniejące migawki)' || { [ -n "$KEEP" ] && T 'własne, %s ostatnich' "$KEEP" || T 'własne, odbicie kolektora'; })"
+        rp_row dysk "$(T 'Na dysku')" "$([ "$PASSIVE" = yes ] && T 'migawki kolektora od pierwszej kopii (istniejące)' || { [ -n "$KEEP" ] && T 'własne, %s ostatnich' "$KEEP" || T 'własne, odbicie kolektora'; })"
         rp_row nosnik "$(T 'Nośnik')" "$DST ($([ "$MEDIA" = fixed ] && T 'stały' || T 'wymienny'))"
         rp_row kiedy "$(T 'Kiedy')" "$(sched_words "$SCHED")"
         if [ "$MEDIA" = removable ] && [ "$SCHED" != on-insert ]; then
@@ -497,38 +497,34 @@ sys.exit(0 if top else 1)
 PYEOF
         fi
         step=25 ;;
-    25) # migawki: własne czy istniejące (uwaga 20, 2026-10-08)
+    25) # CO MA BYĆ NA DYSKU (#45, decyzja właściciela 2026-11-26): jedno okno zamiast dwóch
+        # ("migawki" + "co zostaje na dysku"). Trzy wybory; czwarty, odkurzacz (#42), dojdzie
+        # później. Z kreatora znika "własne migawki + odbicie kolektora" (CLI zostaje).
         # Kopie relacji na tym kolektorze dostają migawki od swojego źródła; migawka
         # replica_ postawiona na nich znika przy następnym pobraniu (kopia idzie za
-        # źródłem). Dla nich domyślnie: bez własnych migawek.
-        def=own; covers_landing && def=passive
-        [ "$PASSIVE" = yes ] && def=passive; [ "$PASSIVE" = no ] && def=own
-        # W14 (zmierzone pve9b 2026-10-11): na kopiach relacji "własne" działa (przyrost od
-        # zakładki), ale na dysku zostaje zawsze JEDNA migawka -- stan z chwili kopii.
-        # Właściciel: to też potrzebny tryb ("najmniej miejsca"), więc oba zostają, opisane wprost.
+        # źródłem) -- dla nich domyślnie migawki kolektora.
+        def=keep; covers_landing && def=collector
+        if [ "$PASSIVE" = yes ]; then def=collector; [ "$HIST" = newest ] && def=newest; fi
+        [ "$PASSIVE" = no ] && def=keep
         lead=""; covers_landing && lead="$(T 'Źródło obejmuje kopie relacji tego kolektora.\n\n')"
-        wt --title "$(rtitle 3 "$(T 'migawki')")" --ok-button "$(T Dalej)" --cancel-button "$(T Wstecz)" --notags --default-item "$def" \
-           --menu "${lead}$(T 'Jakie migawki ma przenosić replika?')\n\n$(T 'Pasywnie = istniejące migawki źródła: idzie stan z ostatniej z nich, nie bieżący; dataset bez migawek nie jest kopiowany.')" "$(fit 12)" "$W" 2 \
-           passive "$(T 'Cała historia od pierwszej kopii -- migawki kolektora (wrócisz do wczoraj, tydzień temu…); więcej miejsca')" \
-           own "$(T 'Tylko stan na chwilę kopii -- jedna migawka replica_ na dysku; najmniej miejsca')" || { step=2; continue; }
-        [ "$WT_OUT" = passive ] && PASSIVE=yes || PASSIVE=no
-        [ "$PASSIVE" = yes ] && { KEEP=""; step=3; continue; }
-        step=26 ;;
-    26) # NA DYSKU: odbicie kolektora czy własne N (W18, właściciel 2026-10-11 -- dysk
-        # wkładany raz w miesiącu, 12 stanów wstecz). Tylko przy własnych migawkach.
-        def=mirror; [ -n "$KEEP" ] && def=keep
-        wt --title "$(rtitle 3 "$(T 'migawki: co zostaje na dysku')")" --ok-button "$(T Dalej)" --cancel-button "$(T Wstecz)" --notags --default-item "$def" \
-           --menu "$(T 'Co ma zostawać na dysku repliki?')" 11 "$W" 2 \
-           mirror "$(T 'Kopia kolektora -- dysk trzyma to, co kolektor')" \
-           keep "$(T 'Trzymaj N ostatnich kopii -- własna historia dysku, niezależna od kolektora')" || { step=25; continue; }
-        if [ "$WT_OUT" = mirror ]; then KEEP=""; step=3; continue; fi
+        wt --title "$(rtitle 3 "$(T 'co ma być na dysku')")" --ok-button "$(T Dalej)" --cancel-button "$(T Wstecz)" --notags --default-item "$def" \
+           --menu "${lead}$(T 'Co ma być na dysku repliki?')\n\n$(T 'Migawki kolektora: idzie stan z ostatniej z nich, nie bieżący; dataset bez migawek nie jest kopiowany.')" "$(fit 13)" "$W" 3 \
+           collector "$(T 'Kopia kolektora -- migawki od pierwszej kopii, póki kolektor je trzyma')" \
+           newest "$(T 'Najnowsza migawka w każdym biegu -- bez pośrednich; mniej miejsca')" \
+           keep "$(T 'N wersji wstecz -- własne migawki replica_, dysk trzyma N ostatnich')" || { step=2; continue; }
+        case "$WT_OUT" in
+            collector) PASSIVE=yes; KEEP=""; HIST=all; step=3 ;;
+            newest)    PASSIVE=yes; KEEP=""; HIST=newest; step=3 ;;
+            *)         PASSIVE=no; HIST=all; step=26 ;;
+        esac ;;
+    26) # N wersji wstecz (W18, właściciel 2026-10-11 -- dysk wkładany raz w miesiącu, 12 stanów).
         while :; do
-            wt --title "$(rtitle 3 "$(T 'migawki: ile kopii na dysku')")" --ok-button "$(T Dalej)" --cancel-button "$(T Wstecz)" \
+            wt --title "$(rtitle 3 "$(T 'ile wersji na dysku')")" --ok-button "$(T Dalej)" --cancel-button "$(T Wstecz)" \
                --inputbox "$(T 'Ile ostatnich kopii (migawek replica_) ma zostawać na dysku?\nNp. 12 = rok przy dysku wkładanym raz w miesiącu.')" 10 "$W" "${KEEP:-12}" || { WT_OUT=""; break; }
             case "$WT_OUT" in ''|*[!0-9]*|0*) wt --title "$(T 'Nieprawidłowa liczba')" --msgbox "$(Tv ''\''$WT_OUT'\'' -- liczba całkowita większa od 0.' '$WT_OUT' "$WT_OUT")" 8 "$W"; continue ;; esac
             break
         done
-        [ -n "$WT_OUT" ] || continue
+        [ -n "$WT_OUT" ] || { step=25; continue; }
         KEEP="$WT_OUT"
         step=3 ;;
     3)  # rodzaj nośnika -- PRZED wyborem nośnika (P5, uwaga 7): od niego zależy lista
@@ -543,6 +539,9 @@ PYEOF
         zpool list -H -o name 2>/dev/null >"$TMPD/pools.here"
         zpool import 2>/dev/null | awk '$1=="pool:"{print $2}' >"$TMPD/pools.slot"
         cur="${DST%%/*}"; items=(); seen=""
+        # S14 (lab pve10 2026-11-27): in a NEW replica "(current)" marked the disk picked a
+        # moment ago in this wizard (Back from a later step) and read like an existing one.
+        if [ "$EDIT" -eq 1 ]; then curw="$(T ' (obecny)')"; else curw="$(T ' (wybrany)')"; fi
         # Dysk INNEJ repliki nie jest do wyboru (jeden nośnik = jedna replika; czasownik
         # odmawiał dopiero w planie -- kampania 2026-10-09, K45).
         others="$(awk -F'\t' -v n="$NAME" '$1!=n && $3!="-" {split($3,a,"/"); printf "|%s|", a[1]}' "$TMPD/rep.tsv")"
@@ -551,14 +550,14 @@ PYEOF
             [ -n "$p" ] || continue
             case ",$SRCS," in *",$p,"*|*",$p/"*) continue ;; esac   # pula źródła nie jest nośnikiem
             case "$others" in *"|$p|"*) busy="$busy $p"; continue ;; esac
-            items+=("$p" "$p  $(T 'dysk podłączony')$([ "$p" = "$cur" ] && T ' (obecny)')"); seen="$seen|$p|"
+            items+=("$p" "$p  $(T 'dysk podłączony')$([ "$p" = "$cur" ] && printf '%s' "$curw")"); seen="$seen|$p|"
         done <"$TMPD/pools.here"
         # Stały nośnik jest zawsze zaimportowany; dyski w slocie tylko dla wymiennego.
         if [ "$MEDIA" = removable ]; then
             while IFS= read -r p; do
                 [ -n "$p" ] || continue; case "$seen" in *"|$p|"*) continue ;; esac
                 case "$others" in *"|$p|"*) busy="$busy $p"; continue ;; esac
-                items+=("$p" "$p  $(T 'dysk podłączony, pula nieaktywna')$([ "$p" = "$cur" ] && T ' (obecny)')"); seen="$seen|$p|"
+                items+=("$p" "$p  $(T 'dysk podłączony, pula nieaktywna')$([ "$p" = "$cur" ] && printf '%s' "$curw")"); seen="$seen|$p|"
             done < <(sort -u "$TMPD/pools.slot")
         fi
         # Zmiana repliki, której dysku teraz nie ma: zostaje przy swoim (bez wpisywania).
@@ -745,7 +744,10 @@ PYEOF
             for _i in "${!B_ROOT[@]}"; do
                 [ -n "${B_EXCL[$_i]}" ] && echo "$(T 'Pomijane:   ')$(printf '%s' "${B_EXCL[$_i]}" | paste -sd, - | sed 's/,/, /g')"
             done
-            echo "$(T 'Migawki:    ')$([ "$PASSIVE" = yes ] && T 'cała historia (istniejące, bez własnych)' || T 'stan na chwilę kopii (własne, replica_)')"
+            # #45: the plan names the same three choices the window offered.
+            if [ "$PASSIVE" = yes ] && [ "$HIST" = newest ]; then echo "$(T 'Na dysku:   ')$(T 'najnowsza migawka kolektora z każdego biegu; starsze -- póki kolektor je trzyma')"
+            elif [ "$PASSIVE" = yes ]; then echo "$(T 'Na dysku:   ')$(T 'migawki kolektora od pierwszej kopii, póki kolektor je trzyma (bez własnych)')"
+            else echo "$(T 'Migawki:    ')$(T 'stan na chwilę kopii (własne, replica_)')"; fi
             [ "$PASSIVE" = yes ] && echo "$(T 'Pasywnie = istniejące migawki źródła: idzie stan z ostatniej z nich, nie bieżący; dataset bez migawek nie jest kopiowany.')"
             [ "$PASSIVE" = yes ] && [ -n "$EXFAM" ] && echo "$(T 'Pomijane migawki z prefiksami:') ${EXFAM//,/, }."
             [ "$PASSIVE" = yes ] || echo "$(T 'Na dysku:   ')$([ -n "$KEEP" ] && T '%s ostatnich kopii, niezależnie od kolektora' "$KEEP" || T 'odbicie kolektora')"
@@ -755,9 +757,10 @@ PYEOF
             elif [ "$RAW" = yes ]; then
                 echo "$(T 'Szyfrowane: źródło jest zaszyfrowane -- kopia idzie zaszyfrowana (raw), kolektor nie potrzebuje klucza')"
             fi
-            # X10: przy "cała historia" i przy "N ostatnich" Historia nie jest wyborem -- plan mówi,
+            # X10: przy kopii kolektora i przy "N ostatnich" Historia nie jest wyborem -- plan mówi,
             # co naprawdę idzie, a nie wartość, której silnik nie użyje.
-            if [ "$PASSIVE" = yes ]; then echo "$(T 'Historia:   wszystkie istniejące migawki (lustro kolektora)')"
+            if [ "$PASSIVE" = yes ] && [ "$HIST" = newest ]; then echo "$(T 'Historia:   bieg kopiuje tylko najnowszą migawkę kolektora (bez pośrednich)')"
+            elif [ "$PASSIVE" = yes ]; then echo "$(T 'Historia:   od pierwszej kopii; starsze punkty znikają razem z migawkami kolektora')"
             elif [ -n "$KEEP" ]; then echo "$(T 'Historia:   tylko najnowsza migawka replica_ (pośrednie nie trafiają)')"
             else echo "$(T 'Historia:   ')$(eng_hist_words "$HIST")"; fi
             echo "$(T 'Nośnik:     ')$DST  ($([ "$MEDIA" = fixed ] && T 'stały' || T 'wymienny'))"

@@ -57,7 +57,7 @@ Wszystko w bashu, zadania chodzą z crona, a do codziennej pracy jest tekstowe G
 
    Do hosta źródłowego kolektor potrzebuje wstępu SSH jako root; pakiet na źródle kreator zainstaluje sam.
 
-   Pasek tytułowy pokazuje wersję pakietu (np. `zfs-snapshot-all 1.0.32`).
+   Pasek tytułowy pokazuje wersję pakietu (np. `zfs-snapshot-all 1.0.33`).
 
    GUI startuje po angielsku. Po polsku: **F10** (ustawienia hosta), pozycja `language` = `pl`, albo
 
@@ -85,7 +85,7 @@ Wszystko w bashu, zadania chodzą z crona, a do codziennej pracy jest tekstowe G
 | odzyskać dane | F4 Kopie, F9 Przywróć |
 | przejrzeć pliki z migawki | F4 Kopie, Enter (albo F4 z biegu na F2) |
 | dodać replikę na dysk | F6 Replika, Ins |
-| zobaczyć, czy dysk repliki jest podłączony, jak jest pełny i czy kopia trwa | F6: kolumny Typ (podłączony / odłączony / wewnętrzny) i Zajęte; trwająca kopia pokazuje `kopia trwa od …` |
+| zobaczyć, czy dysk repliki jest podłączony, jak jest pełny i czy kopia trwa | F6: kolumny Dysk (podłączony / odłączony / wewnętrzny) i Zajęte; trwająca kopia pokazuje `kopia trwa od …` |
 | odróżnić maile | temat: `[ZFS][REPORT]` raport dzienny, `[ZFS][WARNING]` ostrzeżenie, pojemność puli, przyrost danych, `[ZFS][ALERT]` nieudany bieg; F10 `alerts.site` (albo `deploy.sh --site=NAZWA`) wstawia nazwę instalacji do tematu i nadawcy każdego maila; bez niej stoi tam pełna nazwa hosta |
 | zrobić to samo z linii poleceń | [KOMENDY.md](KOMENDY.md) |
 

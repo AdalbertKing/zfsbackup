@@ -472,6 +472,11 @@ dostawcy, tak jak program pocztowy:
 ./deploy.sh --email=ty@example.com --smtp-relay=smtp.example.com:587 --smtp-user=ty@example.com
 ```
 
+Najpierw host się przedstawia: pełna nazwa (FQDN), adresy i firma (`alerts.site`);
+w terminalu trzeba potwierdzić (`y`), inna odpowiedź kończy przebieg bez zmian.
+Dwa hosty dwóch firm mogą mieć tę samą krótką nazwę (`pve0`). Bez terminala albo z
+`--smtp-password-file` ta linia jest tylko wypisana.
+
 Hasło jest pytane w terminalu, zanim cokolwiek się zmieni (bez terminala:
 `--smtp-password-file=PLIK`, pierwsza linia); nigdy nie idzie w linii poleceń.
 Następnie `deploy.sh`:
@@ -501,6 +506,11 @@ host z własną działającą pocztą ją zachowuje. `--check-only
 --smtp-relay=HOST:PORT` niczego nie zmienia: sprawdza, czy serwer odpowiada na tym
 porcie, i ostrzega, gdy poczta hosta idzie przez inny MTA (wtedy prawdziwy przebieg
 odmówi).
+
+`--email=ADRES` przy istniejącym `/etc/zfs-alert.conf` niczego nie zapisuje (istniejąca
+konfiguracja wygrywa). Gdy adres różni się od zapisanego, `deploy.sh` ostrzega, dokąd
+naprawdę idą alerty (mail testowy na `ADRES` dowodzi tylko tego adresu), i podaje
+polecenie: `zfs-backup.sh settings set alerts.email=ADRES --yes`.
 
 **Sprawdzenie po fakcie** — najprostszy dowód, że poczta faktycznie wychodzi:
 

@@ -215,7 +215,11 @@ minute — once a day, so two replicas do not start together; an existing replic
 keeps its schedule. The replica is **not an online mirror**: the medium is at risk
 only while its pool is imported, so the number of runs **is** the exposure.
 
-**What the disk holds** — three shapes, chosen in the replica wizard (F6) or by flags:
+**What the disk holds** — three shapes, chosen by flags. The replica wizard (F6) asks in one window "What should be on
+the replica's disk?" with three answers: the collector's copy, that is its snapshots since the first copy (`--passive`); the
+newest snapshot each run, no intermediates (`--passive --history=newest`) -- not one snapshot on the disk: points
+copied earlier stay while the collector keeps them (`-M`); or N versions back (`--keep=N`). The mirror of the
+collector with its own snapshot is now set by flags only:
 
 - **its own snapshot, a mirror of the collector** (the default; own family `replica_`): each run takes a `replica_`
   snapshot and copies it, then the medium drops what the collector has dropped (`-M`);
@@ -229,8 +233,8 @@ only while its pool is imported, so the number of runs **is** the exposure.
   `history = all` or `auto:N` nothing is pruned on the collector;
 - **`--passive`**: no snapshots of its own; it carries the ones already there, so the disk holds the state of the
   newest of them. The first copy of such a mirror is the newest eligible snapshot in full, then increments forward:
-  the whole history from the first copy, without the collector's older snapshots (starting at the oldest kept busy
-  the snapshot retention destroys next -- pve0, 2026-11-27). A passive replica skips snapshot families like a relation does:
+  the snapshots since the first copy (while the collector keeps them), without the collector's older snapshots (starting at the oldest kept busy
+  the snapshot that retention destroys next -- pve0, 2026-11-27). A passive replica skips snapshot families like a relation does:
   `--exclude-family=A,B` (letters, digits, `_ . : -`) gives it the same `-E`; the wizard sets
   `__replicate_,vzdump,__migration__` for a passive replica that has none, so the copy stands on the tool's own
   snapshots, not on the ones Proxmox replication renames every few hours. `list-replicas --json` shows the list
@@ -287,11 +291,11 @@ now (in the background, as F7; the state is in F2).
 
 A replica source whose name holds `:` (`tank/data:part`) is copied as a local dataset.
 
-**F6 in the GUI.** Columns: Replika (replica), Type (connected / disconnected / internal), Used (how full the medium
-is, while its pool is imported), Done, Last run, Schedule; `list-replicas --json` carries `medium_size` and
+**F6 in the GUI.** Columns: Replika (replica), Disk (connected / disconnected / internal; also `WRONG DISK`, `?`), Used (how full the medium
+is, while its pool is imported), Done, Run, Schedule; `list-replicas --json` carries `medium_size` and
 `medium_alloc` in bytes (empty while the pool is not imported). A running copy reads `copy running since …`
 (`running_since`) instead of the last finished run; a disk just inserted whose copy waits (`replica.insert_wait`)
-reads `disk connected, copy in ~N s` (`insert_in`). F6 reads the list again on entry and every 15 s. In F4 a
+reads `disk connected, copy in ~…` (`insert_in`, seconds or minutes). F6 reads the list again on entry and every 15 s. In F4 a
 replica dataset with no snapshot yet says `copy running` while the copy runs, and `interrupted, will resume`
 when a cut-off receive left a resume token. The replica wizard shows the number of snapshots next to each dataset
 and, at zero, the note that a passive replica will not copy it; the panel of the dataset under the cursor

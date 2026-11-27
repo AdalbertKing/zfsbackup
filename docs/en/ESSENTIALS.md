@@ -58,7 +58,7 @@ server console.
 
    The collector needs SSH access to the source host as root; the wizard installs the package on the source by itself.
 
-   The title bar shows the package version (e.g. `zfs-snapshot-all 1.0.32`).
+   The title bar shows the package version (e.g. `zfs-snapshot-all 1.0.33`).
 
    The GUI starts in English. For Polish: **F10** (host settings), item `language` = `pl`, or
 
@@ -86,7 +86,7 @@ server console.
 | restore data | F4 Kopie (copies), F9 Przywróć (restore) |
 | browse files in a snapshot | F4 Kopie, Enter (or F4 on a run in F2) |
 | add a replica on a disk | F6 Replika (replica), Ins |
-| see whether a replica disk is connected, how full it is, whether a copy is running | F6: columns Type (connected / disconnected / internal) and Used; a running copy reads `copy running since …` |
+| see whether a replica disk is connected, how full it is, whether a copy is running | F6: columns Disk (connected / disconnected / internal) and Used; a running copy reads `copy running since …` |
 | tell the mails apart | subject: `[ZFS][REPORT]` daily summary, `[ZFS][WARNING]` warning, pool capacity, data growth, `[ZFS][ALERT]` failed run; F10 `alerts.site` (or `deploy.sh --site=NAME`) puts the installation's name in the subject and sender of every mail; without it the host's full name stands there |
 | do the same from the command line | [COMMANDS.md](COMMANDS.md) |
 

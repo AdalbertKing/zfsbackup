@@ -211,7 +211,11 @@ replika zostaje przy swoim harmonogramie. Replika **nie jest lustrem online**:
 nośnik jest zagrożony tylko wtedy, gdy jego pula jest zaimportowana, więc liczba
 biegów **jest** ekspozycją.
 
-**Co trzyma dysk** — trzy kształty, wybierane w kreatorze repliki (F6) albo flagami:
+**Co trzyma dysk** — trzy kształty, wybierane flagami. Kreator repliki (F6) pyta w jednym oknie „Co ma być na dysku repliki?”
+o trzy odpowiedzi: kopia kolektora, czyli migawki od pierwszej kopii (`--passive`); najnowsza migawka w każdym
+biegu, bez pośrednich (`--passive --history=newest`) -- to nie jest jedna migawka na dysku: punkty skopiowane
+wcześniej zostają, póki kolektor je trzyma (`-M`); albo N wersji wstecz (`--keep=N`). Odbicie kolektora z własną
+migawką ustawia się już tylko flagami:
 
 - **własna migawka, odbicie kolektora** (domyślnie; własna rodzina `replica_`): każdy bieg robi migawkę `replica_`
   i ją kopiuje, po czym nośnik gubi to, co zgubił kolektor (`-M`);
@@ -225,7 +229,7 @@ biegów **jest** ekspozycją.
   `history = all` albo `auto:N` na kolektorze nic nie jest kasowane;
 - **`--passive`**: bez własnych migawek; przenosi te, które już są, więc dysk ma stan z chwili najnowszej z nich.
   Pierwsza kopia takiego odbicia to najnowsza kwalifikująca się migawka w całości, potem przyrosty do przodu:
-  cała historia od pierwszej kopii, bez starszych migawek kolektora (start od najstarszej trzymał zajętą migawkę,
+  migawki od pierwszej kopii (póki kolektor je trzyma), bez starszych migawek kolektora (start od najstarszej trzymał zajętą migawkę,
   którą retencja kasuje jako następną -- pve0, 2026-11-27). Replika pasywna pomija rodziny migawek jak relacja:
   `--exclude-family=A,B` (litery, cyfry, `_ . : -`) daje jej to samo `-E`; kreator ustawia
   `__replicate_,vzdump,__migration__` pasywnej replice, która ich nie ma, żeby kopia stała na własnych migawkach
@@ -283,11 +287,11 @@ w F2).
 
 Źródło repliki, którego nazwa zawiera `:` (`tank/data:part`), jest kopiowane jako dataset lokalny.
 
-**F6 w GUI.** Kolumny: Replika, Typ (podłączony / odłączony / wewnętrzny), Zajęte (jak pełny jest nośnik, gdy jego
-pula jest zaimportowana), Wykonana, Ostatni bieg, Harmonogram; `list-replicas --json` niesie `medium_size`
+**F6 w GUI.** Kolumny: Replika, Dysk (podłączony / odłączony / wewnętrzny; także `NIE TEN DYSK`, `?`), Zajęte (jak pełny jest nośnik, gdy jego
+pula jest zaimportowana), Wykonana, Przebieg, Harmonogram; `list-replicas --json` niesie `medium_size`
 i `medium_alloc` w bajtach (puste, gdy pula nie jest zaimportowana). Trwająca kopia pokazuje `kopia trwa od …`
 (`running_since`) zamiast ostatniego zakończonego biegu; dysk dopiero co włożony, którego kopia czeka
-(`replica.insert_wait`), pokazuje `dysk podłączony, kopia za ~N s` (`insert_in`). F6 czyta listę ponownie przy
+(`replica.insert_wait`), pokazuje `dysk podłączony, kopia za ~…` (`insert_in`, sekundy albo minuty). F6 czyta listę ponownie przy
 wejściu i co 15 s. W F4 dataset repliki bez żadnej migawki mówi `kopia trwa`, dopóki kopia biegnie, i `przerwana,
 wznowi się`, gdy przerwany odbiór zostawił token wznowienia. Kreator repliki pokazuje przy każdym datasecie liczbę
 migawek, a przy zerze uwagę, że replika pasywna go nie skopiuje; panel datasetu pod kursorem pokazuje też

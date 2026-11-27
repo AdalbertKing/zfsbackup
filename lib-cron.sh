@@ -468,11 +468,13 @@ cron_block_render() {   # <curfile> <name> <bodyfile|-> <outfile> <begin_tail>
     local b e
     if ! cron_block_locate "$cur" "$name"; then return 1; fi
     b="$CRON_B"; e="$CRON_E"
-    : > "$out" || return 1
+    # REV-20261127-B02 F2: every step's status counts -- a failing sed or cat
+    # here used to leave a cut crontab in <outfile> and still return 0.
+    : > "$out" || { CRON_ERR="could not render the block of '$name' (a read or write failed) -- nothing written"; return 1; }
     if [ "$b" -gt 0 ]; then
-        [ "$b" -gt 1 ] && sed -n "1,$((b-1))p" "$cur" >> "$out"
+        if [ "$b" -gt 1 ]; then sed -n "1,$((b-1))p" "$cur" >> "$out" || { CRON_ERR="could not render the block of '$name' (a read or write failed) -- nothing written"; return 1; }; fi
     else
-        cat "$cur" >> "$out"
+        cat "$cur" >> "$out" || { CRON_ERR="could not render the block of '$name' (a read or write failed) -- nothing written"; return 1; }
     fi
     if [ "$body" != "-" ]; then
         # Keep the existing BEGIN tail when re-writing a block that already has
@@ -481,15 +483,15 @@ cron_block_render() {   # <curfile> <name> <bodyfile|-> <outfile> <begin_tail>
         local begin_line="# BEGIN $name"
         [ -n "$tail" ] && begin_line="# BEGIN $name $tail"
         if [ "$b" -gt 0 ]; then
-            local old; old=$(sed -n "${b}p" "$cur")
+            local old; old=$(sed -n "${b}p" "$cur") || { CRON_ERR="could not render the block of '$name' (a read or write failed) -- nothing written"; return 1; }
             [ -n "$old" ] && begin_line="$old"
         fi
-        printf '%s\n' "$begin_line" >> "$out"
-        cat "$body" >> "$out"
-        printf '# END %s\n' "$name" >> "$out"
+        printf '%s\n' "$begin_line" >> "$out" || { CRON_ERR="could not render the block of '$name' (a read or write failed) -- nothing written"; return 1; }
+        cat "$body" >> "$out" || { CRON_ERR="could not render the block of '$name' (a read or write failed) -- nothing written"; return 1; }
+        printf '# END %s\n' "$name" >> "$out" || { CRON_ERR="could not render the block of '$name' (a read or write failed) -- nothing written"; return 1; }
     fi
     if [ "$b" -gt 0 ]; then
-        sed -n "$((e+1)),\$p" "$cur" >> "$out"
+        sed -n "$((e+1)),\$p" "$cur" >> "$out" || { CRON_ERR="could not render the block of '$name' (a read or write failed) -- nothing written"; return 1; }
     fi
     return 0
 }
@@ -656,27 +658,68 @@ cron_block_ensure_line_impl() {
 
     # Every spelling this job has ever had, as fixed strings.
     local matches; matches=$(mktemp) || { rm -f "$cur" "$body" "$new"; CRON_ERR="mktemp failed"; return 1; }
-    printf '%s\n' "$match" > "$matches"
-    [ -n "$also" ] && printf '%s\n' "$also" | grep -v '^$' >> "$matches"
-
-    # The block's body, minus every previous version of this line.
-    if [ "$CRON_B" -gt 0 ] && [ "$CRON_E" -gt $((CRON_B+1)) ]; then
-        sed -n "$((CRON_B+1)),$((CRON_E-1))p" "$cur" | grep -vFf "$matches" > "$body" || :
+    # REV-20261127-B02 F2: every staging step below fails CLOSED -- nonzero, CRON_ERR,
+    # temp files gone, nothing written. A killed or failing sed/awk, or a pattern file
+    # that did not get written, used to stage an empty or partial block (or an empty
+    # crontab) and install it with rc 0.
+    local staged=""
+    _ensure_fail() { rm -f "$cur" "$body" "$new" "$matches" ${staged:+"$staged"}; CRON_ERR="$1"; return 1; }
+    printf '%s\n' "$match" > "$matches" || { _ensure_fail "could not write the match patterns -- nothing written"; return 1; }
+    if [ -n "$also" ]; then
+        printf '%s\n' "$also" | sed '/^$/d' >> "$matches" || { _ensure_fail "could not write the older spellings -- nothing written"; return 1; }
     fi
-    printf '%s\n' "$line" >> "$body"
+
+    # The block's body with this line IN THE PLACE of its first previous version
+    # (every other version dropped); appended only when the block has none.
+    # #43 (lab pve9b 2026-11-26): it used to be dropped and appended at the end,
+    # so with four such lines in one block each call reordered the block, the
+    # crontab "changed" and deploy printed "added ... cron line" for a line that
+    # was there -- after the fourth call the order was back where it started.
+    # The line goes through ENVIRON, not -v: awk -v would eat its backslashes.
+    if [ "$CRON_B" -gt 0 ] && [ "$CRON_E" -gt $((CRON_B+1)) ]; then
+        sed -n "$((CRON_B+1)),$((CRON_E-1))p" "$cur" | CRON_ENSURE_LINE="$line" awk -v mf="$matches" '
+            BEGIN { while ((getline ln < mf) > 0) if (ln != "") pat[++n] = ln; if (n == 0) { bad = 1; exit 3 }
+                    line = ENVIRON["CRON_ENSURE_LINE"] }
+            { for (i=1; i<=n; i++) if (index($0, pat[i]) > 0) { if (!done) { print line; done = 1 }; next }; print }
+            END { if (bad) exit 3; if (!done) print line }' > "$body"
+        local ps=("${PIPESTATUS[@]}")
+        [ "${ps[0]}" -eq 0 ] || { _ensure_fail "could not read the block of '$name' (sed rc ${ps[0]}) -- nothing written"; return 1; }
+        [ "${ps[1]}" -eq 0 ] || { _ensure_fail "could not stage the block of '$name' (awk rc ${ps[1]}) -- nothing written"; return 1; }
+    else
+        printf '%s\n' "$line" > "$body" || { _ensure_fail "could not stage the block of '$name' -- nothing written"; return 1; }
+    fi
+    # The staged body holds the line, and exactly the old body's lines minus the
+    # versions it replaces, plus one. A truncated or partial body cannot pass.
+    grep -qxF -- "$line" "$body" || { _ensure_fail "the staged block of '$name' lost the line -- nothing written"; return 1; }
+    local _want_n=1
+    if [ "$CRON_B" -gt 0 ] && [ "$CRON_E" -gt $((CRON_B+1)) ]; then
+        _want_n=$(( CRON_E - CRON_B - 1 - $(sed -n "$((CRON_B+1)),$((CRON_E-1))p" "$cur" | grep -cFf "$matches") + 1 ))
+    fi
+    [ "$(wc -l < "$body")" -eq "$_want_n" ] \
+        || { _ensure_fail "the staged block of '$name' has $(wc -l < "$body") lines, expected $_want_n -- nothing written"; return 1; }
 
     # Render the block first, then drop loose copies from the result -- doing it
     # in this order means the line we just placed is inside the block and cannot
     # be matched as "loose" by the same pattern.
-    local staged; staged=$(mktemp) || { rm -f "$cur" "$body" "$new"; CRON_ERR="mktemp failed"; return 1; }
+    staged=$(mktemp) || { staged=""; _ensure_fail "mktemp failed"; return 1; }
     if ! cron_block_render "$cur" "$name" "$body" "$staged" "$tail"; then
-        rm -f "$cur" "$body" "$new" "$staged"; return 1
+        _ensure_fail "${CRON_ERR:-could not render the block of '$name'}"; return 1
     fi
-    if ! cron_block_locate "$staged" "$name"; then rm -f "$cur" "$body" "$new" "$staged"; return 1; fi
-    awk -v b="$CRON_B" -v e="$CRON_E" -v mf="$matches" '
-        BEGIN { while ((getline ln < mf) > 0) if (ln != "") pat[++n] = ln }
+    if ! cron_block_locate "$staged" "$name"; then _ensure_fail "${CRON_ERR:-malformed staged block of '$name'}"; return 1; fi
+    local _sb="$CRON_B" _se="$CRON_E"
+    if ! awk -v b="$CRON_B" -v e="$CRON_E" -v mf="$matches" '
+        BEGIN { while ((getline ln < mf) > 0) if (ln != "") pat[++n] = ln; if (n == 0) exit 3 }
         NR>=b && NR<=e { print; next }
-        { for (i=1; i<=n; i++) if (index($0, pat[i]) > 0) next; print }' "$staged" > "$new"
+        { for (i=1; i<=n; i++) if (index($0, pat[i]) > 0) next; print }' "$staged" > "$new"; then
+        _ensure_fail "could not drop the loose copies of '$name' (awk failed) -- nothing written"; return 1
+    fi
+    # The result keeps the staged crontab minus exactly its loose copies of this job;
+    # an empty or cut result fails here, before any write.
+    local _want_c
+    _want_c=$(( $(wc -l < "$staged") - $(awk -v b="$_sb" -v e="$_se" 'NR<b || NR>e' "$staged" | grep -cFf "$matches") ))
+    if [ "$(wc -l < "$new")" -ne "$_want_c" ] || ! cron_block_locate "$new" "$name"; then
+        _ensure_fail "the staged crontab has $(wc -l < "$new") lines, expected $_want_c -- nothing written"; return 1
+    fi
     CRON_ADOPTED=$(( $(grep -cFf "$matches" "$staged") - $(grep -cFf "$matches" "$new") ))
     rm -f "$staged" "$body" "$matches"
 

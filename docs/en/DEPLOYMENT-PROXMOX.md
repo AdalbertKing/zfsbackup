@@ -477,6 +477,11 @@ provider, like a mail program does:
 ./deploy.sh --email=you@example.com --smtp-relay=smtp.example.com:587 --smtp-user=you@example.com
 ```
 
+First the host names itself: full name (FQDN), addresses and firm (`alerts.site`);
+on a terminal it must be confirmed (`y`), and any other answer ends the run with
+nothing changed. Two firms' hosts can share a short name (`pve0`). Without a
+terminal, or with `--smtp-password-file`, the line is only printed.
+
 The password is asked for on the terminal before anything changes (without a
 terminal: `--smtp-password-file=FILE`, its first line); it is never passed on the
 command line. `deploy.sh` then:
@@ -505,6 +510,11 @@ Without `--smtp-relay` the mail configuration is left exactly as found, so a hos
 with working mail of its own keeps it. `--check-only --smtp-relay=HOST:PORT` changes nothing: it
 tests whether the server answers on that port and warns when the host's mail goes
 through another MTA (a real run would then refuse).
+
+`--email=ADDRESS` next to an existing `/etc/zfs-alert.conf` saves nothing (the existing
+configuration wins). When the address differs from the saved one, `deploy.sh` warns
+where alerts really go (a test mail to `ADDRESS` proves only that address) and gives
+the command: `zfs-backup.sh settings set alerts.email=ADDRESS --yes`.
 
 **Checking after the fact** — the simplest proof that mail really leaves:
 

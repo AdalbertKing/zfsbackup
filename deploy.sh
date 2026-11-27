@@ -3903,6 +3903,22 @@ smtp_port_open() {
 # smtp_read_password -- into SMTP_PASSWORD: the file's first line, or the terminal
 # without echo. Before Phase 1, so a missing password stops the run before it changes
 # anything.
+smtp_confirm_host() {
+    local fq ips site ans
+    fq=$(hostname -f 2>/dev/null || hostname)
+    ips=$(hostname -I 2>/dev/null | tr -s ' ' | sed 's/ $//')
+    site=""
+    [ -x "${REPO_DIR:-}/zfs-backup.sh" ] && site=$("$REPO_DIR/zfs-backup.sh" settings get alerts.site 2>/dev/null | tail -1)
+    case "$site" in -|*[[:space:]]*) site="" ;; esac
+    local who="this host: $fq${ips:+ ($ips)}, firm: ${site:-[none set]}"
+    log "  mail relay ${SMTP_RELAY} goes on $who"
+    if [ -z "$SMTP_PASSWORD_FILE" ] && { : < /dev/tty; } 2>/dev/null; then
+        printf 'Configure the mail relay %s on %s? [y/N] ' "$SMTP_RELAY" "$who" > /dev/tty
+        IFS= read -r ans < /dev/tty || ans=""
+        case "$ans" in y|Y|yes|YES|t|T|tak|TAK) ;; *) die "mail relay not configured: not confirmed for $fq (nothing changed)" ;; esac
+    fi
+}
+
 smtp_read_password() {
     if [ -n "$SMTP_PASSWORD_FILE" ]; then
         [ -r "$SMTP_PASSWORD_FILE" ] || die "--smtp-password-file: cannot read '$SMTP_PASSWORD_FILE'"
@@ -5575,6 +5591,13 @@ if [ "${DEPLOY_PHASES_QUIET:-0}" = 1 ] && [ -z "$(trap -p EXIT)" ]; then
         trap 'phases_unquiet tail' EXIT
     fi
 fi
+# #55 (2026-11-24): a relay with a personal mailbox password went to the wrong `pve0` --
+# two firms' hosts share the short name. Before anything (password included) this host
+# names itself: FQDN, addresses, firm (alerts.site). On a terminal the operator confirms;
+# without one (--smtp-password-file, automation) it is only printed, as before.
+if [ -n "$SMTP_RELAY" ] && [ "$CHECK_ONLY" -eq 0 ]; then
+    smtp_confirm_host
+fi
 # --smtp-relay: the password is asked for now, before anything on the host changes.
 if [ -n "$SMTP_RELAY" ] && [ -n "$SMTP_USER" ] && [ "$CHECK_ONLY" -eq 0 ]; then
     smtp_read_password
@@ -6115,6 +6138,20 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
     fi
 elif [ -e "$ALERT_CONF" ]; then
     log "$ALERT_CONF exists -- NOT overwritten (it is yours to edit; current mode: $(sed -n 's/^ZFS_ALERT_MODE=\([a-z]*\).*/\1/p' "$ALERT_CONF" | head -1))"
+    # #54 (a firm's host 2026-11-24): an explicit --email=X next to an existing config
+    # changed nothing, while the test mail went to X -- the operator saw "it arrived"
+    # and the alerts kept going to the saved address. Say so, with the one command.
+    if [ "$NOTIFY_EMAIL_GIVEN" = 1 ] && [ -x "${REPO_DIR:-}/zfs-backup.sh" ]; then
+        _saved_to=$("$REPO_DIR/zfs-backup.sh" settings get alerts.email 2>/dev/null | tail -1)
+        case "$_saved_to" in
+            ''|*[[:space:]]*) ;;
+            "$NOTIFY_EMAIL") ;;
+            *) warn "--email=$NOTIFY_EMAIL is NOT saved: alerts go to $_saved_to (the existing configuration wins);"
+               warn "    a test mail sent to $NOTIFY_EMAIL proves only that address. To change where alerts go:"
+               warn "    $REPO_DIR/zfs-backup.sh settings set alerts.email=$NOTIFY_EMAIL --yes" ;;
+        esac
+        unset _saved_to
+    fi
 else
     FIRST_TIME_SETUP=1
     cat > "$ALERT_CONF" <<EOF
@@ -6684,8 +6721,9 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
         && log "capacity-guard cron line present" \
         || warn "capacity-guard cron line MISSING -- the guard cannot run even when turned on"
 elif cron_block_adopt_line root "$CRON_HOST_BLOCK" "$GUARD_SCRIPT" "$GUARD_LINE" "$CRON_HOST_TAIL"; then
-    [ "${CRON_CHANGED:-0}" -eq 0 ] && log "capacity-guard cron line already in the '$CRON_HOST_BLOCK' block" \
-        || log "added capacity-guard cron line: $GUARD_LINE"
+    if [ "${CRON_CHANGED:-0}" -eq 0 ]; then log "capacity-guard cron line already in the '$CRON_HOST_BLOCK' block"
+    elif [ "${CRON_ADOPTED:-0}" -gt 0 ]; then log "moved capacity-guard cron line into the '$CRON_HOST_BLOCK' block (schedule unchanged)"
+    else log "added capacity-guard cron line: $GUARD_LINE"; fi
 else
     warn "could not install the capacity-guard cron line: $CRON_ERR"
 fi
@@ -6704,8 +6742,9 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
         && log "growth-guard cron line present" \
         || warn "growth-guard cron line MISSING -- the growth alarm cannot run even when turned on"
 elif cron_block_adopt_line root "$CRON_HOST_BLOCK" "$GROWTH_SCRIPT" "$GROWTH_LINE" "$CRON_HOST_TAIL"; then
-    [ "${CRON_CHANGED:-0}" -eq 0 ] && log "growth-guard cron line already in the '$CRON_HOST_BLOCK' block" \
-        || log "added growth-guard cron line: $GROWTH_LINE"
+    if [ "${CRON_CHANGED:-0}" -eq 0 ]; then log "growth-guard cron line already in the '$CRON_HOST_BLOCK' block"
+    elif [ "${CRON_ADOPTED:-0}" -gt 0 ]; then log "moved growth-guard cron line into the '$CRON_HOST_BLOCK' block (schedule unchanged)"
+    else log "added growth-guard cron line: $GROWTH_LINE"; fi
 else
     warn "could not install the growth-guard cron line: $CRON_ERR"
 fi
@@ -8243,6 +8282,8 @@ do_unpair() {
         fi
         echo "  # remove the manifest created there by --join"
         echo "  rm -f $(peer_manifest_path "$my_label")"
+        echo "  # remove the pair-gate state directory created there by --join (only when empty, as --leave does)"
+        echo "  rmdir $PAIR_GATE_STATE_DIR/$my_label"
     elif [ "${PEER_SAVED_ROLE:-pull}" = pull ]; then
         # REV-20260804-039 F3: this used to print a manual "zfs unallow ...;
         # userdel" pair here, bounded by PEER_SAVED_DATASETS -- the PAIRING-
@@ -8267,6 +8308,11 @@ do_unpair() {
         echo "  userdel -r $remote_user"
         echo "  # 3. remove the manifest created there by --join"
         echo "  rm -f $(peer_manifest_path "$my_label")"
+        # #44 (lab pve10 2026-11-26): --join also creates the pair-gate state directory;
+        # it stayed behind. rmdir, not rm -rf: a non-empty one holds live state (a
+        # disable or pause marker), and --leave refuses to delete that silently too.
+        echo "  # 4. remove the pair-gate state directory created there by --join (only when empty, as --leave does)"
+        echo "  rmdir $PAIR_GATE_STATE_DIR/$my_label"
     fi
     echo ">>> ===================================================================="
     echo ">>> The key of host $PEER_HOST stays in /root/.ssh/known_hosts -- it is our"
