@@ -228,9 +228,9 @@ only while its pool is imported, so the number of runs **is** the exposure.
   an unstamped snapshot is never touched, and a failed destroy is a warning, not a failed run. With an explicit
   `history = all` or `auto:N` nothing is pruned on the collector;
 - **`--passive`**: no snapshots of its own; it carries the ones already there, so the disk holds the state of the
-  newest of them. The first copy of such a mirror carries the history: the oldest eligible snapshot in full, then
-  every later one up to the newest. A replica made before that keeps what it has; only F6, Enter, `e`, "Start over
-  on this disk (full copy)" fills it in. A passive replica skips snapshot families like a relation does:
+  newest of them. The first copy of such a mirror is the newest eligible snapshot in full, then increments forward:
+  the whole history from the first copy, without the collector's older snapshots (starting at the oldest kept busy
+  the snapshot retention destroys next -- pve0, 2026-11-27). A passive replica skips snapshot families like a relation does:
   `--exclude-family=A,B` (letters, digits, `_ . : -`) gives it the same `-E`; the wizard sets
   `__replicate_,vzdump,__migration__` for a passive replica that has none, so the copy stands on the tool's own
   snapshots, not on the ones Proxmox replication renames every few hours. `list-replicas --json` shows the list

@@ -8567,7 +8567,11 @@ cmd_install_media_trigger() {
 # before RUN+=, and systemd-udevd logged "90-zfs-replica.rules:10 Invalid key/value pair,
 # ignoring" -- the whole rule dropped, so on-insert never fired. A rule that is
 # one physical line cannot be joined wrongly.
-ACTION=="add", SUBSYSTEM=="block", ENV{ID_FS_TYPE}=="zfs_member", RUN+="$(command -v systemd-run) --no-block --collect --unit=zfs-replica-insert-%k --setenv=HOME=/root $SCRIPT_DIR/zfs-backup.sh run-replicas --on-insert --device=%k --config=$config"
+#
+# KERNEL!="zd*" (#30): a zvol whose guest put a ZFS pool inside it is a zfs_member
+# block device too. pve2 2026-11-09: a new VM disk zd400p1 started run-replicas, which
+# waited 60 s and then (correctly) refused it. A replica disk is never a zvol.
+ACTION=="add", SUBSYSTEM=="block", KERNEL!="zd*", ENV{ID_FS_TYPE}=="zfs_member", RUN+="$(command -v systemd-run) --no-block --collect --unit=zfs-replica-insert-%k --setenv=HOME=/root $SCRIPT_DIR/zfs-backup.sh run-replicas --on-insert --device=%k --config=$config"
 EOF
 )"
     echo ">>> rule to be written to $rules:"
@@ -8632,6 +8636,18 @@ check_family_list() {   # <verb> <list>
         esac
     done
     return 0
+}
+
+# pvesr_targets_under <dataset> <recursive 0|1> -> the datasets (one per line) that hold
+# __replicate_ snapshots, i.e. Proxmox replication targets (#46). The same test as the
+# engines' is_pvesr_managed (lib-zfs-snap.sh, not sourced here), over a whole subtree.
+pvesr_targets_under() {
+    # REV-20261127-B01 F1: -d 1 for a non-recursive source, as is_pvesr_managed does. Measured
+    # on OpenZFS 2.1.11 (pve9, pve9b): without -r or -d, `zfs list -t snapshot <ds>` already
+    # lists that dataset's own snapshots, the same count as -d 1; -d 1 states it explicitly.
+    local r=(-d 1)
+    [ "$2" = 1 ] && r=(-r)
+    zfs list -H -t snapshot -o name "${r[@]}" "$1" 2>/dev/null | sed -n 's/@__replicate_.*//p' | sort -u
 }
 
 cmd_add_replica() {   # <name> --source=DS [--source=DS2 ...] --dst=POOL/BASE [...]
@@ -8792,6 +8808,23 @@ cmd_add_replica() {   # <name> --source=DS [--source=DS2 ...] --dst=POOL/BASE [.
         zfs list -H -o name "$_s2" >/dev/null 2>&1 \
             || die "add-replica: '$_s2' is not a dataset on this host. A replica copies what this machine already holds."
     done
+
+    # #46 (pve0 2026-11-27): a source that is a Proxmox replication (pvesr) TARGET is
+    # received with `zfs recv -F`, which must destroy snapshots its source has pruned. A
+    # copy to a slow disk keeps the snapshots it sends busy for hours or days; pvesr then
+    # fails every run until the copy ends (pve0: 100-0 stood for a day). Such a dataset
+    # is usually on the medium already through the relationship that pulls the guest.
+    # Said, not refused (an admin tool): which datasets, and how to leave them out.
+    local _pv="" _pd _px _pskip
+    for _s2 in "${sources[@]}"; do
+        while IFS= read -r _pd; do
+            [ -n "$_pd" ] || continue
+            _pskip=0
+            for _px in ${xchild[@]+"${xchild[@]}"}; do grep -Eq -- "$_px" <<<"$_pd" && { _pskip=1; break; }; done
+            [ "$_pskip" -eq 1 ] || _pv="$_pv $_pd"
+        done < <(pvesr_targets_under "$_s2" "$rec")
+    done
+    [ -z "$_pv" ] || warn "a Proxmox replication (pvesr) target is in this replica:$_pv. pvesr receives there with 'zfs recv -F', and while this replica's copy of it runs -- hours or days on a USB disk -- pvesr fails every run (pve0, 2026-11-27). Leave it out with --exclude-child=<pattern> (it is usually on the medium already through the relationship that pulls the guest), or accept that pvesr waits for the copy."
 
     # AN ENCRYPTED DATASET WITHOUT ITS KEY GOES ONLY RAW (tutorial lab, 2026-11-17).
     # A plain `zfs send` of it fails with "dataset key must be loaded", so a replica

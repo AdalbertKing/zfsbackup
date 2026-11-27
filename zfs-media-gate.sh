@@ -371,7 +371,12 @@ if [ "$VERB" = age ]; then
         _rtxt="a copy is running since $(running_since "$_run") ($(( _ra / 86400 ))d$(( (_ra % 86400) / 3600 ))h, pid ${_run%% *})"
         _pd="${ZFS_PROGRESS_DIR:-/var/lib/zfs-snapshot-all/progress}"
         _recs=$(cat "$_pd"/*.json 2>/dev/null | grep '"state":"running"' | grep -F -e "\"target\":\"$POOL/" -e "\"target\":\"$POOL\"")
-        _sig=$(printf '%s\n' "$_recs" | sed -n 's/.*"target":"\([^"]*\)".*"done_bytes":\([0-9]*\).*/\1 \2/p' | sort | cksum | tr ' ' '-')
+        # wire_bytes counts too (#49, pve0 2026-11-27): `zfs send -v -P` stops printing its
+        # count for good once the snapshot it sends is renamed under it (pvesr recv -F made
+        # it @recv-<pid>-N at 06:01:46), so done_bytes froze at 12.7G for hours while
+        # mbuffer's own count (wire_bytes) went on to 70G -- "STALLED" on a moving copy.
+        # Either counter moving is movement; -1 (unmeasurable) is constant and adds nothing.
+        _sig=$(printf '%s\n' "$_recs" | sed -n 's/.*"target":"\([^"]*\)".*"wire_bytes":\([0-9-]*\).*"done_bytes":\([0-9]*\).*/\1 \2 \3/p' | sort | cksum | tr ' ' '-')
         _prog=$(printf '%s\n' "$_recs" | sed -n 's/.*"target":"\([^"]*\)".*"total_bytes":\([0-9-]*\),"done_bytes":\([0-9]*\),"rate_bps":\([0-9-]*\),"eta_seconds":\([0-9-]*\).*/\1 \2 \3 \4 \5/p' | tail -1)
         _ptxt=""
         if [ -n "$_prog" ]; then
@@ -385,7 +390,10 @@ if [ "$VERB" = age ]; then
             [ "$5" -gt 0 ] 2>/dev/null && _ptxt="$_ptxt, dataset ends ~$(date -d "@$(( _now + $5 ))" '+%Y-%m-%d %H:%M' 2>/dev/null)"
         fi
         _ff="$STATE_DIR/$LABEL.flow"; _fp=""; _ft=""; _fs=""
-        read -r _fp _ft _fs < "$_ff" 2>/dev/null || :
+        # 2>/dev/null BEFORE the input redirection: redirections apply left to right, so the
+        # other order printed "weekly-rotate.flow: No such file or directory" into cron.log on
+        # the first run after an update (a third firm's pve1, 2026-11-25).
+        read -r _fp _ft _fs 2>/dev/null < "$_ff" || :
         if [ "$_fp" != "${_run%% *}" ] || [ "$_fs" != "$_sig" ] || ! [ "${_ft:-x}" -gt 0 ] 2>/dev/null; then
             _ft=$_now
             { mkdir -p "$STATE_DIR" && printf '%s %s %s\n' "${_run%% *}" "$_now" "$_sig" > "$_ff"; } 2>/dev/null || :

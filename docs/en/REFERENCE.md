@@ -223,9 +223,11 @@ another pool, usually a disk that gets unplugged. Every run is bracketed by `zfs
   skips by design. `--exclude-family=A,B` (with `--passive`) gives it the same `-E` exclusions a
   relationship has; the replica wizard sets `__replicate_,vzdump,__migration__` for a passive replica
   that has none. `list-replicas --json` shows the list as `exclude_family`. The first copy of a mirror
-  replica (`snapget.sh -e -M`) sends the oldest eligible snapshot in full and then every later one up
-  to the newest; a replica made earlier keeps what it has, and only "Start over on this disk (full copy)" (F6,
-  Enter, `e`; verb `replica-restart`) fills it in. `-i` and `-H` keep their own rules.
+  replica (`snapget.sh -e -M`) sends the NEWEST eligible snapshot in full, then increments forward: the
+  history on the disk starts at the first copy and does not include the collector's older snapshots.
+  From 2026-11-07 to 1.0.31 it started at the oldest -- the one retention destroys next; a full copy to
+  USB takes days and kept it busy, and pvesr and the collector's prune failed (pve0, 2026-11-27).
+  `-i` and `-H` keep their own rules.
 
 ## Core concepts
 

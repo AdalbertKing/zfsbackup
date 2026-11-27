@@ -564,6 +564,7 @@
 "BŁĄD rc=%s": "ERROR rc=%s",
 "Błąd": "Error",
 "Cała historia -- migawki, które już są (wrócisz do wczoraj, tydzień temu…); więcej miejsca": "Full history -- the snapshots that already exist (go back to yesterday, a week ago…); more space",
+"Cała historia od pierwszej kopii -- migawki kolektora (wrócisz do wczoraj, tydzień temu…); więcej miejsca": "Full history from the first copy -- the collector's snapshots (go back to yesterday, a week ago…); more space",
 "Cel": "Target",
 "Cel kopii %s pominięty automatycznie.": "Copy target %s skipped automatically.",
 "Cel nakłada się na źródło": "Target overlaps the source",

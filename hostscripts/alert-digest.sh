@@ -1166,12 +1166,13 @@ relations_render() {
         timeout --foreground 300 "$zb" monitor --json > "$DG_RD/monitor.json" 2>/dev/null
     fi
     printf '%s\n' "$SKIP_ROWS" > "$DG_RD/skip.tsv"
+    DG_IP="$(hostname -I 2>/dev/null | awk '{print $1}')" \
     DG_HOST="$HOST" DG_SITE="${ZFS_ALERT_SITE:-}" DG_LABEL="$(zfs_mail_host)" DG_SENDER="$(zfs_mail_sender)" DG_DAYS="$DIGEST_DAYS" DG_QUEUE="$PROCESSING" DG_QUIET="${QUIET:-0}" \
     DG_QUIET_WHEN="$QUIET_WHEN" DG_TO="${ZFS_ALERT_EMAIL:-root}" DG_FROM="$(id -un 2>/dev/null || echo root)@$HOST" \
     DG_LOGS="${CRON_LOGS# }" DG_WINDOW="${RUN_WINDOW:-}" DG_RD="$DG_RD" python3 - <<'PYEOF'
 import os, re, json, html, time, gzip, textwrap
 from email.message import EmailMessage
-from email.utils import formatdate
+from email.utils import formatdate, formataddr
 
 E = os.environ
 RD = E["DG_RD"]
@@ -1612,6 +1613,25 @@ for ln in rd("pools.tsv").splitlines():
         if f[1] != "ONLINE" or cap >= 80:
             todo.append((10, "pula " + f[0], u"%s, zajęte %s" % (f[1], f[2]), [],
                          u"sprawdź: zpool status %s" % f[0]))
+# #51 (a field host, 2026-11-27): an ALARM that is not a job's failure -- growth-guard's
+# "PODEJRZANY PRZYROST" (suspected ransomware), a capacity guard -- reached only the
+# attachment's Zdarzenia, while the body said "0 błędów" and the subject counted relations.
+# Such an alarm is no relation's and no cron job's ("pve0: PODEJRZANY PRZYROST ... (możliwe
+# szyfrowanie)" -- parse_label still reads a task out of it): first in DO ZROBIENIA, and the
+# subject says [ALERT]. A job's own failure stays with its relation or job, as before.
+alarms = {}
+for ep, sev, job, det in events:
+    if sev != "ALERT":
+        continue
+    relname, task, _b, _s = parse_label(job)
+    if relname is None and re.sub(r"^\S+ (?=profile__)", "", job) not in jobs:
+        alarms[task] = (ep, det)        # one line per alarm text, the latest occurrence
+for task, (ep, det) in alarms.items():
+    try:
+        t = time.strftime("%d.%m %H:%M", time.localtime(int(ep)))
+    except ValueError:
+        t = ep
+    todo.append((11, u"ALARM " + t, task, wrap("", pl_line(det[-1]), 75) if det else [], u""))
 todo.sort(key=lambda t: (-t[0], t[1]))
 
 order = sorted(rels.values(), key=lambda x: (-x["rank"], x["name"]))
@@ -1619,20 +1639,29 @@ N = len(order)
 K = sum(1 for x in order if x["rank"] >= 5)
 pool_bad = [p for p in pools if p[1] != "ONLINE" or int(re.sub(r"\D", "", p[2]) or 0) >= 80]
 day = time.strftime("%d.%m", NOW)
-if K == 0 and not pool_bad:
-    subj = u"[ZFS][REPORT] %s %s: OK, %d %s" % (LABEL, day, N, plural(N, "relacja", "relacje", "relacji"))
+tag = u"[ZFS][ALERT]" if alarms else u"[ZFS][REPORT]"
+if K == 0 and not pool_bad and not alarms:
+    subj = u"%s %s %s: OK, %d %s" % (tag, LABEL, day, N, plural(N, "relacja", "relacje", "relacji"))
 else:
     parts = []
+    if alarms:
+        parts.append(u"ALARM: %s" % ("; ".join(alarms) if len(alarms) == 1 else u"%d %s" % (len(alarms), plural(len(alarms), "alarm", "alarmy", u"alarmów"))))
     if K:
         parts.append(u"%d z %d relacji wymaga uwagi" % (K, N))
     for p in pool_bad:
         parts.append("pula %s %s %s" % (p[0], p[1], p[2]))
-    subj = u"[ZFS][REPORT] %s %s: %s" % (LABEL, day, ", ".join(parts))
+    subj = u"%s %s %s: %s" % (tag, LABEL, day, ", ".join(parts))
 if E.get("DG_QUIET") == "1":
     subj += u" (raport okresowy)"
 
 # --- text body, 78 columns ---
 out = []
+# #50 (a field host, 2026-11-27): a mail client may show neither the sender nor the whole
+# subject, so the body's first line says whose report this is: firm, full host, address.
+_site = E.get("DG_SITE") or ""
+if not re.match(r"^[A-Za-z0-9._-]+$", _site) or _site == "-":
+    _site = u"[BEZ FIRMY]"
+out.append(u"Firma: %s -- host: %s%s" % (_site, HOST, (" (%s)" % E["DG_IP"]) if E.get("DG_IP") else ""))
 out.append(u"%s  %s   pule: %s" % (LABEL, time.strftime("%Y-%m-%d %H:%M", NOW),
            "   ".join("%s %s %s" % tuple(p) for p in pools) or "brak"))
 out.append("")
@@ -1761,7 +1790,9 @@ tr.ds td{color:%(dim)s}td.o{text-align:left;white-space:normal}
 
 msg = EmailMessage()
 msg["Subject"] = subj
-msg["From"] = "zfs-backup %s <%s>" % (E.get("DG_SENDER") or HOST, E.get("DG_FROM", "root"))   # full name (2026-11-25); Python quotes the dotted display name
+# full name (2026-11-25). formataddr quotes the display name: "[BEZ FIRMY]" (#50) unquoted
+# is a domain literal to the parser, and the From header read back as "zfs-backup" alone.
+msg["From"] = formataddr(("zfs-backup %s" % (E.get("DG_SENDER") or HOST), E.get("DG_FROM", "root")))
 msg["To"] = E.get("DG_TO", "root")
 msg["Date"] = formatdate(localtime=True)
 msg.set_content(body)

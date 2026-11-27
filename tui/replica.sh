@@ -256,7 +256,7 @@ replica_engine() {   # 0 = coś zmienione (ARGV zbuduje krok 6), 1 = Wstecz bez 
             mig)
                 wt --title "$(T 'Migawki')" --ok-button "$(T Wybierz)" --cancel-button "$(T Wstecz)" --notags --default-item "$([ "$p_pas" = yes ] && echo passive || echo own)" \
                    --menu "$(T 'Jakie migawki ma przenosić replika?')\n\n$(T 'Pasywnie = istniejące migawki źródła: idzie stan z ostatniej z nich, nie bieżący; dataset bez migawek nie jest kopiowany.')" 13 "$W" 2 \
-                   passive "$(T 'Cała historia -- migawki, które już są (wrócisz do wczoraj, tydzień temu…); więcej miejsca')" \
+                   passive "$(T 'Cała historia od pierwszej kopii -- migawki kolektora (wrócisz do wczoraj, tydzień temu…); więcej miejsca')" \
                    own "$(T 'Tylko stan na chwilę kopii -- jedna migawka replica_ na dysku; najmniej miejsca')" || continue
                 [ "$WT_OUT" = passive ] && { p_pas=yes; p_keep=""; p_h=all; } || p_pas=no ;;
             hist)
@@ -509,7 +509,7 @@ PYEOF
         lead=""; covers_landing && lead="$(T 'Źródło obejmuje kopie relacji tego kolektora.\n\n')"
         wt --title "$(rtitle 3 "$(T 'migawki')")" --ok-button "$(T Dalej)" --cancel-button "$(T Wstecz)" --notags --default-item "$def" \
            --menu "${lead}$(T 'Jakie migawki ma przenosić replika?')\n\n$(T 'Pasywnie = istniejące migawki źródła: idzie stan z ostatniej z nich, nie bieżący; dataset bez migawek nie jest kopiowany.')" "$(fit 12)" "$W" 2 \
-           passive "$(T 'Cała historia -- migawki, które już są (wrócisz do wczoraj, tydzień temu…); więcej miejsca')" \
+           passive "$(T 'Cała historia od pierwszej kopii -- migawki kolektora (wrócisz do wczoraj, tydzień temu…); więcej miejsca')" \
            own "$(T 'Tylko stan na chwilę kopii -- jedna migawka replica_ na dysku; najmniej miejsca')" || { step=2; continue; }
         [ "$WT_OUT" = passive ] && PASSIVE=yes || PASSIVE=no
         [ "$PASSIVE" = yes ] && { KEEP=""; step=3; continue; }

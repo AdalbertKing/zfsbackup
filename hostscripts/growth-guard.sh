@@ -257,10 +257,15 @@ while IFS=$'\t' read -r dsn comp uh so lbl; do
     # być i tu, i na źródle).
     ds="${uh:+$uh:}$dsn"
     if [ "$comp" = off ]; then [ "$PLAN" -eq 1 ] && echo "$ds: pominięty -- compression=off (każdy przyrost wyglądałby na niekompresowalny)"; continue; fi
-    if ! Z list -H -p -t snapshot -o name,guid,creation -s creation -d 1 "$dsn" > "$WORK/s" 2>"$WORK/e"; then
+    # logicalreferenced (#52, a third firm's field report 2026-11-27): its change over a pair says whether the
+    # increment is NEW data (an install: +832 MiB of 1890 MiB written) or rewritten data
+    # (ordinary work, ~0; in-place encryption would be too -- their reading, untested).
+    # Measured and SHOWN only; the rule is unchanged. A 4th column the listing may lack
+    # (or "-") means "not measured", never 0.
+    if ! Z list -H -p -t snapshot -o name,guid,creation,logicalreferenced -s creation -d 1 "$dsn" > "$WORK/s" 2>"$WORK/e"; then
         err "zfs list migawek $ds: $(head -1 "$WORK/e")"; continue
     fi
-    if awk -F'\t' 'NF != 3 || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ { bad = 1 } END { exit !bad }' "$WORK/s"; then
+    if awk -F'\t' 'NF < 3 || NF > 4 || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || (NF == 4 && $4 !~ /^([0-9]+|-)$/) { bad = 1 } END { exit !bad }' "$WORK/s"; then
         err "zły wiersz migawki w $ds"; continue
     fi
     newest="$(tail -1 "$WORK/s" | cut -f3)"
@@ -272,9 +277,9 @@ while IFS=$'\t' read -r dsn comp uh so lbl; do
     # dają pary o różnych odstępach -- stąd tempo, nie sam rozmiar). Plik: koniec, guid
     # końca, L, C, tempo.
     : > "$WORK/p"; failed=0; prev=""
-    while IFS=$'\t' read -r n g c; do
+    while IFS=$'\t' read -r n g c lr; do
         if [ -n "$prev" ]; then
-            IFS=$'\t' read -r pn pg pc <<< "$prev"
+            IFS=$'\t' read -r pn pg pc plr <<< "$prev"
             key="$pg-$g"
             hit="$(awk -v k="$key" '$1 == k { print $2 "\t" $3; exit }' "$STATE/cache" 2>/dev/null)"
             if [ -n "$hit" ]; then L="${hit%%$'\t'*}"; C="${hit##*$'\t'}"
@@ -284,9 +289,11 @@ while IFS=$'\t' read -r dsn comp uh so lbl; do
                 [ "$PLAN" -eq 1 ] || printf '%s\t%s\t%s\n' "$key" "$L" "$C" >> "$STATE/cache"
             fi
             dt=$((c - pc)); [ "$dt" -ge 1 ] || dt=1
-            printf '%s\t%s\t%s\t%s\t%s\n' "$n" "$g" "$L" "$C" "$((L / dt))" >> "$WORK/p"
+            dlr=-
+            case "$lr$plr" in ''|*[!0-9]*) ;; *) [ -n "$lr" ] && [ -n "$plr" ] && dlr=$((lr - plr)) ;; esac
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$g" "$L" "$C" "$((L / dt))" "$dlr" >> "$WORK/p"
         fi
-        prev="$n	$g	$c"
+        prev="$n	$g	$c	$lr"
     done < "$WORK/w"
     [ "$failed" -eq 0 ] || continue
     # KAŻDA para, której strażnik jeszcze nie ocenił (nie tylko najnowsza): w godzinę mogą
@@ -296,7 +303,7 @@ while IFS=$'\t' read -r dsn comp uh so lbl; do
     init=1; grep -qxF "init	$ds" "$STATE/seen" 2>/dev/null || init=0
     npairs=$(grep -c . "$WORK/p")
     i=0; shown=0
-    while IFS=$'\t' read -r bn bg L C rate; do
+    while IFS=$'\t' read -r bn bg L C rate dlr; do
         i=$((i + 1))
         [ "$i" -ge 4 ] || continue                                   # potrzeba 3 par historii
         if [ "$init" -eq 0 ] && [ "$i" -lt "$npairs" ]; then
@@ -312,6 +319,16 @@ while IFS=$'\t' read -r dsn comp uh so lbl; do
         if [ "$med" -gt 0 ]; then fast=$(( rate >= FACTOR * med )); else fast=$(( rate > 0 )); fi
         if [ "$L" -ge $((MINMIB * 1048576)) ] && [ "$rpct" -le "$MAXR" ] && [ "$fast" -eq 1 ]; then hot=1; fi
         line="$ds${lbl:+ (relacja $lbl)}: przyrost ${mib} MiB (do $bn), tempo ${times}x normy, kompresja przyrostu ${ratio}"
+        # #52 etap 5: the measure and a word for it, the alarm rule unchanged. 40 % is the
+        # field report's proposed threshold (their replay: the Copilot update 43 %, ordinary
+        # hours about 0); here it only chooses the words.
+        case "$dlr" in
+            -|'') ;;
+            *)  if [ "$L" -gt 0 ]; then dpct=$(( dlr * 100 / L )); else dpct=0; fi
+                line="$line, dane logiczne $([ "$dlr" -ge 0 ] && echo +)$(( dlr / 1048576 )) MiB (${dpct}% przyrostu)"
+                [ "$dpct" -ge 40 ] && line="$line -- w większości NOWE dane (tak wygląda instalacja/aktualizacja)"
+                [ "$dpct" -lt 40 ] && [ "$dpct" -gt -40 ] && line="$line -- dane nadpisane w miejscu" ;;
+        esac
         shown=1
         if [ "$hot" -eq 1 ]; then
             # Para z alarmem trafia do seen dopiero po wysłanym alercie (niżej).

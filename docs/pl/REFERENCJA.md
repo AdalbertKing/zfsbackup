@@ -226,10 +226,11 @@ pulę, zwykle na dysk, który się wypina. Każdy przebieg jest objęty klamrą 
   założenia nigdy nie pomija. `--exclude-family=A,B` (z `--passive`) daje jej te same wykluczenia `-E`
   co relacji; kreator repliki ustawia `__replicate_,vzdump,__migration__` dla repliki pasywnej, która
   ich nie ma. `list-replicas --json` pokazuje tę listę jako `exclude_family`. Pierwsza kopia repliki
-  lustrzanej (`snapget.sh -e -M`) wysyła najstarszą kwalifikującą się migawkę w całości, a potem każdą
-  następną aż do najnowszej; replika zrobiona wcześniej zachowuje to, co ma, a uzupełnia ją tylko
-  „Zacznij od nowa na tym dysku (pełna kopia)” (F6, Enter, `e`; czasownik `replica-restart`). `-i` i
-  `-H` mają własne reguły.
+  lustrzanej (`snapget.sh -e -M`) wysyła w całości NAJNOWSZĄ kwalifikującą się migawkę, potem
+  przyrosty do przodu: historia na dysku zaczyna się od pierwszej kopii, nie obejmuje starszych migawek
+  kolektora. Od 2026-11-07 do 1.0.31 startowała od najstarszej -- tej, którą retencja kasuje jako
+  następną; pełna kopia na USB trwa doby i trzymała ją zajętą, a pvesr i prune kolektora padały
+  (pve0, 2026-11-27). `-i` i `-H` mają własne reguły.
 
 ## Podstawowe pojęcia
 

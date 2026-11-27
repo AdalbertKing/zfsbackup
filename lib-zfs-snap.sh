@@ -241,15 +241,33 @@ progress_watch() {   # <errfile> <dataset> <target> <peer> <direction> <mode> <b
         exec 200>&- 2>/dev/null || true
         local total=0 done_b=0 started prev_b=0 prev_t rate=0 eta=-1 now line
         started=$(date +%s); prev_t=$started
+        local -A ssize=()
+        local cur_snap cur_b base_b f1 f2 f3 f4
         while :; do
-            [ -s "$errfile" ] && while IFS= read -r line; do
-                case "$line" in
-                    "size"$'\t'*)      total=${line##*$(printf "\t")} ;;
-                    [0-9][0-9]:[0-9][0-9]:[0-9][0-9]$'\t'*)
-                        line=${line#*$(printf "\t")}
-                        done_b=${line%%$(printf "\t")*} ;;
+            # #31 (pve0 2026-11-25): `zfs send -I` carries many snapshots, and -v -P counts
+            # each one from zero ("HH:MM:SS <bytes> <ds@snap>"), so done_bytes fell from
+            # 54.2G to 13.7G within one run while total_bytes was the whole stream. The
+            # header lists every stream with its size ("incremental <from> <ds@to> <size>",
+            # "full <ds@snap> <size>"); a finished snapshot counts with that size (its last
+            # tick can be short of it), the running one with its own count.
+            ssize=(); cur_snap=""; cur_b=0; base_b=0
+            [ -s "$errfile" ] && while IFS=$'\t' read -r f1 f2 f3 f4; do
+                case "$f1" in
+                    size)        total=$f2 ;;
+                    incremental) ssize["$f3"]=$f4 ;;
+                    full)        ssize["$f2"]=$f3 ;;
+                    [0-9][0-9]:[0-9][0-9]:[0-9][0-9])
+                        if [ -n "$cur_snap" ] && [ "$f3" != "$cur_snap" ]; then
+                            case "${ssize["$cur_snap"]:-}" in
+                                ''|*[!0-9]*) base_b=$(( base_b + cur_b )) ;;
+                                *)           base_b=$(( base_b + ${ssize["$cur_snap"]} )) ;;
+                            esac
+                        fi
+                        cur_snap=$f3
+                        case "$f2" in ''|*[!0-9]*) ;; *) cur_b=$f2 ;; esac ;;
                 esac
             done < "$errfile"
+            done_b=$(( base_b + cur_b ))
             case "$total" in ''|*[!0-9]*) total=0 ;; esac
             # Bytes that actually crossed the link, read from mbuffer's own log
             # (-l). Distinct from done_bytes on purpose: done_bytes is what

@@ -6345,7 +6345,7 @@ if [ "$CHECK_ONLY" -eq 0 ] && [ -x "${REPO_DIR:-}/zfs-backup.sh" ]; then
         esac
     else
         _site=$("$REPO_DIR/zfs-backup.sh" settings get alerts.site 2>/dev/null | tail -1)
-        case "$_site" in ''|-) warn "no installation name for mails: they say only the host name. Set it: --site=FIRM, or zfs-backup settings set alerts.site FIRM (F10)" ;; esac
+        case "$_site" in ''|-) warn "no installation name for mails: every subject and sender says '[BEZ FIRMY] <host>' until it is set. Set it: --site=FIRM, or zfs-backup settings set alerts.site FIRM (F10)" ;; esac
     fi
 fi
 

@@ -388,6 +388,39 @@ is_held_by_us() {
     [[ "$tags" == *"$HOLD_TAG"* ]]
 }
 
+# #47 (lab pve9b 2026-11-27): a snapshot that a `zfs send` is reading cannot be
+# destroyed -- "dataset is busy", with no hold on it. Measured: a full send pins its
+# snapshot, and `-I a..b` pins a, b and every snapshot between them, for the whole
+# stream; a replica's first copy to USB runs for days, so the collector's prune failed
+# rc 1 every run. Measured again (pve9b, same day): a full send places no hold, while
+# libzfs's `-I` places its own temporary holds tagged ".send-<pid>-<n>" on the range
+# (gone when the send ends). Busy with no hold, or with only such send holds, is in use,
+# not refused: skipped with a line, rc 0, reconsidered next run. Any other hold
+# (someone else's), a permission error or a clone stays an error, as before.
+# True = deferred (caller counts it as kept).
+deferred_busy() {   # <snapshot> <zfs stderr> <ruser> <rhost>
+    local snap="$1" err="$2" ruser="$3" rhost="$4" holds
+    case "$err" in *"dataset is busy"*) ;; *) return 1 ;; esac
+    # REV-20261127-B01 F2: -F is `destroy -R`, which also destroys dependent clones AND, measured
+    # on OpenZFS 2.1.11 (pve9b), the same-named snapshots of descendant datasets -- the busy
+    # dataset may be a clone (a send reading the clone's snapshot, a zvol in use) or a child's
+    # snapshot, not this one. Under -F: any clone on this snapshot or a same-named descendant
+    # snapshot -> never deferred; the holds read below cover the descendants too (-r).
+    local hr=()
+    if [ "$CLEARCUT" = true ]; then
+        local cl
+        hr=(-r)
+        cl=$(run_zfs "$ruser" "$rhost" list -H -r -t snapshot -o name,clones "${snap%@*}" 2>/dev/null) || return 1
+        printf '%s\n' "$cl" | awk -F'\t' -v s="@${snap#*@}" \
+            'substr($1, length($1) - length(s) + 1) == s && $2 != "" && $2 != "-" { c = 1 } END { exit c }' || return 1
+    fi
+    holds=$(run_zfs "$ruser" "$rhost" holds -H ${hr[@]+"${hr[@]}"} "$snap" 2>/dev/null) || return 1
+    # `zfs holds -H`: "<snapshot> TAB <tag> TAB <time>"; any tag not .send-* -> not ours to defer
+    printf '%s\n' "$holds" | awk -F'\t' 'NF && $2 !~ /^\.send-[0-9]+-[0-9]+$/ { other = 1 } END { exit other }' || return 1
+    echo "Skipping snapshot (in use by a running zfs send; no other hold on it): ${snap} -- reconsidered next run" >&2
+    return 0
+}
+
 # Split a datasets-list entry into remote user/host/dataset. A remote entry is
 # "[user@]host:dataset" (user defaults to root); results come back via the
 # R_USER/R_HOST/R_DS globals (bash has no clean multi-value return).
@@ -653,6 +686,8 @@ delete_snapshots() {
                     if [ $? -eq 0 ]; then
                         [ -n "$destroy_err" ] && printf '%s\n' "$destroy_err" >&2
                         deleted_count=$((deleted_count + 1))
+                    elif deferred_busy "${snapshot}" "$destroy_err" "$ruser" "$rhost"; then
+                        kept_count=$((kept_count + 1))
                     else
                         printf '%s\n' "$destroy_err" >&2
                         echo "Error deleting snapshot: ${snapshot}" >&2
@@ -759,9 +794,14 @@ delete_snapshots() {
                 deleted_count=$((deleted_count + 1))
             else
                 echo "Deleting snapshot: ${snapshot}" >&2
-                if destroy_one "${snapshot}" "$ruser" "$rhost"; then
+                destroy_err=$(destroy_one "${snapshot}" "$ruser" "$rhost" 2>&1)
+                if [ $? -eq 0 ]; then
+                    [ -n "$destroy_err" ] && printf '%s\n' "$destroy_err" >&2
                     deleted_count=$((deleted_count + 1))
+                elif deferred_busy "${snapshot}" "$destroy_err" "$ruser" "$rhost"; then
+                    kept_count=$((kept_count + 1))
                 else
+                    printf '%s\n' "$destroy_err" >&2
                     echo "Error deleting snapshot: ${snapshot}" >&2
                     if [ "$CLEARCUT" = false ]; then
                         echo "  Hint: the snapshot may have dependent clones; a plain destroy refuses to remove those. Re-run with -F to clear-cut clones and descendants, or remove the clone manually first." >&2
@@ -813,6 +853,8 @@ delete_snapshots() {
                     if [ $? -eq 0 ]; then
                         [ -n "$destroy_err" ] && printf '%s\n' "$destroy_err" >&2
                         deleted_count=$((deleted_count + 1))
+                    elif deferred_busy "${snapshot}" "$destroy_err" "$ruser" "$rhost"; then
+                        kept_count=$((kept_count + 1))
                     else
                         printf '%s\n' "$destroy_err" >&2
                         echo "Error deleting snapshot: ${snapshot}" >&2

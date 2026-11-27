@@ -224,9 +224,9 @@ biegów **jest** ekspozycją.
   oznaczenia nigdy nie jest ruszana, a nieudane kasowanie to ostrzeżenie, nie nieudany bieg. Przy jawnym
   `history = all` albo `auto:N` na kolektorze nic nie jest kasowane;
 - **`--passive`**: bez własnych migawek; przenosi te, które już są, więc dysk ma stan z chwili najnowszej z nich.
-  Pierwsza kopia takiego odbicia niesie historię: najstarsza kwalifikująca się migawka w całości, potem każda
-  następna do najnowszej. Replika założona wcześniej zostaje przy tym, co ma; uzupełnia ją dopiero F6, Enter, `e`,
-  „Zacznij od nowa na tym dysku (pełna kopia)”. Replika pasywna pomija rodziny migawek jak relacja:
+  Pierwsza kopia takiego odbicia to najnowsza kwalifikująca się migawka w całości, potem przyrosty do przodu:
+  cała historia od pierwszej kopii, bez starszych migawek kolektora (start od najstarszej trzymał zajętą migawkę,
+  którą retencja kasuje jako następną -- pve0, 2026-11-27). Replika pasywna pomija rodziny migawek jak relacja:
   `--exclude-family=A,B` (litery, cyfry, `_ . : -`) daje jej to samo `-E`; kreator ustawia
   `__replicate_,vzdump,__migration__` pasywnej replice, która ich nie ma, żeby kopia stała na własnych migawkach
   narzędzia, a nie na tych, które replikacja Proxmoksa przemianowuje co kilka godzin. `list-replicas --json`

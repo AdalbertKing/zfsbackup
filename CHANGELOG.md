@@ -6,6 +6,31 @@ when they change how the tool is used.
 
 ## [Unreleased]
 
+## [1.0.32] — 2026-11-27
+
+- A passive replica's (mirror, `snapget.sh -e -M`) first copy starts at the NEWEST eligible
+  snapshot and grows forward: the history on the disk starts at the first copy. From the change of 2026-11-07 it
+  started at the oldest -- the one retention destroys next -- and a days-long first copy to a USB
+  disk kept it busy: the source's Proxmox replication (pvesr) failed every run, and the
+  collector's prune failed with "dataset is busy".
+- Prune (`delsnaps.sh`): a snapshot that a running `zfs send` keeps busy (no hold on it, or only
+  the send's own temporary `.send-*` holds) is skipped with a line and reconsidered next run
+  (rc 0), not an error. Any other hold, a permission error or a clone stays an error.
+- `add-replica` (and the replica wizard's plan) warns when a source holds a pvesr target and
+  says how to leave it out (`--exclude-child`).
+- Replica monitor: STALLED counts the bytes mbuffer moved as well, so a copy whose `zfs send`
+  stopped printing its count (its snapshot renamed under it) is not reported as stalled.
+- Progress of an `-I` stream counts the snapshots already sent instead of restarting at zero
+  for each one; percent and ETA are right.
+- The media trigger's udev rule leaves zvols (`zd*`) out; reinstall it with
+  `zfs-backup.sh install-media-trigger --install` to get the new rule.
+- Mail: without `alerts.site` every subject and sender says `[BEZ FIRMY] <full host>`; the daily
+  report's first line is `Firma: X -- host: Y (IP)`. An alarm of no job (growth guard,
+  capacity) is item 1 of DO ZROBIENIA and makes the report's subject `[ZFS][ALERT]`.
+- Growth guard: the alarm and `--plan` show the pair's logical-data change and whether the
+  increment is mostly new data (as an install, +40 % or more) or rewritten in place (between
+  -40 % and +40 %); below -40 % no hint. The alarm rule is unchanged.
+
 ## [1.0.31] — 2026-11-25
 
 - F2 and the relation's Tasks tab name a snapshot-only run by where the snapshot is taken:
