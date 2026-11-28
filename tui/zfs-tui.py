@@ -3460,7 +3460,7 @@ def render_zadania(data, rows, cursor, width, height, now, ch, message="", show_
             cells.append([(u"-- " if ch.ascii else u"\u2500\u2500 ") + _(u"teraz %s") % time.strftime("%H:%M", time.localtime(r["at"])), u" ", u" ", u" ", u" ", u" "])
         elif r["kind"] == "grp":
             it = r["item"]
-            cells.append([(u"> " if ch.ascii else u"\u25b8 ") + r["name"], it.get("dir") or u" ", u" ", _(u"błąd przebiegu") if r["bad"] else u" ", u" ", u" "])
+            cells.append([(u"> " if ch.ascii else u"► ") + r["name"], it.get("dir") or u" ", u" ", _(u"błąd przebiegu") if r["bad"] else u" ", u" ", u" "])
         else:
             it = r["item"]
             # Na jednej osi czasu Co mowi tez, KTORYCH datasetow (pve10: dwa 'ab lokalny prune
@@ -3469,7 +3469,7 @@ def render_zadania(data, rows, cursor, width, height, now, ch, message="", show_
                 (_(u"replika") if it.get("kind") == "replica" else (it.get("task") or u"-"))
             if r.get("agg"):
                 # U171: wiersz zbiorczy -- znacznik rozwiniecia i liczba datasetow
-                mk = (u"v " if ch.ascii else u"▾ ") if r.get("open") else (u"> " if ch.ascii else u"▸ ")
+                mk = (u"v " if ch.ascii else u"▼ ") if r.get("open") else (u"> " if ch.ascii else u"► ")
                 co = mk + u"%s: %s" % (u" ".join(x for x in (it.get("task"), it.get("tier")) if x), plural(len(r["agg"]), _(u"dataset"), _(u"datasety"), _(u"datasetów")))
             elif r.get("child"):
                 co = u"    " + u", ".join(run_dataset(j) for j in run_jobs(r))
@@ -3531,9 +3531,12 @@ def render_zadania(data, rows, cursor, width, height, now, ch, message="", show_
             + u"  " + _(u"Enter okno zadania  Tab źródło → cel")) if n_runs else         ((u"Ctrl-W " + (_(u"kolejka") if show_done else _(u"historia"))) if rows else "")
     # 2026-11-25: an empty history still has the "now" line -- without the hint the operator
     # has no way back to the queue shown on the frame.
+    # S2 (owner 2026-11-28): when four columns do not fit (80 columns), the relation gives way
+    # before "What" -- the panel title names the relation of the selected run. Grouped (Ctrl-G),
+    # column 1 is the task and the group header names the relation: it keeps its old rank.
     return render_tabbed(data, width, height, now, ch, "zadania", title,
                          [_(u"Kiedy"), _(u"Zadanie") if grouped else _(u"Relacja"), _(u"Co"), _(u"Wynik"), _(u"Czas"), _(u"Dane")], cells, cursor, foot,
-                         det_title, det, child, focus, pair_cursor, acts, empty, prio=[0, 1, 3, 2, 5, 4], flex=(2, 1), drop_first=True)
+                         det_title, det, child, focus, pair_cursor, acts, empty, prio=[0, 1, 3, 2, 5, 4] if grouped else [0, 3, 2, 1, 5, 4], flex=(2, 1), drop_first=True)
 
 
 def summarize(rows):
@@ -5322,7 +5325,7 @@ def render_kopie_tab(data, items, selix, cursor, focus, scur, snaps, snaps_err, 
         # pod nim jej kopie z wcieciem. Kursor chodzi po kopiach; ccur = jego wiersz w tabeli
         # (po przypietych liniach).
         if grouped and g is not None and g is not last_g:
-            cells.append([u"%s%s  %s  %s" % (u"> " if ch.ascii else u"▸ ", g["name"], g.get("typ") or u"", g.get("dir") or u""), u" ", u" "])
+            cells.append([u"%s%s  %s  %s" % (u"> " if ch.ascii else u"► ", g["name"], g.get("typ") or u"", g.get("dir") or u""), u" ", u" "])
             last_g = g
         if len(rows) == cursor:
             ccur = len(pinned) + len(cells)
@@ -5400,7 +5403,7 @@ def render_kopie(data, items, sel, focus, scur, snaps, snaps_err, width, height,
     lw = max(40, min(int(width * 0.42), width - 40))
     rw = width - lw
     linner, rinner = lw - 4, rw - 4
-    mark = ">" if ch.ascii else u"▸"
+    mark = ">" if ch.ascii else u"►"
     # lewy panel
     lines, cur_line = [], None
     for i, x in enumerate(items):

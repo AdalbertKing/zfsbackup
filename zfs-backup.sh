@@ -18479,16 +18479,23 @@ cmd_job_stats() {
     { if (nb < 400) buf[++nb] = $0 }
     # In progress: the newest open start, and only when no END of its line came after it --
     # a start a reboot killed stays on the stack and must not read as running for hours.
-    END { for (l in sp) if (sp[l] > 0 && bt[l, sp[l]] >= since && !(bt[l, sp[l]] < lastend[l])) printf "%s\t%s\t-\t-1\t-\n", l, bt[l, sp[l]] }')
+    # #33 (pve0 2026-11-25): an open start OLDER than the window, or older than a later END of
+    # its line (the media gate skip, rc 75, at every cron slot of a two-day first copy), is
+    # rc -3 here: a candidate that is running only while a live zfs-job.sh carries its label.
+    END { for (l in sp) if (sp[l] > 0) printf "%s\t%s\t-\t%d\t-\n", l, bt[l, sp[l]], (bt[l, sp[l]] >= since && !(bt[l, sp[l]] < lastend[l])) ? -1 : -3 }')
             # U167 (owner 2026-11-09): a stopped copy writes no END, and F2 showed it running for
             # good. An open start whose label no live zfs-job.sh process carries is INTERRUPTED,
             # rc -2. The BEGIN line has no pid (its format is a contract), the process list does.
-            if printf '%s\n' "$rl_rows" | grep_q "$(printf '\t')-1$(printf '\t')-\$"; then
-                local _live; _live=$(job_live_args) && rl_rows=$(printf '%s\n' "$rl_rows" | _JL="$_live" awk -F'\t' -v OFS='\t' '
+            # #33: a candidate (-3) with a live process is running (-1); without one -- or when
+            # the process list cannot be read -- it is dropped, as before #33.
+            if printf '%s\n' "$rl_rows" | grep_q "$(printf '\t')-[13]$(printf '\t')-\$"; then
+                local _live _lok=1; _live=$(job_live_args) || _lok=0
+                rl_rows=$(printf '%s\n' "$rl_rows" | _JL="$_live" awk -F'\t' -v OFS='\t' -v lok="$_lok" '
                     BEGIN { n = split(ENVIRON["_JL"], a, "\n")
                             # a row label starts after the host word (label() above, field 5 on)
                             for (i = 1; i <= n; i++) { on[a[i]] = 1; x = a[i]; if (sub(/^[^ ]+ /, "", x)) on[x] = 1 } }
-                    $4 == "-1" && !($1 in on) { $4 = "-2" } { print }')
+                    $4 == "-3" { if (lok && ($1 in on)) $4 = "-1"; else next }
+                    lok && $4 == "-1" && !($1 in on) { $4 = "-2" } { print }')
             fi
         fi
     fi

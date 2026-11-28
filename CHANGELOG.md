@@ -6,6 +6,15 @@ when they change how the tool is used.
 
 ## [Unreleased]
 
+## [1.0.35] — 2026-11-28
+
+- F2 shows a replica copy that has been running for longer than the runs window (#33): a first copy
+  started two days ago, with the media gate skipping (rc 75) at every cron slot since, used to drop out
+  of `job-stats --runs`, so F2 showed nothing running. An older open start now counts while a live
+  `zfs-job.sh` carries its label.
+- F2 at 80 columns keeps the "What" column; the relation gives way (its name is in the panel title).
+- Row markers `►` / `▼` instead of `▸` / `▾`, which Courier New and Lucida Console (PuTTY) lack.
+
 ## [1.0.34] — 2026-11-28
 
 - Replica from a Proxmox replication (pvesr) target (#61): pvesr renames the snapshot being sent to
