@@ -937,7 +937,7 @@ validate_snapshot() {
     # A20 (field 2026-11-06): the snapshot can no longer be read on the source, but its
     # GUID was recorded when it was sent -- the target carrying that GUID is the same
     # proof. Proxmox VE rotates its __replicate_ snapshots every few hours and a pvesr
-    # source is never held (see hold_snapshot), so a long first copy outlives the
+    # source is never held (see acquire_inflight), so a long first copy outlives the
     # snapshot it sent.
     if [ -z "$src_guid" ] && [ -n "$sent_guid" ]; then
         src_guid=$sent_guid
@@ -1497,10 +1497,6 @@ mirror_target() {
         log 0 "Mirror (-M) on '$tgt': no common base with '$src' -- NOTHING deleted"
         return 1
     fi
-    if ! printf '%s\n' "$tgt_list" | grep_q -xF -- "$base"; then
-        log 0 "Mirror (-M) on '$tgt': the common base '$base' is not on the target under that name (matched by GUID) -- order not provable, NOTHING deleted"
-        return 1
-    fi
     # REV-20261112-196 F1: "ON THE SOURCE" MEANS THE SAME GUID, the identity the transfer
     # itself uses (find_common_snapshot). This used to compare NAMES: a snapshot renamed on
     # the source was "no longer on the source" and its only copy here was destroyed, rc 0,
@@ -1572,10 +1568,38 @@ mirror_target() {
         log 0 "Mirror (-M) on '$tgt': the target lists $_ns snapshot(s) by name but $_cnt row(s) by GUID -- the lists disagree or changed while read, NOTHING deleted"
         return 1
     fi
+    # #61 (lab pve9b 2026-11-27): the common base is found by GUID, and its NAME may differ
+    # between the sides -- pvesr renames the snapshot it is receiving to @recv-<pid>-N while
+    # a replica sends it. Its place in the target's list is then taken by GUID too (the
+    # decision below is GUID-based already, REV-20261112-196). It used to need the source's
+    # name on the target: "order not provable", rc 1, on every first copy from a pvesr target.
+    # Still refused: a base whose GUID the target does not hold at all.
+    # REV-20261128-B01 F1: the GUID decides even when the name is there -- a name on the
+    # target may belong to ANOTHER snapshot (same name, different GUID), and the list
+    # below it would be read as older than the base. Exactly one target snapshot must
+    # carry the base's GUID (bash string comparison: exact, no 2^53 rounding).
+    local tbase="" _bg="" _tn _hits=0
+    while IFS=$'\t' read -r _n _g; do [ "$_n" = "$base" ] && _bg="$_g"; done <<< "$src_gl"
+    if [ -z "$_bg" ]; then
+        log 0 "Mirror (-M) on '$tgt': the common base '$base' has no GUID in the source's list -- order not provable, NOTHING deleted"
+        return 1
+    fi
+    while IFS= read -r _tn; do
+        [ -n "$_tn" ] && [ "${tgt_guid[$_tn]:-}" = "$_bg" ] && { tbase="$_tn"; _hits=$((_hits + 1)); }
+    done <<< "$tgt_list"
+    if [ "$_hits" -ne 1 ]; then
+        if [ "$_hits" -eq 0 ]; then
+            log 0 "Mirror (-M) on '$tgt': no snapshot on the target carries the common base's GUID $_bg (@$base on the source)$(printf '%s\n' "$tgt_list" | grep_q -xF -- "$base" && echo " -- '@$base' there is ANOTHER snapshot") -- order not provable, NOTHING deleted"
+        else
+            log 0 "Mirror (-M) on '$tgt': $_hits snapshots on the target carry the common base's GUID $_bg -- ambiguous, NOTHING deleted"
+        fi
+        return 1
+    fi
+    [ "$tbase" != "$base" ] && log 1 "Mirror (-M) on '$tgt': the common base is @$tbase here and @$base on the source (same GUID $_bg)"
     local doomed=() kept=0 gone=0 stuck=0 reserved=0
     while IFS= read -r s; do
         [ -n "$s" ] || continue
-        [ "$s" = "$base" ] && break
+        [ "$s" = "$tbase" ] && break
         _g="${tgt_guid[$s]:-}"
         if [ -z "$_g" ]; then
             log 0 "Mirror (-M) on '$tgt': '$tgt@$s' is not in the target's GUID list (changed while it was read?) -- NOTHING deleted"
@@ -1758,10 +1782,9 @@ process_dataset() {
                 # failed attempt held on the (possibly remote) source, so it
                 # can be pruned like normal again. A fresh $snapshot is about
                 # to be resolved below.
-                local stuck_snap
-                stuck_snap=$(read_inflight_snap "$tgt_dataset" "$src_dataset")
-                [ -n "$stuck_snap" ] && release_snapshot "$stuck_snap" "$remote_user" "$remote_host"
-                clear_inflight_snap "$tgt_dataset" "$src_dataset"
+                # REV-20261128-B01 F2: by the recorded GUID; a hold not proved gone
+                # keeps its record and fails this member (round 3, W6 design 7).
+                release_inflight "$tgt_dataset" "$src_dataset" "$remote_user" "$remote_host" || return 1
                 log 1 "Abandoned - falling through to normal transfer logic"
             else
                 increment_resume_attempts "$tgt_dataset" "$src_dataset"
@@ -1778,10 +1801,14 @@ process_dataset() {
                     STATS_RESUMED="yes"
                     # Resumed stream landed -- release the hold placed on the
                     # original attempt (this run never recomputes $snapshot).
-                    local resumed_snap
-                    resumed_snap=$(read_inflight_snap "$tgt_dataset" "$src_dataset")
-                    [ -n "$resumed_snap" ] && release_snapshot "$resumed_snap" "$remote_user" "$remote_host"
-                    clear_inflight_snap "$tgt_dataset" "$src_dataset"
+                    # REV-20261128-B01 F2: by the recorded GUID; not proved -> the
+                    # record stays for the next run. The bookmark first, as on the
+                    # normal path (source remote, target local here).
+                    # Round 3 (W6 design 9): the hold goes only after the anchor is verified.
+                    if ! bookmark_resumed "$src_dataset" "$tgt_dataset" "$remote_user" "$remote_host" "" ""; then
+                        unanchored "$tgt_dataset" "$src_dataset" "$remote_user" "$remote_host" || return 1
+                    fi
+                    release_inflight "$tgt_dataset" "$src_dataset" "$remote_user" "$remote_host" || return 1
                     log 1 "Resumed transfer completed successfully"
                     # Round 5 (adversarial pass): the resumed stream is an
                     # older run's point. Inside a quiesce window this member
@@ -1995,9 +2022,11 @@ process_dataset() {
     # the resume branch above; deliberately left held on failure so a stuck
     # resume keeps its source snapshot until it either succeeds or is
     # abandoned.
-    release_stale_inflight "$tgt_dataset" "$src_dataset" "$snapshot" "$remote_user" "$remote_host" || return 1
-    hold_snapshot "$snapshot" "$remote_user" "$remote_host"
-    record_inflight_snap "$tgt_dataset" "$src_dataset" "$snapshot"
+    # Round 3 (W6 design 2, 6, 9): an earlier run's point is anchored before its hold is
+    # released; the new record is durable before the new hold.
+    anchor_stale_inflight "$src_dataset" "$tgt_dataset" "$remote_user" "$remote_host" "" "" || return 1
+    release_stale_inflight "$tgt_dataset" "$src_dataset" "$snapshot" "$remote_user" "$remote_host" "$sent_guid" || return 1
+    acquire_inflight "$tgt_dataset" "$src_dataset" "$snapshot" "$sent_guid" "$remote_user" "$remote_host" || return 1
 
     # THE LEAF IS LEFT TO RECV under -w AND under an encrypted parent (W19, see
     # target_parent_encrypted in lib-zfs-snap.sh): a pre-created leaf would carry
@@ -2138,8 +2167,7 @@ process_dataset() {
         if [[ " ${tgt_snaps[*]} " == *" ${latest_snap} "* ]]; then
             if validate_snapshot "$src_dataset" "$tgt_dataset" "$latest_snap" "$remote_user" "$remote_host"; then
                 log 1 "Snapshot already exists in target - skipping"
-                release_snapshot "$snapshot" "$remote_user" "$remote_host"
-                clear_inflight_snap "$tgt_dataset" "$src_dataset"
+                release_inflight "$tgt_dataset" "$src_dataset" "$remote_user" "$remote_host" || return 1
                 return 0
             else
                 log 1 "Snapshot exists but timestamps differ - forcing full pull"
@@ -2598,8 +2626,7 @@ process_dataset() {
         # so release now instead of stranding it un-prunable forever. Target
         # is always local in snapget.sh.
         if [ -z "$(get_resume_token "$tgt_dataset" "" "")" ]; then
-            release_snapshot "$snapshot" "$remote_user" "$remote_host"
-            clear_inflight_snap "$tgt_dataset" "$src_dataset"
+            release_inflight "$tgt_dataset" "$src_dataset" "$remote_user" "$remote_host" || return 1
         fi
         return 1
     }
@@ -2648,10 +2675,9 @@ process_dataset() {
     log 2 "Verified: ${tgt_dataset}@${latest_snap} carries the source's GUID"
     progress_mark_verified "$tgt_dataset" verified
 
-    # Transfer landed -- this snapshot is no longer "in flight", safe to prune
-    # on the next delsnaps.sh run like any other.
-    release_snapshot "$snapshot" "$remote_user" "$remote_host"
-    clear_inflight_snap "$tgt_dataset" "$src_dataset"
+    # Transfer landed. The hold is released further down, AFTER the bookmark
+    # (REV-20261128-B01 F1): released first, pvesr could destroy the snapshot
+    # before the bookmark that anchors the next increment was made from it.
 
     # Under -w the leaf was created by recv, not by us, so it never got
     # canmount=noauto at create time. Reapply it now: it is what keeps the
@@ -2677,7 +2703,19 @@ process_dataset() {
     # which path got us here (common-base incremental, bookmark incremental,
     # or FULL) -- see record_send_bookmark in lib-zfs-snap.sh. Source may be
     # remote here.
-    [ $RECURSIVE -ne 1 ] && record_send_bookmark "$src_dataset" "$latest_snap" "$tgt_dataset" "$remote_user" "$remote_host" "$IDENTIFIER"
+    # Round 3 (W6 design 9): without a verified anchor the hold is kept (unanchored).
+    local anchored=1
+    if [ $RECURSIVE -ne 1 ] && ! record_send_bookmark "$src_dataset" "$latest_snap" "$tgt_dataset" "$remote_user" "$remote_host" "$IDENTIFIER" "$sent_guid"; then
+        unanchored "$tgt_dataset" "$src_dataset" "$remote_user" "$remote_host" || anchored=0
+    fi
+
+    # Now this snapshot is no longer "in flight", safe to prune like any other.
+    # REV-20261128-B01 F2: a hold not proved gone keeps its record (the next run
+    # retries the release before its own hold) and this member reports failure.
+    local held_left=0
+    if [ $anchored -eq 1 ]; then
+        release_inflight "$tgt_dataset" "$src_dataset" "$remote_user" "$remote_host" || held_left=1
+    fi
 
     if [ "$SOURCE_KEEP" -gt 0 ]; then
         if [ $RECURSIVE -eq 1 ]; then
@@ -2687,6 +2725,11 @@ process_dataset() {
         fi
     fi
 
+    if [ $held_left -eq 1 ]; then
+        log 0 "The transfer landed and is verified, but the in-flight hold '$HOLD_TAG' on the source is not proved released -- reported as FAILED so it is seen; the next run retries the release"
+        return 1
+    fi
+    [ $anchored -eq 1 ] || return 1
     log 1 "Transfer completed successfully"
     return 0
 }

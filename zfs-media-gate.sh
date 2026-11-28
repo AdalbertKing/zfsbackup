@@ -386,7 +386,13 @@ if [ "$VERB" = age ]; then
             _hb() { if [ "$1" -ge 1073741824 ] 2>/dev/null; then _t=$(( $1 * 10 / 1073741824 )); echo "$(( _t / 10 )).$(( _t % 10 ))G"; else echo "$(( ${1:-0} / 1048576 ))M"; fi; }
             _ptxt=", now $1: $(_hb "$3")"
             [ "$2" -gt 0 ] 2>/dev/null && _ptxt="$_ptxt of $(_hb "$2")"
-            [ "$4" -gt 0 ] 2>/dev/null && _ptxt="$_ptxt at $(( $4 / 1048576 ))M/s"
+            # #63 (lab pve9b 2026-11-27): the movement check counts wire_bytes too (#49), so
+            # the text names it when it is ahead of done_bytes -- "364M" alone hid 549M sent.
+            # And a rate under 1 MiB/s is KiB, not "0M/s" (integer division).
+            _wb=$(printf '%s\n' "$_recs" | grep -F "\"target\":\"$1\"" | tail -1 | sed -n 's/.*"wire_bytes":\([0-9]*\).*/\1/p')
+            [ "${_wb:-0}" -gt "$3" ] 2>/dev/null && _ptxt="$_ptxt ($(_hb "$_wb") on the wire)"
+            if [ "$4" -ge 1048576 ] 2>/dev/null; then _ptxt="$_ptxt at $(( $4 / 1048576 ))M/s"
+            elif [ "$4" -gt 0 ] 2>/dev/null; then _ptxt="$_ptxt at $(( $4 / 1024 ))K/s"; fi
             [ "$5" -gt 0 ] 2>/dev/null && _ptxt="$_ptxt, dataset ends ~$(date -d "@$(( _now + $5 ))" '+%Y-%m-%d %H:%M' 2>/dev/null)"
         fi
         _ff="$STATE_DIR/$LABEL.flow"; _fp=""; _ft=""; _fs=""

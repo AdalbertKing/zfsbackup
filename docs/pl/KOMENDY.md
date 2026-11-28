@@ -316,7 +316,7 @@ Pełne flagi: `zfs-backup.sh --help`. Czasowniki bez `--yes` tylko planują.
 | `run-relation` | jedna kopia teraz każdego datasetu relacji, jej najdrobniejszym zainstalowanym zadaniem; odmowa, gdy relacja jest spauzowana | `zfs-backup.sh run-relation NAZWA` |
 | `replica-restart` | replika ze zerwanym łańcuchem zaczyna od nowa na tym samym dysku: pełna kopia obok starej, którą niszczy dopiero udana nowa | `zfs-backup.sh replica-restart usb1 --yes` |
 | `remove-replica` | zatrzymaj zadanie, a z `--install` usuń jego pliki stanu; kopia na nośniku zostaje, kopia trwająca w tej chwili jest nazwana i nie jest zatrzymywana | `zfs-backup.sh remove-replica usb1 --install` |
-| `install-media-trigger` / `remove-media-trigger` | opcjonalna reguła udev, która uruchamia repliki po pojawieniu się dysku z etykietą ZFS: tylko te repliki, których to nośnik (według GUID puli, a bez listy GUID według nazwy puli). Na hoście ze starszą regułą uruchom ponownie `install-media-trigger --install` | `zfs-backup.sh install-media-trigger --install` |
+| `install-media-trigger` / `remove-media-trigger` | opcjonalna reguła udev, która uruchamia repliki po pojawieniu się dysku z etykietą ZFS: tylko te repliki, których to nośnik (według GUID puli, a bez listy GUID według nazwy puli). Na hoście ze starszą regułą uruchom ponownie `install-media-trigger --install`. Zdjęcie reguły: `remove-media-trigger --remove` (bez flagi tylko plan; dawne `--install` nadal działa) | `zfs-backup.sh install-media-trigger --install` |
 
 Opcje `add-replica` warte znania: `--passive` (bez własnych snapshotów, niesie istniejące;
 `--exclude-family=A,B` pomija rodziny takie jak `__replicate_`), `--keep=N` (nośnik trzyma własnych N

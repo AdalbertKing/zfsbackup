@@ -465,7 +465,7 @@ front end never edits the config file:
                                     nightly run never runs this. Running both is
                                     fine -- the nightly run then finds nothing
                                     written and skips without importing.
-  zfs-backup.sh remove-media-trigger [--install]
+  zfs-backup.sh remove-media-trigger [--remove]
                                     Take that opt-in back. Removes only the rule
                                     this tool wrote; cron entries are untouched.
   zfs-backup.sh show-tiers NAME [--json]
@@ -8376,7 +8376,7 @@ media_smr_warning() {   # <whole-disk device>
 # this GUID (what the replica list and the gate will see), 1 otherwise.
 media_scan_sees() {
     [ -n "$1" ] || return 1
-    zpool import 2>/dev/null | awk -v g="$1" '$1 == "id:" && $2 == g {f=1} END {exit !f}'
+    zpool import 2>/dev/null | awk -v g="$1" '$1 == "id:" && ($2 "") == (g "") {f=1} END {exit !f}'
 }
 
 # media_blkid_refresh DEVICE -- re-probe DEVICE and its partitions into the
@@ -8601,7 +8601,9 @@ cmd_remove_media_trigger() {
         case "$a" in
             --rules=*)  rules="${a#*=}" ;;
             --plan)     do_install=0 ;;
-            --install)  do_install=1 ;;
+            # #57 (pve2 2026-11-27): "--install" to REMOVE misled; --remove (and --yes) do
+            # the same, --install stays for compatibility (the GUI passes it).
+            --install|--remove|--yes)  do_install=1 ;;
             -*)         die "remove-media-trigger: unknown option '$a'" ;;
             *)          die "remove-media-trigger: takes no positional arguments" ;;
         esac
@@ -8612,7 +8614,7 @@ cmd_remove_media_trigger() {
     if [ "$do_install" -ne 1 ]; then
         echo ">>> to be removed: $rules"
         echo "This is a plan only -- nothing was removed."
-        echo "To remove: repeat the same command with --install."
+        echo "To remove: repeat the same command with --remove."
         return 0
     fi
     rm -f "$rules" || die "remove-media-trigger: could not remove $rules"
@@ -8824,7 +8826,11 @@ cmd_add_replica() {   # <name> --source=DS [--source=DS2 ...] --dst=POOL/BASE [.
             [ "$_pskip" -eq 1 ] || _pv="$_pv $_pd"
         done < <(pvesr_targets_under "$_s2" "$rec")
     done
-    [ -z "$_pv" ] || warn "a Proxmox replication (pvesr) target is in this replica:$_pv. pvesr receives there with 'zfs recv -F', and while this replica's copy of it runs -- hours or days on a USB disk -- pvesr fails every run (pve0, 2026-11-27). Leave it out with --exclude-child=<pattern> (it is usually on the medium already through the relationship that pulls the guest), or accept that pvesr waits for the copy."
+    # #62 (owner 2026-11-28, "Ostrzeżenie dokładne"): said precisely, still not refused --
+    # the first copy is a full one and stops pvesr for as long as it runs; every later copy
+    # only for its increment. The copy itself survives pvesr renaming and destroying the
+    # snapshot it sends (#61).
+    [ -z "$_pv" ] || warn "a Proxmox replication (pvesr) target is in this replica:$_pv. pvesr receives there with 'zfs recv -F', and it fails for as long as this replica sends from that dataset: the FIRST copy is a full one -- hours or days on a USB disk (pve0, 2026-11-27: 100-0 stood for a day) -- and every later copy only for its increment, usually minutes; pvesr catches up on its next run. Leave it out with --exclude-child=<pattern> if pvesr must not stop (it is usually on the medium already through the relationship that pulls the guest)."
 
     # AN ENCRYPTED DATASET WITHOUT ITS KEY GOES ONLY RAW (tutorial lab, 2026-11-17).
     # A plain `zfs send` of it fails with "dataset key must be loaded", so a replica

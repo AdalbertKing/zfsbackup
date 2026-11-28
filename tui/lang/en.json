@@ -1,4 +1,5 @@
 {
+"UWAGA pvesr:%s -- cel replikacji Proxmox. Póki replika z niego wysyła, pvesr pada: pierwsza kopia jest pełna (godziny albo dni na dysku USB), każda następna tylko na czas przyrostu, zwykle minuty; potem pvesr nadrabia. Jeśli pvesr nie może stanąć -- odznacz go w koszyku.": "NOTE pvesr:%s -- a Proxmox replication target. While the replica sends from it, pvesr fails: the first copy is a full one (hours or days on a USB disk), every later one only for its increment, usually minutes; then pvesr catches up. If pvesr must not stop -- untick it in the basket.",
 "najnowsza migawka kolektora z każdego biegu; starsze -- póki kolektor je trzyma": "the collector's newest snapshot from each run; older ones while the collector keeps them",
 "migawki kolektora od pierwszej kopii, póki kolektor je trzyma (bez własnych)": "the collector's snapshots since the first copy, while the collector keeps them (none of its own)",
 "co ma być na dysku": "what goes on the disk",
@@ -579,7 +580,6 @@
 "BŁĄD (rc=%s)": "ERROR (rc=%s)",
 "BŁĄD rc=%s": "ERROR rc=%s",
 "Błąd": "Error",
-"Cała historia -- migawki, które już są (wrócisz do wczoraj, tydzień temu…); więcej miejsca": "Full history -- the snapshots that already exist (go back to yesterday, a week ago…); more space",
 "Cel": "Target",
 "Cel kopii %s pominięty automatycznie.": "Copy target %s skipped automatically.",
 "Cel nakłada się na źródło": "Target overlaps the source",
@@ -1640,7 +1640,6 @@
 "całe drzewo datasetów atomowo": "whole dataset tree atomically",
 "migawki kolektora od pierwszej kopii (istniejące)": "the collector's snapshots since the first copy (existing)",
 "migawki kolektora od pierwszej kopii": "the collector's snapshots since the first copy",
-"cała historia (istniejące, bez własnych)": "full history (existing, no own ones)",
 "cel": "target",
 "cel istnieje, brak wspólnej migawki": "target exists, no common snapshot",
 "chacha20 (szybki bez AES-NI)": "chacha20 (fast without AES-NI)",

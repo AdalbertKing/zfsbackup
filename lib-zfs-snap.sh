@@ -649,23 +649,9 @@ pvesr_planned_gone() {
     return 1
 }
 
-# Best-effort: a hold that fails to apply (e.g. a non-root user missing the
-# delegated 'hold' permission) must not abort a backup that would otherwise
-# succeed -- it just runs without the extra protection.
-hold_snapshot() {
-    local snap="$1" remote_user="${2:-}" remote_host="${3:-}"
-    if is_pvesr_managed "${snap%@*}" "$remote_user" "$remote_host"; then
-        log 2 "Not holding $snap -- ${snap%@*} is replicated by Proxmox VE (pvesr); a hold there blocks its forced receive and wedges replication"
-        return 0
-    fi
-    if [ -n "$remote_host" ]; then
-        ssh -n "${SSH_OPTS[@]}" "$remote_user@$remote_host" "zfs hold '$HOLD_TAG' '$snap'" 2>/dev/null \
-            || log 2 "Could not place hold on $snap (missing delegated 'hold'?) -- continuing without in-flight protection"
-    else
-        zfs hold "$HOLD_TAG" "$snap" 2>/dev/null \
-            || log 2 "Could not place hold on $snap (missing delegated 'hold'?) -- continuing without in-flight protection"
-    fi
-}
+# The hold itself is placed by acquire_inflight (below): best-effort as before -- a hold
+# that fails to apply (a non-root user missing the delegated 'hold' permission) does not
+# abort a backup -- but only after its record is durable, and its outcome is read by GUID.
 
 # Best-effort in the other direction too: releasing a hold that is already
 # gone (already released, or never got placed) is not an error worth failing
@@ -682,19 +668,315 @@ hold_snapshot() {
 # destroy` then reported the misleading "dataset is busy".
 # The held snapshot lives on the SOURCE, which is local for snapsend but may be
 # remote for snapget -- hence the optional remote args.
+# REV-20261128-B01 F2: one cleanup for every path (abort, transfer failure, success,
+# stuck/resumed resume, "already on the target"). It reads the record -- the ONLY reference
+# to the hold -- and drops it only when the hold is proved gone (release_inflight).
+# rc 1 = not proved; the record stays for a later run (release_stale_inflight retries it).
 abort_held_snapshot() {
     local snap="$1" tgt_dataset="$2" remote_user="${3:-}" remote_host="${4:-}"
-    release_snapshot "$snap" "$remote_user" "$remote_host"
-    clear_inflight_snap "$tgt_dataset"
+    # The record is keyed by (target, source); the source is the held snapshot's dataset.
+    # Until 2026-11-28 this cleared the key without the source -- another file -- so the
+    # record was never dropped here.
+    release_inflight "$tgt_dataset" "${snap%@*}" "$remote_user" "$remote_host"
 }
 
-release_snapshot() {
-    local snap="$1" remote_user="${2:-}" remote_host="${3:-}"
-    if [ -n "$remote_host" ]; then
-        ssh -n "${SSH_OPTS[@]}" "$remote_user@$remote_host" "zfs release '$HOLD_TAG' '$snap'" 2>/dev/null || true
-    else
-        zfs release "$HOLD_TAG" "$snap" 2>/dev/null || true
+# snap_name_by_guid <dataset> <guid> [remote_user] [remote_host]  (REV-20261128-B01 F1)
+#   0  exactly one snapshot of <dataset> (depth 1) carries <guid>; its short name is printed
+#   1  the list was read and no snapshot carries it
+#   2  not known: empty guid, the list could not be read, or more than one carries it
+# GUIDs are compared as TEXT: they are 64-bit, and awk compares numeric-looking fields
+# as doubles, so two GUIDs above 2^53 that differ in the last digits compare equal.
+snap_name_by_guid() {
+    local ds="$1" g="$2" ru="${3:-}" rh="${4:-}" gl out rc
+    [ -n "$g" ] || return 2
+    gl=$(RECURSIVE=0 get_snapshot_guids "$ds" "$ru" "$rh") || return 2
+    out=$(printf '%s\n' "$gl" | awk -F'\t' -v g="$g" '
+        ($2 "") == (g "") { n++; s = $1 }
+        END { if (n == 1) print s; exit (n == 1 ? 0 : (n > 1 ? 2 : 1)) }')
+    rc=$?
+    [ $rc -eq 0 ] && [ -n "$out" ] && { printf '%s\n' "$out"; return 0; }
+    [ $rc -eq 1 ] && return 1
+    return 2
+}
+
+# release_held <snapshot> <guid> [remote_user] [remote_host]
+#   0  the HOLD_TAG hold is gone: released, verified absent, or no snapshot carries <guid>
+#   1  not known (lookup failed, more than one match, release refused and not verified)
+# With a GUID the snapshot is found by its GUID only -- never by the old name, which a
+# rename may have given to ANOTHER snapshot (REV-20261128-B01 F1: releasing that one's hold
+# and reporting success). Without a GUID (a record written before 2026-11-28) the name is
+# all there is: it is released by name, and a name that no longer exists is "gone" only
+# when no snapshot of the dataset carries the tag at all -- a renamed, still-held snapshot
+# keeps the record, with the command to finish it by hand.
+release_held() {
+    local snap="$1" guid="$2" ru="${3:-}" rh="${4:-}" ds="${1%@*}" name rc i
+    if [ -n "$guid" ]; then
+        # REV-20261128-B01 round 3 (W6 design 4): the outcome is read by the GUID, never by
+        # the name a lookup gave -- a rename between the lookup and the release would make
+        # "that name is gone" look like "released" while the renamed snapshot keeps the hold.
+        for i in 1 2 3; do
+            name=$(guid_hold_state "$ds" "$guid" "$ru" "$rh"); rc=$?
+            case $rc in
+                0) return 0 ;;
+                1) [ "$name" != "${snap#*@}" ] && log 1 "Hold: ${snap} is now ${ds}@${name} on the source (same GUID $guid) -- releasing it there"
+                   zfs_at "$ru" "$rh" release "$HOLD_TAG" "${ds}@${name}" >/dev/null 2>&1 ;;
+                *) log 0 "Hold: could not read which snapshot of $ds carries GUID $guid, or its holds (unreadable, ambiguous, or renamed while read) -- the hold '$HOLD_TAG' on it is not proved gone"
+                   return 1 ;;
+            esac
+        done
+        name=$(guid_hold_state "$ds" "$guid" "$ru" "$rh") && return 0
+        log 0 "Hold: '$HOLD_TAG' is still on the snapshot of $ds carrying GUID $guid${name:+ (now @$name)} after 3 releases"
+        return 1
     fi
+    release_hold_verified "$snap" "$ru" "$rh"; rc=$?
+    [ $rc -eq 0 ] && return 0
+    [ $rc -eq 3 ] || return 1
+    # The name is gone. A legacy record cannot tell a rename from a destroy.
+    local held
+    held=$(snaps_held_by_tag "$ds" "$ru" "$rh") || { log 0 "Hold: $snap is gone and the holds on $ds could not be read -- a renamed snapshot may still carry '$HOLD_TAG'"; return 1; }
+    if [ -n "$held" ]; then
+        log 0 "Hold: $snap is gone, but '$HOLD_TAG' is still on: $(printf '%s ' $held)-- the record of this run names the old name only (written before 2026-11-28) and cannot tell which. Check it and release by hand: zfs release $HOLD_TAG <snapshot>"
+        return 1
+    fi
+    return 0
+}
+
+# snaps_held_by_tag <dataset> [remote_user] [remote_host]: the snapshots of <dataset>
+# (depth 1) that carry HOLD_TAG, one per line. rc 1 = could not read.
+snaps_held_by_tag() {
+    local ds="$1" ru="${2:-}" rh="${3:-}" refs names out
+    # Two checked calls, no remote pipe: the remote login shell is not ours to set pipefail in.
+    if [ -n "$rh" ]; then
+        refs=$(ssh -n "${SSH_OPTS[@]}" "$ru@$rh" "zfs list -H -o name,userrefs -t snapshot -d 1 '$ds'") || return 1
+    else
+        refs=$(zfs list -H -o name,userrefs -t snapshot -d 1 "$ds") || return 1
+    fi
+    names=$(printf '%s\n' "$refs" | awk -F'\t' '$2 ~ /^[0-9]+$/ && $2 > 0 { print $1 }')
+    [ -n "$names" ] || return 0
+    if [ -n "$rh" ]; then
+        out=$(ssh -n "${SSH_OPTS[@]}" "$ru@$rh" "zfs holds -H $(printf "'%s' " $names)") || return 1
+    else
+        # shellcheck disable=SC2086 # snapshot names carry no spaces (zfs naming rules)
+        out=$(zfs holds -H $names) || return 1
+    fi
+    printf '%s\n' "$out" | awk -F'\t' -v t="$HOLD_TAG" '$2 == t { print $1 }'
+}
+
+# zfs_at <user> <host> <zfs args...>: one zfs call, local when <host> is empty. Its status
+# is the call's (ssh's 255 included); output and stderr are the caller's.
+zfs_at() {
+    local ru="$1" rh="$2"; shift 2
+    if [ -n "$rh" ]; then ssh -n "${SSH_OPTS[@]}" "$ru@$rh" "zfs $(printf "'%s' " "$@")"
+    else zfs "$@"; fi
+}
+
+# guid_hold_state <dataset> <guid> [user] [host]  (REV-20261128-B01 round 3)
+#   0  no snapshot carries <guid>, or the one that does is read without HOLD_TAG
+#   1  the snapshot carrying <guid> holds HOLD_TAG; its current short name is printed
+#   2  not known: lookup unreadable or ambiguous, holds unreadable, or renamed on every read
+# The name is looked up again after `zfs holds`: an answer read under a name that moved
+# meanwhile belongs to whatever carries that name now, so it is read again (3 times).
+guid_hold_state() {
+    local ds="$1" g="$2" ru="${3:-}" rh="${4:-}" n n2 out hrc rc i
+    for i in 1 2 3; do
+        n=$(snap_name_by_guid "$ds" "$g" "$ru" "$rh"); rc=$?
+        [ $rc -eq 1 ] && return 0
+        [ $rc -eq 0 ] || return 2
+        out=$(zfs_at "$ru" "$rh" holds -H "${ds}@${n}" 2>/dev/null); hrc=$?
+        n2=$(snap_name_by_guid "$ds" "$g" "$ru" "$rh"); rc=$?
+        [ $rc -eq 1 ] && return 0
+        [ $rc -eq 0 ] || return 2
+        [ "$n2" = "$n" ] || continue
+        [ $hrc -eq 0 ] || return 2
+        if printf '%s\n' "$out" | awk -F'\t' -v t="$HOLD_TAG" '$2 == t { f = 1 } END { exit !f }'; then
+            printf '%s\n' "$n"; return 1
+        fi
+        return 0
+    done
+    return 2
+}
+
+# acquire_inflight <tgt> <src> <snapshot> <guid> [user] [host]  (REV-20261128-B01 round 3,
+# W6 design 2 and ruling 1). The record is written and read back BEFORE the hold, so a hold
+# never exists without the reference that releases it.
+#   0  held with its record (or already held by this job's record of the same GUID); or not
+#      held -- by policy (pvesr, GUID unknown), because the name already carries the shared
+#      tag (another job's), or best-effort (zfs refused, or the hold proved absent on the
+#      name still carrying <guid>) -- then no record is left
+#   1  the member fails: the name could not be read or no longer carries <guid> before the
+#      hold (nothing placed); the record could not be written; or the outcome could not be
+#      tied to <guid> -- the record is KEPT as pending and nothing is released
+#
+# Round 4 (REV-20261128-B01, Reviewer 2026-11-28): `zfs hold` addresses a NAME, and the name
+# can stop being G between the lookup and the hold (G renamed away, another snapshot H given
+# the name). So the record says "pending" while the hold is attempted, the name's identity is
+# read immediately before and after, and an outcome that cannot be tied to G stays pending:
+# the member fails and nothing is released -- the hold may be another job's snapshot's.
+# Never resolved by the absence of a hold on G alone.
+#   name_hold_state <snapshot> [user] [host]: "<guid> TAB <0|1 held>", rc 0; rc 2 unreadable
+name_hold_state() {
+    local snap="$1" ru="${2:-}" rh="${3:-}" gg out
+    gg=$(zfs_at "$ru" "$rh" get -H -o value guid "$snap" 2>/dev/null) || return 2
+    case "$gg" in ""|*[!0-9]*) return 2 ;; esac
+    out=$(zfs_at "$ru" "$rh" holds -H "$snap" 2>/dev/null) || return 2
+    if printf '%s\n' "$out" | awk -F'\t' -v t="$HOLD_TAG" '$2 == t { f = 1 } END { exit !f }'; then
+        printf '%s\t1\n' "$gg"
+    else
+        printf '%s\t0\n' "$gg"
+    fi
+}
+acquire_inflight() {
+    local tgt="$1" src="$2" snap="$3" g="$4" ru="${5:-}" rh="${6:-}" st before after hrc rf
+    if is_pvesr_managed "${snap%@*}" "$ru" "$rh"; then
+        log 2 "Not holding $snap -- ${snap%@*} is replicated by Proxmox VE (pvesr); a hold there blocks its forced receive and wedges replication"
+        return 0
+    fi
+    if [ -z "$g" ]; then
+        log 2 "Not holding $snap -- its GUID is not known, and a hold without the GUID in its record could not be released safely; continuing without in-flight protection"
+        return 0
+    fi
+    rf=$(inflight_snap_file "$tgt" "$src")
+    # The same snapshot already held by this job (release_stale_inflight kept it: same GUID).
+    st=$(read_inflight_state "$tgt" "$src")
+    case "$st" in ok*) [ "$(printf '%s\n' "$st" | cut -f3)" = "$g" ] && return 0 ;; esac
+    # Identity immediately before: the name must be G, and not already held under the tag
+    # (shared by every job -- a hold that is there is someone else's, not ours to record).
+    before=$(name_hold_state "$snap" "$ru" "$rh") || {
+        log 0 "Could not read the GUID and holds of $snap before holding it -- no hold placed, failing this member"
+        return 1; }
+    if [ "${before%	*}" != "$g" ]; then
+        log 0 "$snap no longer carries GUID $g (now ${before%	*}) -- renamed since it was chosen; no hold placed, failing this member"
+        return 1
+    fi
+    if [ "${before#*	}" = 1 ]; then
+        log 1 "$snap already carries '$HOLD_TAG' from another job -- not recording it as this run's; continuing without in-flight protection of our own"
+        return 0
+    fi
+    if ! write_inflight_record "$tgt" "$src" "$snap" "$g" pending; then
+        log 0 "Could not write and read back the in-flight record of $snap ($rf) -- no hold placed, failing this member"
+        return 1
+    fi
+    zfs_at "$ru" "$rh" hold "$HOLD_TAG" "$snap" >/dev/null 2>&1; hrc=$?
+    # A definite refusal is zfs's own answer (rc 1 or 2; zfs itself never exits 255); zfs
+    # places nothing on a refused single-snapshot hold. ssh 255 says nothing either way.
+    if [ $hrc -ne 0 ] && [ $hrc -ne 255 ]; then
+        if clear_inflight_snap "$tgt" "$src"; then
+            log 2 "Could not place hold on $snap (zfs refused it, rc $hrc -- missing delegated 'hold'?) -- continuing without in-flight protection"
+            return 0
+        fi
+        log 0 "zfs refused the hold on $snap, and the pending record $rf could not be removed -- failing this member"
+        return 1
+    fi
+    # Identity immediately after: the name is still G -> the outcome belongs to G.
+    after=$(name_hold_state "$snap" "$ru" "$rh"); st=$?
+    if [ $st -eq 0 ] && [ "${after%	*}" = "$g" ]; then
+        if [ "${after#*	}" = 1 ]; then
+            write_inflight_record "$tgt" "$src" "$snap" "$g" && return 0
+            log 0 "Held $snap, but its record $rf could not be finalised -- left pending, failing this member"
+            return 1
+        fi
+        if [ $hrc -ne 0 ] && clear_inflight_snap "$tgt" "$src"; then
+            log 2 "The hold on $snap did not land (ssh $hrc) -- continuing without in-flight protection"
+            return 0
+        fi
+    fi
+    log 0 "Hold on $snap: the outcome cannot be tied to GUID $g (hold rc $hrc; the name now reads '${after:-unreadable}') -- the name may have been given to another snapshot, whose hold is not ours to release. Record $rf KEPT as pending, failing this member. Reconcile by hand: zfs holds on ${snap%@*}'s snapshots, release only this job's hold, then remove the record"
+    return 1
+}
+
+# bookmark_resumed <src> <tgt> <src_user> <src_host> <tgt_user> <tgt_host>
+# After a RESUMED transfer, before its hold is released (REV-20261128-B01 round 2): the
+# resume branch returns without the normal path's bookmark, so a pvesr target could destroy
+# the resumed snapshot as soon as the hold went, and the old bookmark does not match the
+# target's new head -- the next run would need a full resend. The record's GUID is
+# bookmarked, but only when exactly one target snapshot carries it (the stream landed).
+bookmark_resumed() {
+    local src="$1" tgt="$2" su="$3" sh="$4" tu="$5" th="$6" st g n
+    [ "${RECURSIVE:-0}" -ne 1 ] || return 0
+    st=$(read_inflight_state "$tgt" "$src")
+    case "$st" in
+        none) log 1 "Bookmark after the resume: no in-flight record (no hold was placed) -- not refreshed"; return 1 ;;
+        ok*) ;;
+        pending*) log 1 "Bookmark after the resume: the in-flight record is pending (hold outcome never proved) -- not refreshed"; return 1 ;;
+        *) log 1 "Bookmark after the resume: the in-flight record has no usable GUID (older or malformed) -- not refreshed"; return 1 ;;
+    esac
+    g=$(printf '%s\n' "$st" | cut -f3)
+    # Ruling 2: anchor only after the target is proved to carry the GUID (the stream landed).
+    if ! snap_name_by_guid "$tgt" "$g" "$tu" "$th" >/dev/null; then
+        log 1 "Bookmark after the resume: no single snapshot of $tgt carries GUID $g -- not refreshed"
+        return 1
+    fi
+    n=$(printf '%s\n' "$st" | cut -f2); n="${n#*@}"
+    record_send_bookmark "$src" "$n" "$tgt" "$su" "$sh" "${IDENTIFIER:-}" "$g"
+}
+
+# unanchored <tgt> <src> [src_user] [src_host]: called when the bookmark of the sent point
+# was not made (round 3, W6 design 9). rc 1 = the member fails: a hold stands, and it is KEPT
+# with its record until a run anchors that point; or the source is pvesr's, which holds
+# nothing, so nothing protects the sent point any more. rc 0 = neither (no hold was placed
+# on a source that is not pvesr's): a warning, as before.
+unanchored() {
+    local tgt="$1" src="$2" su="${3:-}" sh="${4:-}"
+    if [ "$(read_inflight_state "$tgt" "$src")" != none ]; then
+        log 0 "Unanchored: no verified bookmark carries the point just sent from $src -- its hold '$HOLD_TAG' and record are KEPT, reported as FAILED; the next run makes the bookmark, then releases"
+        return 1
+    fi
+    if is_pvesr_managed "$src" "$su" "$sh"; then
+        log 0 "Unanchored: no verified bookmark carries the point just sent from $src, which Proxmox VE replicates and which is never held -- pvesr may destroy that snapshot, and the next run may need a full resend. Reported as FAILED"
+        return 1
+    fi
+    log 1 "Warning: no verified bookmark carries the point just sent from $src (no hold was placed) -- the common snapshot alone anchors the next increment"
+    return 0
+}
+
+# anchor_stale_inflight <src> <tgt> <su> <sh> <tu> <th>: before a NEW hold replaces the
+# record of an earlier run (round 3, W6 design 9): that run's point is bookmarked first when
+# the target still carries its GUID. rc 0 = anchored, or nothing to anchor (no record with a
+# GUID, -R, the target no longer carries it); rc 1 = the target carries it and no bookmark
+# could be made, or the target could not be read -- the hold stays, the member fails.
+anchor_stale_inflight() {
+    local src="$1" tgt="$2" su="$3" sh="$4" tu="$5" th="$6" st g n rc
+    [ "${RECURSIVE:-0}" -ne 1 ] || return 0
+    st=$(read_inflight_state "$tgt" "$src")
+    case "$st" in ok*) ;; *) return 0 ;; esac
+    g=$(printf '%s\n' "$st" | cut -f3)
+    snap_name_by_guid "$tgt" "$g" "$tu" "$th" >/dev/null; rc=$?
+    [ $rc -eq 1 ] && return 0
+    if [ $rc -ne 0 ]; then
+        log 0 "Could not read whether $tgt still carries GUID $g (the earlier run's point) -- keeping its hold and failing this member"
+        return 1
+    fi
+    n=$(printf '%s\n' "$st" | cut -f2); n="${n#*@}"
+    record_send_bookmark "$src" "$n" "$tgt" "$su" "$sh" "${IDENTIFIER:-}" "$g" && return 0
+    log 0 "The earlier run's point (GUID $g) is still not anchored by a bookmark -- keeping its hold and failing this member"
+    return 1
+}
+
+# release_inflight <tgt> <src> [remote_user] [remote_host]: release the hold the record
+# names and drop the record only when the hold is proved gone. rc 1 = the record stays.
+release_inflight() {
+    local tgt="$1" src="$2" ru="${3:-}" rh="${4:-}" st snap guid
+    st=$(read_inflight_state "$tgt" "$src")
+    case "$st" in
+        none) return 0 ;;
+        bad) log 0 "The in-flight record $(inflight_snap_file "$tgt" "$src") is unreadable or malformed -- kept; the hold it stands for is not known to be gone. Check it and 'zfs holds' on $src's snapshots by hand"
+             return 1 ;;
+        pending*)
+             # Round 4: an acquisition whose outcome was never tied to its GUID. Releasing
+             # by GUID could leave a hold on whatever snapshot took the name; releasing by
+             # name could free another job's. Neither is automatic.
+             log 0 "The in-flight record $(inflight_snap_file "$tgt" "$src") is PENDING: the hold on $(printf '%s\n' "$st" | cut -f2) (GUID $(printf '%s\n' "$st" | cut -f3)) was attempted and its outcome never proved. Kept, failing this member. Reconcile by hand: zfs holds on $src's snapshots, release only this job's hold, then remove the record"
+             return 1 ;;
+    esac
+    snap=$(printf '%s\n' "$st" | cut -f2)
+    guid=$(printf '%s\n' "$st" | cut -f3)
+    if release_held "$snap" "$guid" "$ru" "$rh"; then
+        clear_inflight_snap "$tgt" "$src" && return 0
+        log 0 "The hold of $snap is gone, but its record $(inflight_snap_file "$tgt" "$src") could not be removed"
+        return 1
+    fi
+    log 0 "Keeping the in-flight record of $snap${guid:+ (GUID $guid)} -> $tgt: its hold '$HOLD_TAG' is not proved gone. The next run retries the release before it places a new hold; by hand: zfs release $HOLD_TAG <the snapshot carrying that GUID>"
+    return 1
 }
 
 # Which exact snapshot is currently held for a given target -- tracked
@@ -709,12 +991,57 @@ inflight_snap_file() {
     echo "${LOCKDIR:-/var/run}/$(basename "$0").inflight-snap.$(job_state_key "$1" "${2:-}")"
 }
 
-record_inflight_snap() {
-    echo "$3" > "$(inflight_snap_file "$1" "${2:-}")" 2>/dev/null || true
+# The record: line 1 the snapshot name, line 2 "guid <n>" (REV-20261128-B01 F2, from
+# 2026-11-28; a record without line 2 is an older one and is read by name only). Line 1
+# stays alone on its line: clean-relationships.sh matches the record's lines exactly and
+# adopt_legacy_state reads the name's dataset.
+# write_inflight_record <tgt> <src> <snapshot> <guid>: temp file, mv, read back (round 3,
+# W6 design 2). rc 1 = not durable; no record of this run is left half-written. The temp
+# name starts with a dot so clean-relationships.sh's `*.inflight-snap.*` never reads it.
+#   write_inflight_record <tgt> <src> <snapshot> <guid> pending  -- line 3 "pending" (round 4):
+#   the hold on <snapshot> is being attempted and its outcome is not proved yet.
+write_inflight_record() {
+    local f t want="ok"
+    f=$(inflight_snap_file "$1" "${2:-}")
+    t="$(dirname "$f")/.$(basename "$f").tmp.$$"
+    if [ "${5:-}" = pending ]; then
+        { printf '%s\nguid %s\npending\n' "$3" "$4" > "$t"; } 2>/dev/null || { rm -f "$t"; return 1; }
+        want=pending
+    else
+        { printf '%s\nguid %s\n' "$3" "$4" > "$t"; } 2>/dev/null || { rm -f "$t"; return 1; }
+    fi
+    mv -f "$t" "$f" 2>/dev/null || { rm -f "$t"; return 1; }
+    [ "$(read_inflight_state "$1" "${2:-}")" = "$(printf '%s\t%s\t%s' "$want" "$3" "$4")" ]
 }
 
-read_inflight_snap() {
-    cat "$(inflight_snap_file "$1" "${2:-}")" 2>/dev/null
+# read_inflight_state <tgt> <src> (round 3, W6 design 3) prints one line:
+#   none                 no record
+#   ok<TAB>N<TAB>G       snapshot N, GUID G, held
+#   pending<TAB>N<TAB>G  a hold on name N (GUID G when attempted) whose outcome is not proved
+#                        (round 4): kept for manual reconciliation, never resolved by GUID alone
+#   legacy<TAB>N         written before 2026-11-28: line 2 absent or empty
+#   bad                  unreadable, line 1 without '@', line 2 not "guid <digits>", or a
+#                        line 3 other than "pending" (or anything after it)
+read_inflight_state() {
+    local f l1 l2 l3 g
+    f=$(inflight_snap_file "$1" "${2:-}")
+    [ -e "$f" ] || { echo none; return 0; }
+    { l1=$(sed -n 1p "$f") && l2=$(sed -n 2p "$f") && l3=$(sed -n '3,$p' "$f"); } 2>/dev/null \
+        || { echo bad; return 0; }
+    case "$l1" in *@*) ;; *) echo bad; return 0 ;; esac
+    case "$l3" in ""|pending) ;; *) echo bad; return 0 ;; esac
+    if [ -z "$l2" ]; then
+        [ -z "$l3" ] || { echo bad; return 0; }
+        printf 'legacy\t%s\n' "$l1"; return 0
+    fi
+    g="${l2#guid }"
+    case "$l2:$g" in
+        "guid "*:[0-9]*) case "$g" in
+                             *[!0-9]*) echo bad ;;
+                             *) printf '%s\t%s\t%s\n' "${l3:-ok}" "$l1" "$g" ;;
+                         esac ;;
+        *) echo bad ;;
+    esac
 }
 
 clear_inflight_snap() {
@@ -732,23 +1059,40 @@ clear_inflight_snap() {
 # REV-20261125-B01 F1: the record is the ONLY reference to that hold, so it is dropped only
 # when the hold is known to be gone; release_snapshot's blanket `|| true` is not that.
 # rc 1 = not known (ssh failed, release refused, holds unreadable): the record stays for a
-# later run and the caller must not place a new hold over it (record_inflight_snap would
+# later run and the caller must not place a new hold over it (acquire_inflight would
 # overwrite the reference) -- it fails this member before anything is touched.
 release_stale_inflight() {
-    local tgt="$1" src="$2" snap="$3" remote_user="${4:-}" remote_host="${5:-}" old
-    old=$(read_inflight_snap "$tgt" "$src")
-    [ -n "$old" ] && [ "$old" != "$snap" ] || return 0
-    log 1 "Releasing the hold on $old -- left by an earlier failed transfer whose resume state is gone"
-    if ! release_hold_verified "$old" "$remote_user" "$remote_host"; then
-        log 0 "Could not release the hold '$HOLD_TAG' on $old${remote_host:+ on $remote_user@$remote_host}, nor confirm it is gone -- keeping its record and failing this member, so the hold is not lost. Release it by hand (zfs release $HOLD_TAG $old) or let a later run retry."
+    local tgt="$1" src="$2" snap="$3" remote_user="${4:-}" remote_host="${5:-}" guid="${6:-}" st old oldg
+    st=$(read_inflight_state "$tgt" "$src")
+    case "$st" in
+        none) return 0 ;;
+        bad|pending*) release_inflight "$tgt" "$src" "$remote_user" "$remote_host"; return 1 ;;
+    esac
+    old=$(printf '%s\n' "$st" | cut -f2)
+    oldg=$(printf '%s\n' "$st" | cut -f3)
+    # Round 3 (W6 design 6, ruling 3): the same snapshot is the same GUID. A record GUID
+    # with no new GUID to compare is not known to be the same: fail before anything is
+    # written. A legacy record (no GUID) is never "the same" by its name alone -- it is
+    # released by the legacy rule first, and a new hold follows only when that is proved.
+    if [ -n "$oldg" ]; then
+        if [ -z "$guid" ]; then
+            log 0 "The in-flight record names $old (GUID $oldg), and the GUID of $snap is not known -- not known to be the same snapshot; keeping the record and failing this member"
+            return 1
+        fi
+        [ "$oldg" = "$guid" ] && return 0
+    fi
+    log 1 "Releasing the hold on $old${oldg:+ (GUID $oldg)} -- left by an earlier transfer whose resume state or cleanup is gone"
+    if ! release_inflight "$tgt" "$src" "$remote_user" "$remote_host"; then
+        log 0 "Could not release the hold '$HOLD_TAG' on $old${remote_host:+ on $remote_user@$remote_host}, nor confirm it is gone -- keeping its record and failing this member, so the hold is not lost. Release it by hand (zfs release $HOLD_TAG <the snapshot${oldg:+ with GUID $oldg}>) or let a later run retry."
         return 1
     fi
-    clear_inflight_snap "$tgt" "$src"
 }
 
 # release_hold_verified <snapshot> [remote_user] [remote_host]
-#   0  the HOLD_TAG hold is gone: released now, or verified absent -- `zfs holds` read the
-#      snapshot and the tag is not there, or zfs said the snapshot does not exist
+#   0  the HOLD_TAG hold is gone: released now, or `zfs holds` read the snapshot and the tag
+#      is not there
+#   3  zfs said the snapshot does not exist (the hold went with it -- or, after a rename,
+#      it is on the same snapshot under another name; release_held tells them apart)
 #   1  not known: release failed and the check proved nothing (ssh 255, permission, pool)
 release_hold_verified() {
     local snap="$1" ru="${2:-}" rh="${3:-}" out rc
@@ -766,7 +1110,7 @@ release_hold_verified() {
         return 1
     fi
     dataset_presence "$snap" "$ru" "$rh"
-    [ $? -eq 1 ] && return 0
+    [ $? -eq 1 ] && return 3
     return 1
 }
 
@@ -3594,19 +3938,114 @@ record_send_bookmark() {
     local remote_user="${4:-}"
     local remote_host="${5:-}"
     local identifier="${6:-}"
-    local tag mark full
+    local sent_guid="${7:-}"
+    local tag mark full new name rc
+    # #61 (lab pve9b 2026-11-27): the snapshot may carry another name by now -- pvesr renames
+    # the one it is receiving to @recv-<pid>-N while a replica sends it, and its next forced
+    # receive destroys it. The bookmark follows the GUID that was sent, whatever the name is.
+    # REV-20261128-B01 F1: the GUID decides, never the old name -- a rename may have given
+    # that name to another snapshot, and a bookmark on it would anchor a point that was
+    # never sent. No exact GUID, no refresh: the previous bookmark stays.
+    # The callers release the in-flight hold only AFTER this, so pvesr cannot destroy the
+    # snapshot between the lookup and the bookmark; a rename still can, hence the GUID check
+    # of every bookmark made here before the old one is destroyed.
     tag=$(bookmark_target_tag "$tgt_dataset" "$identifier")
     mark="tgt-${tag}"
     full="${src_dataset}#${mark}"
-    if [ -n "$remote_host" ]; then
-        ssh -n "${SSH_OPTS[@]}" "$remote_user@$remote_host" \
-            "zfs list -H -t bookmark -o name '$full' >/dev/null 2>&1 && zfs destroy '$full'; zfs bookmark '${src_dataset}@${sent_snap}' '$full'" \
-            || log 1 "Warning: failed to refresh bookmark $full on $remote_host (non-fatal)"
-    else
-        zfs list -H -t bookmark -o name "$full" >/dev/null 2>&1 && zfs destroy "$full"
-        zfs bookmark "${src_dataset}@${sent_snap}" "$full" \
-            || log 1 "Warning: failed to refresh bookmark $full (non-fatal)"
+    new="${full}-new"
+    if [ -z "$sent_guid" ]; then
+        log 1 "Warning: the GUID of ${src_dataset}@${sent_snap} is not known -- bookmark $full NOT refreshed, the previous one stays (non-fatal)"
+        return 1
     fi
+    name=$(snap_name_by_guid "$src_dataset" "$sent_guid" "$remote_user" "$remote_host"); rc=$?
+    if [ $rc -ne 0 ]; then
+        log 1 "Warning: no single snapshot of $src_dataset carries the sent GUID $sent_guid ($([ $rc -eq 1 ] && echo none || echo 'list unreadable or more than one')) -- bookmark $full NOT refreshed, the previous one stays (non-fatal)"
+        return 1
+    fi
+    [ "$name" != "$sent_snap" ] && log 1 "Bookmark: ${src_dataset}@${sent_snap} is now @${name} on the source (same GUID $sent_guid) -- bookmarking that"
+    # Round 3 (W6 design 8, ruling 2): both members are read first, a member is destroyed only
+    # while the OTHER one exists with a verified GUID, and a new member is made before the one
+    # it replaces goes. An unknown read destroys nothing. find_bookmark_base matches by GUID,
+    # so whichever member carries the sent GUID anchors the next increment.
+    local fg ng frc nrc snapf="${src_dataset}@${name}" ru="$remote_user" rh="$remote_host"
+    fg=$(bm_zfs "$ru" "$rh" state "$full"); frc=$?
+    ng=$(bm_zfs "$ru" "$rh" state "$new"); nrc=$?
+    if [ $frc -eq 2 ] || [ $nrc -eq 2 ]; then
+        log 1 "Warning: failed to refresh bookmark $full: $full or $new could not be read -- nothing destroyed, the previous bookmark stays"
+        return 1
+    fi
+    if [ $frc -eq 0 ] && [ "$fg" = "$sent_guid" ]; then
+        [ $nrc -eq 0 ] && bm_zfs "$ru" "$rh" destroy-if "$new"
+        return 0
+    fi
+    if [ $frc -eq 1 ]; then
+        # No final member: make it; a spare (any GUID) goes only after it is verified.
+        if ! bm_zfs "$ru" "$rh" bookmark "$snapf" "$full" "$sent_guid"; then
+            log 1 "Warning: failed to refresh bookmark $full: could not make it with GUID $sent_guid${ng:+ -- $new (GUID $ng) stays}"
+            return 1
+        fi
+        [ $nrc -eq 0 ] && bm_zfs "$ru" "$rh" destroy-if "$new"
+        return 0
+    fi
+    # The final member exists with another GUID. The spare slot must be free (or already the
+    # sent GUID) before the new anchor is made there; the final member stays meanwhile.
+    if [ $nrc -eq 0 ] && [ "$ng" != "$sent_guid" ]; then
+        if ! bm_zfs "$ru" "$rh" destroy-if "$new"; then
+            log 1 "Warning: failed to refresh bookmark $full: could not destroy the old spare $new -- $full stays"
+            return 1
+        fi
+        nrc=1
+    fi
+    if [ $nrc -eq 1 ] && ! bm_zfs "$ru" "$rh" bookmark "$snapf" "$new" "$sent_guid"; then
+        log 1 "Warning: failed to refresh bookmark $full: could not make $new with GUID $sent_guid -- the previous one stays"
+        return 1
+    fi
+    if ! bm_zfs "$ru" "$rh" destroy-if "$full"; then
+        log 1 "Warning: failed to refresh bookmark $full: could not destroy the previous one -- $new anchors the next increment"
+        return 1
+    fi
+    if ! bm_zfs "$ru" "$rh" bookmark "$snapf" "$full" "$sent_guid"; then
+        log 1 "Warning: failed to refresh bookmark $full: could not make it with GUID $sent_guid -- $new anchors the next increment"
+        return 1
+    fi
+    bm_zfs "$ru" "$rh" destroy-if "$new"
+    return 0
+}
+
+# bm_zfs <user> <host> state <bookmark>        rc 0 present (its GUID printed), 1 absent
+#                                              (zfs's own "not found" answer), 2 unknown
+# bm_zfs <user> <host> destroy-if <bookmark>   rc 0 = proved absent afterwards; else 1
+# bm_zfs <user> <host> bookmark <snapshot> <bookmark> <guid>  rc 0 = made AND carries <guid>
+# Local when <host> is empty. Absent is only zfs's own answer: any other failure, ssh's 255
+# included, is unknown (REV-20261128-B01 round 2 F1).
+bm_zfs() {
+    local ru="$1" rh="$2" op="$3" a="$4" b="${5:-}" g="${6:-}" got errf rc why
+    case "$op" in
+        state)
+            errf=$(mktemp) || return 2
+            got=$(zfs_at "$ru" "$rh" list -H -t bookmark -o guid "$a" 2>"$errf"); rc=$?
+            why=$(head -c 400 "$errf"); rm -f "$errf"
+            if [ $rc -eq 0 ]; then
+                case "$got" in ''|*[!0-9]*) return 2 ;; esac
+                printf '%s\n' "$got"; return 0
+            fi
+            # Measured 2026-11-28: a missing bookmark of an existing dataset is "cannot open
+            # '<ds>#<bm>': no such pool or dataset" (ZFS 2.1.11 pve9, 2.2.10 pve10); a
+            # missing dataset is "dataset does not exist".
+            [ $rc -eq 1 ] && printf '%s' "$why" | grep_q -E 'no such pool or dataset|does not exist' && return 1
+            return 2 ;;
+        destroy-if)
+            bm_zfs "$ru" "$rh" state "$a" >/dev/null; rc=$?
+            [ $rc -eq 1 ] && return 0
+            [ $rc -eq 0 ] || return 1
+            zfs_at "$ru" "$rh" destroy "$a" >/dev/null 2>&1
+            bm_zfs "$ru" "$rh" state "$a" >/dev/null
+            [ $? -eq 1 ] ;;
+        bookmark)
+            zfs_at "$ru" "$rh" bookmark "$a" "$b" >/dev/null 2>&1 || return 1
+            got=$(zfs_at "$ru" "$rh" get -H -o value guid "$b" 2>/dev/null) || return 1
+            [ "$got" = "$g" ] ;;
+    esac
 }
 
 # EXCLUSION STEP PLAN (REV-20261107-191, round 3). A single `-I common latest`

@@ -975,7 +975,7 @@ restore_plan_strategy() {   # <copy dataset> <original source> <copy snapshot ro
     # answer is "unproven", never "pick the first".
     local srcbase
     srcbase="$(zfs list -H -p -t snapshot -o name,guid,createtxg -d 1 "$srcpath" 2>/dev/null \
-               | awk -F'\t' -v g="$base_guid" '$2==g{print $1"\t"$3}')"
+               | awk -F'\t' -v g="$base_guid" '($2 "")==(g "") {print $1"\t"$3}')"  # text: 64-bit GUIDs (REV-20261128-B01 F1)
     if [ "$(printf '%s\n' "$srcbase" | grep -c .)" -eq 1 ]; then
         RESTORE_SRC_BASE_SNAP="${srcbase%%	*}"
         RESTORE_SRC_BASE_TXG="${srcbase##*	}"

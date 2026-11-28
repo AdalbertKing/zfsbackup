@@ -664,6 +664,16 @@ cron_block_ensure_line_impl() {
     # crontab) and install it with rc 0.
     local staged=""
     _ensure_fail() { rm -f "$cur" "$body" "$new" "$matches" ${staged:+"$staged"}; CRON_ERR="$1"; return 1; }
+    # REV-20261127-B02 round 2 (residual, nonblocking): the counts that feed the line-count
+    # checks have a status of their own. _ensure_count <file|-> prints how many lines of the
+    # file (or stdin) match a pattern; rc 1 when grep itself failed (rc 2) or printed no number.
+    _ensure_count() {
+        local _o _r
+        if [ "$1" = - ]; then _o=$(grep -cFf "$matches"); _r=$?; else _o=$(grep -cFf "$matches" "$1"); _r=$?; fi
+        [ "$_r" -le 1 ] || return 1
+        case "$_o" in ''|*[!0-9]*) return 1 ;; esac
+        printf '%s' "$_o"
+    }
     printf '%s\n' "$match" > "$matches" || { _ensure_fail "could not write the match patterns -- nothing written"; return 1; }
     if [ -n "$also" ]; then
         printf '%s\n' "$also" | sed '/^$/d' >> "$matches" || { _ensure_fail "could not write the older spellings -- nothing written"; return 1; }
@@ -693,7 +703,10 @@ cron_block_ensure_line_impl() {
     grep -qxF -- "$line" "$body" || { _ensure_fail "the staged block of '$name' lost the line -- nothing written"; return 1; }
     local _want_n=1
     if [ "$CRON_B" -gt 0 ] && [ "$CRON_E" -gt $((CRON_B+1)) ]; then
-        _want_n=$(( CRON_E - CRON_B - 1 - $(sed -n "$((CRON_B+1)),$((CRON_E-1))p" "$cur" | grep -cFf "$matches") + 1 ))
+        local _mo
+        _mo=$(set -o pipefail; sed -n "$((CRON_B+1)),$((CRON_E-1))p" "$cur" | _ensure_count -) \
+            || { _ensure_fail "could not count the old versions in the block of '$name' -- nothing written"; return 1; }
+        _want_n=$(( CRON_E - CRON_B - 1 - _mo + 1 ))
     fi
     [ "$(wc -l < "$body")" -eq "$_want_n" ] \
         || { _ensure_fail "the staged block of '$name' has $(wc -l < "$body") lines, expected $_want_n -- nothing written"; return 1; }
@@ -716,11 +729,17 @@ cron_block_ensure_line_impl() {
     # The result keeps the staged crontab minus exactly its loose copies of this job;
     # an empty or cut result fails here, before any write.
     local _want_c
-    _want_c=$(( $(wc -l < "$staged") - $(awk -v b="$_sb" -v e="$_se" 'NR<b || NR>e' "$staged" | grep -cFf "$matches") ))
+    local _lo _sl
+    _sl=$(wc -l < "$staged") && _lo=$(set -o pipefail; awk -v b="$_sb" -v e="$_se" 'NR<b || NR>e' "$staged" | _ensure_count -) \
+        || { _ensure_fail "could not count the loose copies of '$name' -- nothing written"; return 1; }
+    _want_c=$(( _sl - _lo ))
     if [ "$(wc -l < "$new")" -ne "$_want_c" ] || ! cron_block_locate "$new" "$name"; then
         _ensure_fail "the staged crontab has $(wc -l < "$new") lines, expected $_want_c -- nothing written"; return 1
     fi
-    CRON_ADOPTED=$(( $(grep -cFf "$matches" "$staged") - $(grep -cFf "$matches" "$new") ))
+    local _as _an
+    _as=$(_ensure_count "$staged") && _an=$(_ensure_count "$new") \
+        || { _ensure_fail "could not count the adopted lines of '$name' -- nothing written"; return 1; }
+    CRON_ADOPTED=$(( _as - _an ))
     rm -f "$staged" "$body" "$matches"
 
     if cmp -s "$cur" "$new"; then rm -f "$cur" "$new"; CRON_CHANGED=0; return 0; fi

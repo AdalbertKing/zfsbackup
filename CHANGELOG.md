@@ -6,6 +6,31 @@ when they change how the tool is used.
 
 ## [Unreleased]
 
+## [1.0.34] — 2026-11-28
+
+- Replica from a Proxmox replication (pvesr) target (#61): pvesr renames the snapshot being sent to
+  `@recv-<pid>-N` and later destroys it. The first copy used to end rc 1 ("order not provable") with no
+  bookmark, and every later run refused ("full resend needs '-f'"). When the base's name is gone, the mirror
+  finds it by GUID, and the bookmark and the in-flight hold follow the sent snapshot's GUID to its current name.
+- `add-replica` and the replica wizard's plan say how long pvesr stops for a replica of its target
+  (#62): the whole first, full copy; later copies only their increment. Not refused.
+- Media monitor: the progress text names the bytes on the wire when they are ahead of the counted ones, and a
+  rate under 1 MiB/s is given in K/s (#63).
+- `remove-media-trigger --remove` removes the rule; `--install` still works (#57).
+- Mail without `alerts.site`: the subject and sender carry the full host name alone, no "[BEZ FIRMY]"; the
+  daily report's first line is "Host: ..." (#64).
+- Daily report mail: the subject is written unfolded. Python 3.11 (Debian 12) folded it before an encoded
+  word and left the space at the end of the line, so a mail client showed two spaces ("na  źródle").
+- Crontab block writer: the counts behind its line-count checks have their own status check.
+- In-flight hold and bookmark (REV-20261128-B01): the hold record is written before the hold and names
+  the snapshot's GUID; a hold is released, and a bookmark replaced, only when the outcome is proved.
+  Changes you can see: a run whose sent point could not be bookmarked while a hold stands (or on a
+  pvesr-managed source) now ends FAILED "Unanchored" instead of a warning -- the next run bookmarks it,
+  then releases. A hold whose snapshot changed name during the hold leaves the record PENDING and the
+  dataset FAILED until it is reconciled by hand (the log says how). A snapshot already held by another
+  job is no longer recorded as this run's hold. Released with the Owner's risk acceptance before the
+  Reviewer's verdict on the last round (`61ddcbdc`).
+
 ## [1.0.33] — 2026-11-27
 
 - GUI F2: a local relation whose one snapshot line covers two datasets ("(a+b)") shows each

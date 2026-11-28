@@ -757,6 +757,26 @@ PYEOF
             elif [ "$RAW" = yes ]; then
                 echo "$(T 'Szyfrowane: źródło jest zaszyfrowane -- kopia idzie zaszyfrowana (raw), kolektor nie potrzebuje klucza')"
             fi
+            # #62 (właściciel 2026-11-28, "Ostrzeżenie dokładne"): cel replikacji Proxmox (pvesr)
+            # w źródle -- ostrzeżenie add-replica tutaj, w planie, bo po Uruchom ginie w dzienniku.
+            # Te same datasety co pvesr_targets_under w zfs-backup.sh, bez wykluczonych z koszyka.
+            _pvl=""
+            for _ps in ${SRCS//,/ }; do
+                if [ "$REC" = yes ]; then zfs list -H -t snapshot -o name -r "$_ps" 2>/dev/null
+                else zfs list -H -t snapshot -o name -d 1 "$_ps" 2>/dev/null; fi
+            done | sed -n 's/@__replicate_.*//p' | sort -u > "$TMPD/pvesr" || :
+            while IFS= read -r _pd; do
+                [ -n "$_pd" ] || continue
+                _px=0
+                for _xa in ${XARGS[@]+"${XARGS[@]}"}; do
+                    case "$_xa" in --exclude-child=*) grep -Eq -- "${_xa#--exclude-child=}" <<<"$_pd" && { _px=1; break; } ;; esac
+                done
+                [ "$_px" -eq 1 ] || _pvl="$_pvl $_pd"
+            done < "$TMPD/pvesr"
+            if [ -n "$_pvl" ]; then
+                echo
+                echo "$(T 'UWAGA pvesr:%s -- cel replikacji Proxmox. Póki replika z niego wysyła, pvesr pada: pierwsza kopia jest pełna (godziny albo dni na dysku USB), każda następna tylko na czas przyrostu, zwykle minuty; potem pvesr nadrabia. Jeśli pvesr nie może stanąć -- odznacz go w koszyku.' "$_pvl")"
+            fi
             # X10: przy kopii kolektora i przy "N ostatnich" Historia nie jest wyborem -- plan mówi,
             # co naprawdę idzie, a nie wartość, której silnik nie użyje.
             if [ "$PASSIVE" = yes ] && [ "$HIST" = newest ]; then echo "$(T 'Historia:   bieg kopiuje tylko najnowszą migawkę kolektora (bez pośrednich)')"

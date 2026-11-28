@@ -239,6 +239,12 @@ collector with its own snapshot is now set by flags only:
   `__replicate_,vzdump,__migration__` for a passive replica that has none, so the copy stands on the tool's own
   snapshots, not on the ones Proxmox replication renames every few hours. `list-replicas --json` shows the list
   as `exclude_family`.
+- **A source holding a Proxmox replication (pvesr) target**: pvesr receives there with `zfs recv -F`. While the
+  replica sends from such a dataset, pvesr fails: for the whole first copy (a full one -- hours or days on a USB
+  disk), and for each later copy only for its increment, usually minutes; then it catches up. `add-replica` and
+  the wizard's plan say so and how to leave it out (`--exclude-child`, unticking it in the basket). The copy
+  survives pvesr renaming the snapshot being sent to `@recv-<pid>-N` and destroying it afterwards: the mirror
+  finds the common base by GUID, and the bookmark and the hold follow the sent snapshot's GUID (from 1.0.34).
 
 Running outside the schedule:
 

@@ -1469,8 +1469,8 @@ bash deploy.sh --backup-user=zfsbackup  # also CREATE the delegated non-root acc
 Wartości domyślne leżą w bloku konfiguracyjnym na początku skryptu (`NOTIFY_EMAIL`, `ALERT_MODE`,
 `BACKUP_USER`, `BACKUP_USER_DATASETS`); edytuj je, żeby wybór był trwały dla hosta, albo przekaż
 flagę na jedno uruchomienie. `--email=ADDR` ustawia adres alertów, `--site=NAZWA` nazwę instalacji
-(`alerts.site`; litery, cyfry, `.` `_` `-`), którą dostają nadawca i temat każdego maila; `deploy.sh`
-ostrzega, gdy nazwy brak. `--test-mail` wysyła
+(`alerts.site`; litery, cyfry, `.` `_` `-`), którą dostają nadawca i temat każdego maila; bez niej niosą samą pełną nazwę hosta, a `deploy.sh`
+tylko o tym mówi. `--test-mail` wysyła
 próbny mail sprawdzający dostarczanie (automatycznie tylko przy pierwszej konfiguracji). Przebieg
 kończy się następnym krokiem (`zfs-backup gui`), a nie ręcznie pisanymi przepisami na cron.
 

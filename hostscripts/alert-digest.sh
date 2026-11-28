@@ -1658,10 +1658,13 @@ if E.get("DG_QUIET") == "1":
 out = []
 # #50 (a field host, 2026-11-27): a mail client may show neither the sender nor the whole
 # subject, so the body's first line says whose report this is: firm, full host, address.
+# #64 (owner 2026-11-27): unset, the host's full name is the firm -- said once, "Host: ...".
 _site = E.get("DG_SITE") or ""
+_ip = (" (%s)" % E["DG_IP"]) if E.get("DG_IP") else ""
 if not re.match(r"^[A-Za-z0-9._-]+$", _site) or _site == "-":
-    _site = u"[BEZ FIRMY]"
-out.append(u"Firma: %s -- host: %s%s" % (_site, HOST, (" (%s)" % E["DG_IP"]) if E.get("DG_IP") else ""))
+    out.append(u"Host: %s%s" % (HOST, _ip))
+else:
+    out.append(u"Firma: %s -- host: %s%s" % (_site, HOST, _ip))
 out.append(u"%s  %s   pule: %s" % (LABEL, time.strftime("%Y-%m-%d %H:%M", NOW),
            "   ".join("%s %s %s" % tuple(p) for p in pools) or "brak"))
 out.append("")
@@ -1790,7 +1793,7 @@ tr.ds td{color:%(dim)s}td.o{text-align:left;white-space:normal}
 
 msg = EmailMessage()
 msg["Subject"] = subj
-# full name (2026-11-25). formataddr quotes the display name: "[BEZ FIRMY]" (#50) unquoted
+# full name (2026-11-25). formataddr quotes the display name: a bracket or a dot unquoted
 # is a domain literal to the parser, and the From header read back as "zfs-backup" alone.
 msg["From"] = formataddr(("zfs-backup %s" % (E.get("DG_SENDER") or HOST), E.get("DG_FROM", "root")))
 msg["To"] = E.get("DG_TO", "root")
@@ -1798,7 +1801,10 @@ msg["Date"] = formatdate(localtime=True)
 msg.set_content(body)
 msg.add_attachment(page, subtype="html", charset="utf-8", filename=fname)
 with open(os.path.join(RD, "mail.eml"), "wb") as f:
-    f.write(msg.as_bytes())
+    # No header folding (2026-11-28): python 3.11 folds before an encoded word and leaves the
+    # space at the end of the line, so the subject unfolds with two spaces ("na  źródle").
+    # 998 is the RFC 5322 line limit; the bodies are encoded by set_content already.
+    f.write(msg.as_bytes(policy=msg.policy.clone(max_line_length=998)))
 
 # ASCII copies for "mail -s" when there is no sendmail (bsd-mailx sends what it is given).
 FOLD = dict(zip(u"ąćęłńóśźżĄĆĘŁŃÓŚŹŻ", "acelnoszzACELNOSZZ"))

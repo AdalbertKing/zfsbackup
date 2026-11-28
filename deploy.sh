@@ -4656,7 +4656,7 @@ fi
 # against them keeps exclusion simple at the cost of nothing new appearing
 # until the next commit -- the same tradeoff every explicit dataset list in
 # this project already makes.
-# The same tag lib-zfs-snap.sh's hold_snapshot() uses (HOLD_TAG there),
+# The same tag lib-zfs-snap.sh's acquire_inflight() uses (HOLD_TAG there),
 # duplicated as a literal rather than sourcing lib-zfs-snap.sh -- deploy.sh
 # deliberately does not (that library is the send/receive engine the
 # transfer scripts source, not something the provisioning tool needs).
@@ -6382,7 +6382,8 @@ if [ "$CHECK_ONLY" -eq 0 ] && [ -x "${REPO_DIR:-}/zfs-backup.sh" ]; then
         esac
     else
         _site=$("$REPO_DIR/zfs-backup.sh" settings get alerts.site 2>/dev/null | tail -1)
-        case "$_site" in ''|-) warn "no installation name for mails: every subject and sender says '[BEZ FIRMY] <host>' until it is set. Set it: --site=FIRM, or zfs-backup settings set alerts.site FIRM (F10)" ;; esac
+        # #64: unset is a valid state now (the full host name names the mails), so it is said, not warned.
+        case "$_site" in ''|-) log "no firm name for mails: subjects and senders carry the full host name. To put a firm in front of it: --site=FIRM, or zfs-backup settings set alerts.site FIRM (F10)" ;; esac
     fi
 fi
 

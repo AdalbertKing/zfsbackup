@@ -1001,7 +1001,7 @@ validate_snapshot() {
     # A20 (field 2026-11-06): the snapshot can no longer be read on the source, but its
     # GUID was recorded when it was sent -- the target carrying that GUID is the same
     # proof. Proxmox VE rotates its __replicate_ snapshots every few hours and a pvesr
-    # source is never held (see hold_snapshot), so a long first copy outlives the
+    # source is never held (see acquire_inflight), so a long first copy outlives the
     # snapshot it sent.
     if [ -z "$src_guid" ] && [ -n "$sent_guid" ]; then
         src_guid=$sent_guid
@@ -1423,10 +1423,9 @@ process_dataset() {
                 # Giving up on this snapshot -- release whatever the original
                 # failed attempt held, so it can be pruned like normal again.
                 # A fresh $snapshot is about to be resolved below.
-                local stuck_snap
-                stuck_snap=$(read_inflight_snap "$tgt_dataset" "$src_dataset")
-                [ -n "$stuck_snap" ] && release_snapshot "$stuck_snap" "" ""
-                clear_inflight_snap "$tgt_dataset" "$src_dataset"
+                # REV-20261128-B01 F2: by the recorded GUID; a hold not proved gone
+                # keeps its record and fails this member (round 3, W6 design 7).
+                release_inflight "$tgt_dataset" "$src_dataset" "" "" || return 1
                 log 1 "Abandoned - falling through to normal transfer logic"
             else
                 increment_resume_attempts "$tgt_dataset" "$src_dataset"
@@ -1443,10 +1442,14 @@ process_dataset() {
                     STATS_RESUMED="yes"
                     # Resumed stream landed -- release the hold placed on the
                     # original attempt (this run never recomputes $snapshot).
-                    local resumed_snap
-                    resumed_snap=$(read_inflight_snap "$tgt_dataset" "$src_dataset")
-                    [ -n "$resumed_snap" ] && release_snapshot "$resumed_snap" "" ""
-                    clear_inflight_snap "$tgt_dataset" "$src_dataset"
+                    # REV-20261128-B01 F2: by the recorded GUID; not proved -> the
+                    # record stays for the next run. The bookmark first, as on the
+                    # normal path (source local, target remote here).
+                    # Round 3 (W6 design 9): the hold goes only after the anchor is verified.
+                    if ! bookmark_resumed "$src_dataset" "$tgt_dataset" "" "" "$remote_user" "$remote_host"; then
+                        unanchored "$tgt_dataset" "$src_dataset" "" "" || return 1
+                    fi
+                    release_inflight "$tgt_dataset" "$src_dataset" "" "" || return 1
                     log 1 "Resumed transfer completed successfully"
                     # Round 5 (adversarial pass): the resumed stream is an
                     # older run's point. Inside a quiesce window this member
@@ -1649,9 +1652,11 @@ process_dataset() {
     # below and in the resume branch above; deliberately left held on failure
     # so a stuck resume keeps its source snapshot until it either succeeds or
     # is abandoned.
-    release_stale_inflight "$tgt_dataset" "$src_dataset" "$snapshot" "" "" || return 1
-    hold_snapshot "$snapshot" "" ""
-    record_inflight_snap "$tgt_dataset" "$src_dataset" "$snapshot"
+    # Round 3 (W6 design 2, 6, 9): an earlier run's point is anchored before its hold is
+    # released; the new record is durable before the new hold.
+    anchor_stale_inflight "$src_dataset" "$tgt_dataset" "" "" "$remote_user" "$remote_host" || return 1
+    release_stale_inflight "$tgt_dataset" "$src_dataset" "$snapshot" "" "" "$sent_guid" || return 1
+    acquire_inflight "$tgt_dataset" "$src_dataset" "$snapshot" "$sent_guid" "" "" || return 1
 
     # THE LEAF IS LEFT TO RECV under -w AND under an encrypted parent (W19, see
     # target_parent_encrypted in lib-zfs-snap.sh): a pre-created leaf would carry
@@ -1834,8 +1839,7 @@ process_dataset() {
         if [[ " ${tgt_snaps[*]} " == *" ${latest_snap} "* ]]; then
             if validate_snapshot "$src_dataset" "$tgt_dataset" "$latest_snap" "$remote_user" "$remote_host"; then
                 log 1 "Snapshot already exists in target - skipping"
-                release_snapshot "$snapshot" "" ""
-                clear_inflight_snap "$tgt_dataset" "$src_dataset"
+                release_inflight "$tgt_dataset" "$src_dataset" "" "" || return 1
                 return 0
             else
                 log 1 "Snapshot exists but timestamps differ - forcing full send"
@@ -2152,8 +2156,7 @@ process_dataset() {
         # snapshots" and similar), nothing will ever come back to release it,
         # so release now instead of stranding it un-prunable forever.
         if [ -z "$(get_resume_token "$tgt_dataset" "$remote_user" "$remote_host")" ]; then
-            release_snapshot "$snapshot" "" ""
-            clear_inflight_snap "$tgt_dataset" "$src_dataset"
+            release_inflight "$tgt_dataset" "$src_dataset" "" "" || return 1
         fi
         return 1
     }
@@ -2204,8 +2207,8 @@ process_dataset() {
     log 2 "Verified: ${tgt_dataset}@${latest_snap} carries the source's GUID"
     progress_mark_verified "$tgt_dataset" verified
 
-    release_snapshot "$snapshot" "" ""
-    clear_inflight_snap "$tgt_dataset" "$src_dataset"
+    # The hold is released further down, AFTER the bookmark (REV-20261128-B01 F1):
+    # released first, the snapshot could be destroyed before the bookmark was made.
 
     # Under -w the leaf was created by recv, not by us, so it never got
     # canmount=noauto at create time. Reapply it now: it is what keeps the
@@ -2247,8 +2250,18 @@ process_dataset() {
     # which path got us here (common-base incremental, bookmark incremental,
     # or FULL) -- see record_send_bookmark in lib-zfs-snap.sh. Source is
     # always local here.
-    [ $RECURSIVE -ne 1 ] && record_send_bookmark "$src_dataset" "$latest_snap" "$tgt_dataset" "" "" "$IDENTIFIER"
+    # Round 3 (W6 design 9): without a verified anchor the hold is kept (unanchored).
+    if [ $RECURSIVE -ne 1 ] && ! record_send_bookmark "$src_dataset" "$latest_snap" "$tgt_dataset" "" "" "$IDENTIFIER" "$sent_guid"; then
+        unanchored "$tgt_dataset" "$src_dataset" "" "" || return 1
+    fi
 
+    # Now this snapshot is no longer "in flight", safe to prune like any other.
+    # REV-20261128-B01 F2: a hold not proved gone keeps its record (the next run
+    # retries the release before its own hold) and this member reports failure.
+    if ! release_inflight "$tgt_dataset" "$src_dataset" "" ""; then
+        log 0 "The transfer landed and is verified, but the in-flight hold '$HOLD_TAG' on the source is not proved released -- reported as FAILED so it is seen; the next run retries the release"
+        return 1
+    fi
     log 1 "Transfer completed successfully"
     return 0
 }

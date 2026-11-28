@@ -113,12 +113,15 @@ _restore_env
 #
 # #50 (a field host, 2026-11-27, second time after #1): unset, the full host name was not
 # enough -- a host name like "pve1.<isp>.pl" names no firm, and a relay through the owner's own mailbox
-# shows the address-book name instead of the sender. Unset now says so in every subject
-# and sender: "[BEZ FIRMY] <full host>" -- loud until F10 alerts.site is set.
+# shows the address-book name instead of the sender. 1.0.32 said "[BEZ FIRMY] <full host>"
+# when unset.
+# #64 (owner 2026-11-27, "Domyślnie takie jak nazwy hostów"): unset, the firm IS the full host
+# name -- the subject and the sender carry it once, with no "[BEZ FIRMY]"; nothing has to be
+# set by hand on a production host. alerts.site still names the firm in front of it.
 zfs_mail_host() {
     local h="${HOST:-}" s="${ZFS_ALERT_SITE:-}"
     [ -n "$h" ] || h=$(hostname -f 2>/dev/null || hostname)
-    case "$s" in ""|-|*[!A-Za-z0-9._-]*) printf '[BEZ FIRMY] %s' "$h" ;; *) printf '%s %s' "$s" "$h" ;; esac
+    case "$s" in ""|-|*[!A-Za-z0-9._-]*) printf '%s' "$h" ;; *) printf '%s %s' "$s" "$h" ;; esac
 }
 # The sender's display name is the same text (2026-11-25: "zfs-backup pve0" from two firms
 # read the same, and a short name sorts nothing). A dot makes the display name a quoted

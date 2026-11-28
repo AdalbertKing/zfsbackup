@@ -315,7 +315,7 @@ Full flags: `zfs-backup.sh --help`. Verbs without `--yes` only plan.
 | `run-relation` | one copy now of every dataset of a relation, by its finest installed job; refused while the relation is paused | `zfs-backup.sh run-relation NAME` |
 | `replica-restart` | a replica whose chain broke starts again on the same disk: a full copy next to the old one, destroyed only after the new one succeeded | `zfs-backup.sh replica-restart usb1 --yes` |
 | `remove-replica` | stop the job and, with `--install`, drop its state files; the copy on the medium stays, a copy running at that moment is named and not stopped | `zfs-backup.sh remove-replica usb1 --install` |
-| `install-media-trigger` / `remove-media-trigger` | optional udev rule that runs the replicas when a disk carrying a ZFS label appears: only the replicas whose medium it is (by pool GUID, else by pool name). Re-run `install-media-trigger --install` on a host with an older rule | `zfs-backup.sh install-media-trigger --install` |
+| `install-media-trigger` / `remove-media-trigger` | optional udev rule that runs the replicas when a disk carrying a ZFS label appears: only the replicas whose medium it is (by pool GUID, else by pool name). Re-run `install-media-trigger --install` on a host with an older rule. To take it off: `remove-media-trigger --remove` (no flag: a plan only; the old `--install` still works) | `zfs-backup.sh install-media-trigger --install` |
 
 `add-replica` options worth knowing: `--passive` (no snapshots of its own, it carries the existing ones;
 `--exclude-family=A,B` skips families such as `__replicate_`), `--keep=N` (the medium keeps its own N

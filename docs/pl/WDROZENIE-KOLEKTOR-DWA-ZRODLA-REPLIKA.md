@@ -235,6 +235,12 @@ migawką ustawia się już tylko flagami:
   `__replicate_,vzdump,__migration__` pasywnej replice, która ich nie ma, żeby kopia stała na własnych migawkach
   narzędzia, a nie na tych, które replikacja Proxmoksa przemianowuje co kilka godzin. `list-replicas --json`
   pokazuje tę listę jako `exclude_family`.
+- **Źródło z celem replikacji Proxmoksa (pvesr)**: pvesr odbiera tam przez `zfs recv -F`. Póki replika wysyła
+  z takiego datasetu, pvesr pada: przy pierwszej kopii (pełnej) na cały jej czas -- godziny albo dni na dysku
+  USB -- a przy każdej następnej tylko na czas przyrostu, zwykle minuty; potem sam nadrabia. `add-replica`
+  i plan kreatora mówią to wprost i podają, jak go wykluczyć (`--exclude-child`, odznaczenie w koszyku).
+  Kopia przeżywa to, że pvesr przemianowuje wysyłaną migawkę na `@recv-<pid>-N` i potem ją kasuje: lustro
+  znajduje wspólną bazę po GUID, a zakładka i blokada idą za GUID-em wysłanej migawki (od 1.0.34).
 
 Uruchomienie poza harmonogramem:
 
